@@ -7,4 +7,5 @@ edition = "2024"
 ferrite-capability-broker = { path = "../ferrite-capability-broker" }
 ferrite-audit-log = { path = "../ferrite-audit-log" }
 ferrite-policy = { path = "../ferrite-policy" }
+ferrite-servo = { path = "../ferrite-servo" }
 uuid = { version = "1", features = ["v4"] }

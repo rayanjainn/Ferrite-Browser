@@ -3,9 +3,19 @@ use ferrite_capability_broker::{
     BrokerDecision, CapabilityBroker, CapabilityType, DenialReason, Principal, PrincipalKind,
 };
 use ferrite_policy::PolicyEngine;
+use ferrite_servo::shell::ServoShell;
 use uuid::Uuid;
 
 fn main() {
+    let arg = std::env::args().nth(1).unwrap_or_default();
+    if arg == "window" {
+        ServoShell::new().run();
+    } else {
+        run_smoke_test();
+    }
+}
+
+fn run_smoke_test() {
     // 1. Create CapabilityBroker
     let mut broker = CapabilityBroker::new();
 

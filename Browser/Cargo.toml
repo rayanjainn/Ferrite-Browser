@@ -4,5 +4,6 @@ members = [
   "crates/ferrite-capability-broker",
   "crates/ferrite-audit-log",
   "crates/ferrite-policy",
+  "crates/ferrite-servo",
 ]
 resolver = "2"

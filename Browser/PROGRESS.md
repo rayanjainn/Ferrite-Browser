@@ -35,9 +35,12 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | `ferrite-audit-log` — hash chain + SQLite | ✅ Done |
 | `ferrite-policy` — Regorus policy engine stub | ✅ Done |
 | `ferrite-shell` — integration smoke test | ✅ Done |
-| GitHub Actions CI pipeline | ⏳ Not started |
-| Servo embedding shell (Month 1 R1 task) | ⏳ Not started |
+| GitHub Actions CI pipeline | ✅ Done |
+| `ferrite-servo` crate scaffolded | ✅ Done |
+| Servo embedding shell (Month 1 R1 task) | 🔄 In progress |
 | Iced UI shell (Month 1–2 R3 task) | ⏳ Not started |
+| Extism Extension Saabdbox | ⏳ Not started |
+| Audit Log Viewer | ⏳ Not started(Wait for Iced UI Shell to be complete for final decision) |
 
 ---
 
@@ -178,16 +181,71 @@ uuid = { version = "1", features = ["v4"] }
 
 ---
 
+### `ferrite-servo` — SCAFFOLDED (2026-03-24)
+
+**Files created:**
+- `crates/ferrite-servo/Cargo.toml` — dependencies: `servo` (git tag v0.0.5), `raw-window-handle 0.6`, `winit 0.30`, `log 0.4`
+- `crates/ferrite-servo/src/lib.rs` — declares `pub mod shell`
+- `crates/ferrite-servo/src/shell.rs` — empty stub, awaiting Block 2 implementation
+
+**Root `Cargo.toml`** — added `"crates/ferrite-servo"` to workspace members.
+
+**Verified:** `cargo metadata --no-deps` lists all 5 workspace members correctly.
+
+**Not yet built:** Servo git dependency not yet resolved — see Known Issues below.
+
+### `ServoShell` — winit shell + Servo integration skeleton (2026-03-24)
+
+**File:** `crates/ferrite-servo/src/shell.rs`
+
+**API research finding:** The Servo v0.0.5 embedding API does **not** use a `WindowMethods` trait or methods like `get_coordinates()` / `get_gl_context()` — those are from an older prototype. The actual API (researched from upstream repo) is:
+- `ServoBuilder::default()` — builder pattern, not `Servo::new()`
+- `servo.set_delegate(ServoDelegate)` — global callbacks
+- `WebView` — per-tab handle; created via Servo, accessed via `WebViewDelegate` callbacks
+- `webview.load(ServoUrl)`, `webview.resize(Size2D)`, `webview.paint()`
+- `servo.spin_event_loop()` — drives Servo's internal task queue
+
+**What was implemented:**
+- `FerriteWebViewDelegate` — implements `servo::WebViewDelegate`; `notify_new_frame_ready` calls `webview.paint()`
+- `FerriteServoDelegate` — implements `servo::ServoDelegate`; all methods default no-ops for now
+- `AppHandler` struct (winit 0.30 `ApplicationHandler`):
+  - `resumed()` — creates winit window 1280×800; `#[cfg(feature = "servo")]`: builds Servo via `ServoBuilder`, sets delegate, creates WebView, loads `about:blank`, calls `spin_event_loop()` once
+  - `window_event()` — `CloseRequested` → exit; `RedrawRequested` → `spin_event_loop()` + `webview.paint()` (servo feature) + `request_redraw()`
+- `ServoShell` — `new()` + `run(self)`, `Default` impl
+
+**`ferrite-shell/Cargo.toml`** — added `ferrite-servo = { path = "../ferrite-servo" }`
+
+**`ferrite-shell/src/main.rs`** — smoke test moved to `fn run_smoke_test()`:
+- First CLI arg `"window"` → `ServoShell::new().run()` (opens window)
+- Anything else → `run_smoke_test()` (original 10-step check)
+
+**Verified:**
+- `cargo build -p ferrite-shell` — clean build, 26s
+- `cargo run -p ferrite-shell` → `Month 1-2 smoke test: ALL CHECKS PASSED`
+- `cargo run -p ferrite-shell window` → opens 1280×800 winit window
+
+---
+
+**Feature flag:** `ferrite-servo/Cargo.toml` has `[features] servo = []`. Servo code activates with `--features servo`. Build without the feature gives the bare winit shell.
+
+**Verified:**
+- `cargo build -p ferrite-shell` — clean, 3.87s
+- `cargo run -p ferrite-shell` → `Month 1-2 smoke test: ALL CHECKS PASSED`
+- `cargo run -p ferrite-shell window` → opens 1280×800 winit window
+
+---
+
 ## What To Do Next (pick up here after plan refreshes)
 
-1. **CI pipeline** — create `.github/workflows/ci.yml`
+1. **Enable servo feature** — dependency now correctly specified (`libservo`). Run `cargo build -p ferrite-servo --features servo` and fix any remaining compile errors (RenderingContext setup for WebViewBuilder).
 
-2. **Month 1 R1 task** — Servo embedding shell (separate work stream, see `PROJECT_REFERENCE.md`)
+2. **Iced UI shell** — add ferrite-types, iced dependency, tab bar + address bar
 
 ---
 
 ## Known Issues / Notes
 
-- `check.txt`, `check2.txt`, `check_output.txt` exist in `Browser/` root — these appear to be scratch files from earlier testing. Consider deleting or moving them.
-- `ferrite-policy/src/lib.rs` still has the default cargo placeholder — do not confuse this with a real implementation.
-- Rate limiting is tracked on `CapabilityToken` via the `rate_limit: Option<u32>` field but is not enforced in `CapabilityBroker::check()` yet. This is intentional — enforcement comes in Month 3.
+- `check.txt`, `check2.txt`, `check_output.txt` exist in `Browser/` root — scratch files from earlier testing. Consider deleting.
+- Rate limiting is tracked on `CapabilityToken` via `rate_limit: Option<u32>` but not enforced in `CapabilityBroker::check()` yet — intentional, enforcement comes in Month 3.
+- Servo dependency resolved: package is `libservo` (not `servo`). The servo repo root is a workspace-only manifest; the embedding library is at `components/servo/` with package name `libservo` and lib name `servo` (so Rust imports use `use servo::...`). Dep specified in `ferrite-servo/Cargo.toml` as `libservo = { git = "...", tag = "v0.0.5", optional = true }`, enabled via `--features servo`. Remaining work: wire `RenderingContext` for `WebViewBuilder` (Block 4).
+- `rusqlite` upgraded from `0.31` → `0.37` in `ferrite-audit-log` to resolve `libsqlite3-sys` link conflict with `libservo` (which requires `rusqlite ^0.37`).
