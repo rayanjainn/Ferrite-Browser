@@ -1,0 +1,10 @@
+[package]
+name = "ferrite-shell"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ferrite-capability-broker = { path = "../ferrite-capability-broker" }
+ferrite-audit-log = { path = "../ferrite-audit-log" }
+ferrite-policy = { path = "../ferrite-policy" }
+uuid = { version = "1", features = ["v4"] }

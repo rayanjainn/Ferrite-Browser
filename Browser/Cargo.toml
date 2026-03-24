@@ -1,0 +1,8 @@
+﻿[workspace]
+members = [
+  "crates/ferrite-shell",
+  "crates/ferrite-capability-broker",
+  "crates/ferrite-audit-log",
+  "crates/ferrite-policy",
+]
+resolver = "2"
