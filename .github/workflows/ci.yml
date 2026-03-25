@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'Browser/**'
+      - '.devcontainer/**'
       - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
     paths:
       - 'Browser/**'
+      - '.devcontainer/**'
       - '.github/workflows/ci.yml'
 
 defaults:
@@ -19,21 +21,38 @@ defaults:
 jobs:
   ci:
     name: Build, Lint & Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust (stable)
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake clang lld llvm python3 \
+            libssl-dev libdbus-1-dev libfreetype6-dev libfontconfig1-dev \
+            libglib2.0-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libx11-dev \
+            sqlite3 libsqlite3-dev
+        working-directory: .
+
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: Browser
+
+      - name: Fetch dependencies
+        run: cargo fetch
 
       - name: Check formatting
         run: cargo fmt --check
@@ -43,3 +62,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Build hello-ext Wasm
+        run: |
+          cd ../extensions/hello-ext
+          cargo build --target wasm32-unknown-unknown --release
+        working-directory: Browser

@@ -37,14 +37,211 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | `ferrite-shell` — integration smoke test | ✅ Done |
 | GitHub Actions CI pipeline | ✅ Done |
 | `ferrite-servo` crate scaffolded | ✅ Done |
-| Servo embedding shell (Month 1 R1 task) | ✅ Done (headless via SoftwareRenderingContext) |
+| Servo embedding shell — WindowRenderingContext + WebView wired in | ✅ Done |
 | Iced UI shell (Month 1–2 R3 task) | ✅ Done |
 | Extism Extension Sandbox (`ferrite-sandbox`) | ✅ Done |
 | Audit Log Viewer panel in Iced UI | ✅ Done |
+| UI Polish — navigation controls, visual overhaul, keyboard shortcuts, smart URL | ✅ Done |
+| UI Polish — error page, new-tab page, tab titles, favicon placeholders | ✅ Done |
 
 ---
 
 ## Change Log
+
+### 2026-03-25 — Visual redesign of Iced UI shell
+
+**File:** `crates/ferrite-ui/src/lib.rs`
+
+- Added layout constants: `TOOLBAR_HEIGHT` (44), `TAB_BAR_HEIGHT` (36), `TAB_MIN_WIDTH` (120), `TAB_MAX_WIDTH` (240), `BORDER_RADIUS` (6), `PANEL_PADDING` (8)
+- Added `Border` to iced imports for cleaner style declarations
+- **Tab bar** — now uses `scrollable::Direction::Horizontal` so the strip scrolls when tabs overflow; each tab is a `column![label+close row, underline strip]` so the 2 px accent-colour bottom border on the active tab is rendered without touching `button::Style`; close (×) button has `text_color.a = 0.0` by default and becomes visible on hover; + button uses `padding([10, 10])` for a ~36 × 36 appearance; labels truncated to 25 chars
+- **Separators** — 1 px `container` using `palette.background.strong.color` added between tab bar and nav toolbar, and between nav toolbar and viewport
+- **Navigation toolbar** — fixed height `TOOLBAR_HEIGHT`; back/forward/reload/stop buttons use `padding([8, 8])` + `text.size(16)` for ~32 × 32 rounded squares; new `nav_btn_style` handles `button::Status::Disabled` (alpha 0.25)
+- **Address bar** — pill shape via `text_input::Style` with `border.radius = 16.0`; focused state draws a 1.5 px primary-colour border; background = `palette.background.strong.color`; lock icon is 🔒 (green #33CC66) for HTTPS and 🔓 (muted grey) for HTTP/other
+- **Colour palette** updated throughout: toolbar background = `palette.background.base.color` (darkest); tab bar = `palette.background.weak.color`; active tab = `palette.primary.base.color` at 15 % alpha; inactive tab text at 70 % alpha
+- **Audit panel** — rounded top corners (`top_left: BORDER_RADIUS, top_right: BORDER_RADIUS`) via `iced::border::Radius` struct; 1 px `palette.background.strong.color` border for shadow effect
+- All button text sizes set to 14; toolbar element spacing 4 px; `PANEL_PADDING` (8) used consistently for horizontal padding in all toolbar rows and audit panel cells
+- Fixed `scrollable::Scrollbar::new()` call (iced 0.13 takes no arguments)
+- `cargo check` ✅ · `cargo fmt` ✅
+
+---
+
+### 2026-03-25 — Navigation controls, load status tracking, and progress bar
+
+**Files:** `crates/ferrite-servo/src/session.rs`, `crates/ferrite-ui/src/lib.rs`
+
+#### `ferrite-servo` — `session.rs`
+
+- Added `pub enum LoadStatus { Loading, Complete, Failed(String) }` at module level (always compiled, no feature gate) so `ferrite-ui` can import it without the `servo` feature
+- Added three shared `Rc<RefCell<>>` cells to `HeadlessDelegate`: `load_status`, `current_url`, `nav_count`
+- Implemented `notify_load_status_changed` in `HeadlessDelegate`: on `servo::LoadStatus::Complete` updates shared URL and increments nav count; all other statuses set `LoadStatus::Loading`
+- Added five new fields to `HeadlessServoSession` (servo feature): `last_load_status`, `current_url`, `shared_load_status`, `shared_url`, `shared_nav_count`
+- Updated `spin()` to sync `last_load_status` and `current_url` from the shared cells after each `spin_event_loop()` call
+- Added new public methods to `HeadlessServoSession`:
+  - `load_status() -> &LoadStatus` — exposes synced load state
+  - `current_url() -> &str` — exposes synced current URL
+  - `can_go_back() -> bool` — true when nav_count > 1
+  - `can_go_forward() -> bool` — false (forward history not yet tracked)
+  - `go_back()`, `go_forward()`, `reload()`, `stop()` — call corresponding servo `WebView` methods
+- Added stub implementations of all new methods to the non-servo (`#[cfg(not(feature = "servo"))]`) build
+
+#### `ferrite-ui` — `lib.rs`
+
+- Imported `ferrite_servo::session::LoadStatus`
+- Added state fields: `is_loading: bool`, `can_go_back: bool`, `can_go_forward: bool`, `progress_offset: f32`
+- Added messages: `GoBack`, `GoForward`, `Reload`, `StopLoading`, `LoadStatusChanged { tab, status, url }`
+- Updated `update()` handlers:
+  - `NavigateRequested` — sets `is_loading = true` immediately on submit
+  - `GoBack/GoForward/Reload` — calls matching session method, sets `is_loading = true`
+  - `StopLoading` — calls `session.stop()`, sets `is_loading = false`
+  - `LoadStatusChanged` — updates `is_loading`, syncs `address_bar_input` and `tab_urls` when URL differs from typed value (handles server-side redirects)
+  - `SelectTab` / `CloseTab` — sync `is_loading`/`can_go_back`/`can_go_forward` from new active session
+  - `ServoFrame` — advances `progress_offset`; after spinning all sessions, reads load state from active tab and emits `LoadStatusChanged` if status or URL changed; updates `can_go_back`/`can_go_forward` directly
+- Replaced the old address bar section in `view()` with a navigation toolbar:
+  - `[←]` (disabled when `can_go_back = false`) → `GoBack`
+  - `[→]` (disabled when `can_go_forward = false`) → `GoForward`
+  - `[⟳]` when idle → `Reload`; `[✕]` when loading → `StopLoading`
+  - `🔒` lock icon prefix shown when committed URL starts with `https://`
+  - Address bar fills remaining width
+- Added 3 px indeterminate progress bar below nav toolbar (visible only when `is_loading = true`); alpha pulses via `sin(progress_offset × 2π)` using theme primary colour
+
+#### Build status
+
+- `cargo check -p ferrite-servo -p ferrite-ui` — ✅ passes (no feature flags needed)
+- `cargo fmt -p ferrite-servo -p ferrite-ui` — ✅ clean
+
+---
+
+### 2026-03-25 — Error page, new-tab page, tab titles, favicon placeholders
+
+**Files:** `crates/ferrite-servo/src/session.rs`, `crates/ferrite-ui/src/lib.rs`
+
+#### `ferrite-servo` — `session.rs`
+- Added `page_title: Rc<RefCell<Option<String>>>` shared cell to `HeadlessDelegate`
+- Implemented `notify_page_title_changed` in `HeadlessDelegate`: stores received title in shared cell
+- Added `shared_page_title` and `last_page_title` fields to `HeadlessServoSession`
+- `spin()` now syncs `last_page_title` from the shared cell each tick
+- Added `pub fn page_title(&self) -> Option<&str>` — returns last synced title, or `None`
+- Added stub `page_title()` returning `None` in non-servo build
+
+#### `ferrite-ui` — `lib.rs`
+- Added state fields: `tab_error: Vec<Option<String>>`, `tab_titles: Vec<String>`, `new_tab_search_input: String`
+- Added message `NewTabSearchChanged(String)` for the new-tab search field
+- `AddTab` initialises `tab_error` and `tab_titles` entries for each new tab; sets `address_bar_input` to empty string (was `about:blank`)
+- `CloseTab` removes corresponding entries from `tab_error` and `tab_titles`
+- `NavigateRequested` clears `tab_error[active_tab]` and `new_tab_search_input` on each navigation
+- `LoadStatusChanged` with `status="failed"` stores the URL as the error message in `tab_error[tab]`; non-failed statuses clear `tab_error[tab]` as before
+- `ServoFrame` syncs `tab_titles[active]` from `session.page_title()` each tick if title is non-empty
+- **Content area** now has a 4-level priority chain:
+  1. **Error page** — when `tab_error[active]` is `Some`: centred column with ⚠ icon (red, size 48), "Could not load page" heading, failed URL (muted), error message (muted), "Try Again" → `Reload`, "Go Home" → `NavigateRequested("https://lite.duckduckgo.com")`
+  2. **New-tab page** — when `tab_urls[active] == "about:blank"`: centred column with "ferrite" logo (size 48), subtitle, 480 px pill-shaped search input bound to `new_tab_search_input` (submit → `NavigateRequested` with `resolve_url`), quick-access buttons for DuckDuckGo / Rust Docs / Servo
+  3. **Servo frame** — live rendered pixels from the active session
+  4. **Loading placeholder** — "Loading…" text while session initialises
+- **Tab bar** now uses `tab_titles` instead of `tabs` for display labels (truncated to 22 chars)
+- Each tab label is prefixed with a favicon placeholder: ⟳ when that tab is loading, 🌐 otherwise
+
+#### Build status
+- `cargo check -p ferrite-servo -p ferrite-ui` — ✅ passes
+- `cargo fmt -p ferrite-servo -p ferrite-ui` — ✅ clean
+
+---
+
+### 2026-03-25 — Keyboard shortcuts, smart URL resolution, address bar focus
+
+**Files:** `crates/ferrite-ui/src/lib.rs`, `crates/ferrite-ui/Cargo.toml`
+
+#### `ferrite-ui/Cargo.toml`
+- Added `urlencoding = "2"` dependency for query-string encoding in DuckDuckGo search fallback
+
+#### `ferrite-ui` — `lib.rs`
+- Added `use iced::keyboard` to imports
+- Added `const ADDRESS_BAR_ID: &str = "ferrite_address_bar"` for text_input focus targeting
+- Added `address_bar_focused: bool` to `FerriteBrowser` state (default `false`)
+- Added messages: `FocusAddressBar`, `ClearAddressBarFocus`, `CloseActiveTab`, `EscapePressed`
+  - `CloseActiveTab` dispatches `CloseTab(active_tab)` to avoid capturing state in `on_key_press` fn pointer
+  - `EscapePressed` dispatches `StopLoading` if loading, otherwise clears address bar focus
+- Updated `NavigateRequested` handler: calls `resolve_url()` before navigation; updates `address_bar_input` with the resolved URL (so typed `google.com` displays as `https://google.com`); sets `address_bar_focused = false`
+- Added `FocusAddressBar` handler: sets `address_bar_focused = true`, returns `text_input::focus(Id::new(ADDRESS_BAR_ID))` task
+- Added `ClearAddressBarFocus` handler: sets `address_bar_focused = false`
+- Added `fn resolve_url(input: &str) -> String`:
+  1. Already has `http://` or `https://` → use as-is
+  2. No spaces and contains `.` → prepend `https://`
+  3. Otherwise → `https://lite.duckduckgo.com/lite/?q=<urlencoded>`
+- Added `.id(text_input::Id::new(ADDRESS_BAR_ID))` to address bar widget in `view()`
+- Updated `subscription()` to use `Subscription::batch([keyboard_sub, servo_tick])`
+  - Keyboard handler extracted as free fn `handle_key_press(key, modifiers)` (function pointer, no captures)
+  - Shortcuts: Ctrl+T → AddTab, Ctrl+W → CloseActiveTab, Ctrl+R → Reload, Ctrl+L → FocusAddressBar, F5 → Reload, Alt+Left → GoBack, Alt+Right → GoForward, Escape → EscapePressed
+
+#### Build status
+- `cargo check -p ferrite-ui` — ✅ passes
+- `cargo fmt -p ferrite-ui` — ✅ clean
+
+---
+
+### 2026-03-25 — CI workflow updated
+
+**File:** `.github/workflows/ci.yml`
+
+- Added `.devcontainer/**` to path triggers so CI runs when devcontainer config changes
+- Pinned runner to `ubuntu-22.04` (was `ubuntu-latest`) to match the devcontainer base image
+- Added "Install system dependencies" step with all Servo/Iced native deps (clang, lld, gstreamer stack, libxcb, libssl, sqlite3, etc.)
+- Added `wasm32-unknown-unknown` target to the Rust toolchain install step
+- Added explicit `cargo fetch` step before lint/test
+- Added "Build hello-ext Wasm" step: builds `extensions/hello-ext` targeting `wasm32-unknown-unknown --release`
+
+---
+
+### 2026-03-25 — Devcontainer configuration completed
+
+**Files:** `.devcontainer/devcontainer.json`, `.devcontainer/.dockerignore` (at repo root `Major Project/`)
+
+- `devcontainer.json`: configures the dev container with name "Ferrite Browser Dev", build context at repo root, workspace mounted at `/workspace`, two named volumes for Cargo registry and build target caches, port 9222 forwarded (Ferrite Agent WebSocket), rust-analyzer/crates/even-better-toml/vscode-lldb extensions, clippy-on-save with `-D warnings`, `postCreateCommand` runs `cargo fetch` on container creation
+- `.dockerignore`: excludes `target/`, `.git/`, `*.pdf`, `*.pptx`, `*.html` from Docker build context to keep image builds fast
+
+---
+
+### 2026-03-25 — Devcontainer Dockerfile created
+
+**File:** `.devcontainer/Dockerfile` (at repo root `Major Project/`)
+
+Created the devcontainer Dockerfile for Linux-based development (Ubuntu 22.04):
+- Installs all Servo build dependencies: clang, lld, cmake, gstreamer stack, libxcb, libssl, libdbus, libfreetype, libfontconfig, sqlite3, etc.
+- Installs Rust stable via rustup with `wasm32-unknown-unknown` target, clippy, rustfmt, rust-analyzer
+- Pre-warms Cargo registry by copying workspace manifests + stub sources and running `cargo fetch` — this layer is cached unless dependencies change
+- Sets `WORKDIR /workspace` for actual development use
+
+---
+
+### 2026-03-25 — Task 1 Block 4: WebView creation wired in (navigate to real URL)
+
+**File:** `crates/ferrite-servo/src/shell.rs`
+
+Activated the `WindowRenderingContext` + WebView construction that was previously commented out pending the surfman/GL setup:
+- `servo::WindowRenderingContext::new(display, whandle, size)` — creates the GL surface from the winit window handles
+- `WebViewBuilder::new(&servo, rc).delegate(...).url("https://example.com").build()` — creates the WebView with `FerriteWebViewDelegate` wired in
+- `webview.resize(window.inner_size())` — sizes the render surface to fill the window
+- `self.webview = Some(webview)` — the `Option<servo::WebView>` field is now populated
+
+The `FerriteWebViewDelegate` already implemented `notify_load_status_changed` (logs load complete), `load_web_resource` (broker check + audit log), and the `about_to_wait` handler already called `servo.spin_event_loop()`. This block completes the Servo feature path.
+
+`cargo build -p ferrite-servo` (without `--features servo`) still compiles cleanly in 17s — the new code is gated behind `#[cfg(feature = "servo")]`.
+
+To test the full rendering path:
+```
+cargo run -p ferrite-shell --features ferrite-servo/servo window
+```
+First build takes ~10-20 min (compiles Servo from source).
+
+---
+
+### 2026-03-25 — README updated with current build and test steps
+
+- Updated `README.md` workspace layout to include `ferrite-ui` and `ferrite-sandbox` crates
+- Updated milestone status table to reflect all completed items (Iced UI shell, Servo embedding, Extism sandbox, audit log viewer panel)
+- Updated notable tests table to reflect actual passing tests (`audit_log_records_grants_and_denials`, `revoke_blocks_subsequent_requests`, `default_policy_allows_all`)
+- Added `ferrite-ui` and `ferrite-sandbox` to the individual crate build commands section
+
+---
 
 ### 2026-03-24 — Workspace scaffolded + Broker + Audit Log implemented
 

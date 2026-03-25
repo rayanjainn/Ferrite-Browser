@@ -8,3 +8,4 @@ iced = { version = "0.13", features = ["tokio"] }
 iced_widget = { version = "0.13", features = ["image"] }
 ferrite-audit-log = { path = "../ferrite-audit-log" }
 ferrite-servo = { path = "../ferrite-servo" }
+urlencoding = "2"

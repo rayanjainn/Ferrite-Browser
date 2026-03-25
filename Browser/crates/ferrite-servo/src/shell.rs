@@ -228,53 +228,50 @@ impl ApplicationHandler for AppHandler {
         );
         self.window = Some(window.clone());
 
-        // ── Servo initialisation ────────────────────────────────────────────
+        // ── Servo initialisation (Block 4) ──────────────────────────────────
         #[cfg(feature = "servo")]
         {
+            use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
             use servo::{ServoBuilder, WebViewBuilder};
 
             // Build the Servo engine.
-            let servo = ServoBuilder::default()
-                // .event_loop_waker(waker)   // TODO: wire winit EventLoopProxy
-                // .opts(opts)                // TODO: forward CLI opts
-                // .preferences(prefs)       // TODO: load user prefs
-                .build();
+            let servo = ServoBuilder::default().build();
 
-            // Register global delegate (logging, devtools, etc.)
+            // Register global delegate.
             servo.set_delegate(Rc::new(FerriteServoDelegate));
 
-            // Create the initial WebView and load https://example.com.
-            //
-            // WebViewBuilder::new() requires a WindowRenderingContext (GL/surfman
-            // surface).  Construction sequence once wired in Block 4:
-            //
-            //   use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-            //   let display = window.display_handle().unwrap();
-            //   let whandle = window.window_handle().unwrap();
-            //   let size    = window.inner_size();
-            //   let rc = Rc::new(
-            //       servo::WindowRenderingContext::new(display, whandle, size)
-            //           .expect("rendering context"),
-            //   );
-            //   let webview = WebViewBuilder::new(&servo, rc)
-            //       .delegate(Rc::new(FerriteWebViewDelegate {
-            //           broker: self.broker.clone(),
-            //           network_token_id: self.network_token_id,
-            //           principal_id: self.principal_id,
-            //           audit_log: self.audit_log.clone(),
-            //       }))
-            //       .url(url::Url::parse("https://example.com").unwrap())
-            //       .build();
-            //   webview.resize(window.inner_size());
-            //
-            // For now leave webview as None until the rendering context is
-            // wired in (Block 4 — surfman/GL setup).
+            // Create the WindowRenderingContext (surfman/GL surface) from the
+            // native window and display handles provided by winit.
+            let display = window.display_handle().unwrap();
+            let whandle = window.window_handle().unwrap();
+            let size = window.inner_size();
+            let rc = Rc::new(
+                servo::WindowRenderingContext::new(display, whandle, size)
+                    .expect("failed to create WindowRenderingContext"),
+            );
 
-            // Spin once so Servo starts up its internal machinery.
+            // Create the top-level WebView and navigate to https://example.com.
+            // The FerriteWebViewDelegate intercepts every network request
+            // (load_web_resource) and checks it against the CapabilityBroker
+            // before allowing it to reach the network.
+            let webview = WebViewBuilder::new(&servo, rc)
+                .delegate(Rc::new(FerriteWebViewDelegate {
+                    broker: self.broker.clone(),
+                    network_token_id: self.network_token_id,
+                    principal_id: self.principal_id,
+                    audit_log: self.audit_log.clone(),
+                }))
+                .url(url::Url::parse("https://example.com").unwrap())
+                .build();
+
+            // Resize the WebView to fill the window.
+            webview.resize(window.inner_size());
+
+            // Spin once so Servo initialises its internal machinery.
             servo.spin_event_loop();
 
             self.servo = Some(servo);
-            // self.webview remains None until Block 4 (RenderingContext setup)
+            self.webview = Some(webview);
         }
     }
 

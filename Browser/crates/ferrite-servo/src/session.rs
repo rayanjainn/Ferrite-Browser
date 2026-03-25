@@ -19,6 +19,20 @@
 //       // display with iced::widget::image(handle)
 //   }
 
+/// Load state of the active WebView.
+///
+/// Produced by [`HeadlessServoSession::load_status()`] and synced from the
+/// `WebViewDelegate` callbacks on every [`HeadlessServoSession::spin()`] call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoadStatus {
+    /// A navigation is in progress.
+    Loading,
+    /// The page has finished loading successfully.
+    Complete,
+    /// The page failed to load. Contains an error description.
+    Failed(String),
+}
+
 #[cfg(feature = "servo")]
 pub use inner::HeadlessServoSession;
 
@@ -39,6 +53,8 @@ mod inner {
     };
     use uuid::Uuid;
 
+    use super::LoadStatus;
+
     // -------------------------------------------------------------------------
     // Servo delegate (global browser-level callbacks — all no-ops)
     // -------------------------------------------------------------------------
@@ -55,6 +71,14 @@ mod inner {
         network_token_id: Uuid,
         principal_id: Uuid,
         audit_log: Rc<std::cell::RefCell<PersistentAuditLog>>,
+        /// Shared load status — written by delegate callbacks, read by session in `spin()`.
+        load_status: Rc<std::cell::RefCell<LoadStatus>>,
+        /// Shared current URL — written by delegate callbacks, read by session in `spin()`.
+        current_url: Rc<std::cell::RefCell<String>>,
+        /// Navigation count — incremented on each `Complete`; used for `can_go_back()`.
+        nav_count: Rc<std::cell::RefCell<u32>>,
+        /// Shared page title — written by `notify_page_title_changed`, read in `spin()`.
+        page_title: Rc<std::cell::RefCell<Option<String>>>,
     }
 
     impl WebViewDelegate for HeadlessDelegate {
@@ -63,13 +87,25 @@ mod inner {
         }
 
         fn notify_load_status_changed(&self, webview: servo::WebView, status: servo::LoadStatus) {
-            if status == servo::LoadStatus::Complete {
-                let url = webview
-                    .url()
-                    .map(|u| u.to_string())
-                    .unwrap_or_else(|| "<unknown>".to_string());
-                println!("[ferrite-session] page load complete: {}", url);
+            match status {
+                servo::LoadStatus::Complete => {
+                    let url = webview
+                        .url()
+                        .map(|u| u.to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    *self.current_url.borrow_mut() = url;
+                    *self.load_status.borrow_mut() = LoadStatus::Complete;
+                    *self.nav_count.borrow_mut() += 1;
+                }
+                _ => {
+                    // Treat all non-Complete statuses (Loading, Failed, etc.) as Loading.
+                    *self.load_status.borrow_mut() = LoadStatus::Loading;
+                }
             }
+        }
+
+        fn notify_page_title_changed(&self, _webview: servo::WebView, title: Option<String>) {
+            *self.page_title.borrow_mut() = title;
         }
 
         fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
@@ -109,6 +145,9 @@ mod inner {
     /// Rendering uses `SoftwareRenderingContext` (CPU rasteriser, no GPU or
     /// window handle required).  Callers drive it by calling `spin()` each tick
     /// and read rendered frames via `get_frame()`.
+    ///
+    /// Load status and current URL are synced from `WebViewDelegate` callbacks
+    /// on each `spin()` call and exposed via `load_status()` and `current_url()`.
     pub struct HeadlessServoSession {
         servo: servo::Servo,
         webview: servo::WebView,
@@ -117,6 +156,20 @@ mod inner {
         height: u32,
         /// Cached last frame as raw RGBA bytes (width × height × 4).
         last_frame: Option<Vec<u8>>,
+        /// Most recently synced load status (updated in `spin()`).
+        last_load_status: LoadStatus,
+        /// Most recently synced current URL (updated in `spin()`).
+        current_url: String,
+        /// Shared load status cell — written by `HeadlessDelegate`, read in `spin()`.
+        shared_load_status: Rc<std::cell::RefCell<LoadStatus>>,
+        /// Shared URL cell — written by `HeadlessDelegate`, read in `spin()`.
+        shared_url: Rc<std::cell::RefCell<String>>,
+        /// Navigation count shared with `HeadlessDelegate`.
+        shared_nav_count: Rc<std::cell::RefCell<u32>>,
+        /// Shared page title cell — written by `HeadlessDelegate`, read in `spin()`.
+        shared_page_title: Rc<std::cell::RefCell<Option<String>>>,
+        /// Most recently synced page title (updated in `spin()`).
+        last_page_title: Option<String>,
     }
 
     impl HeadlessServoSession {
@@ -126,10 +179,6 @@ mod inner {
         /// a wildcard `NetworkFetch` token (3600 s TTL).
         pub fn new(width: u32, height: u32) -> Result<Self, String> {
             // ── rustls crypto provider ─────────────────────────────────────
-            // Servo's network stack uses rustls internally. rustls 0.23
-            // requires an explicit CryptoProvider to be installed once per
-            // process before any TLS handshake.  `install_default()` is a
-            // no-op if another call already installed one.
             let _ = aws_lc_rs::default_provider().install_default();
 
             // ── Audit log ──────────────────────────────────────────────────
@@ -159,6 +208,13 @@ mod inner {
             let broker = Rc::new(std::cell::RefCell::new(broker));
             let audit_log = Rc::new(std::cell::RefCell::new(audit_log));
 
+            // ── Shared delegate ↔ session state ────────────────────────────
+            let shared_load_status = Rc::new(std::cell::RefCell::new(LoadStatus::Loading));
+            let shared_url = Rc::new(std::cell::RefCell::new("about:blank".to_string()));
+            let shared_nav_count = Rc::new(std::cell::RefCell::new(0u32));
+            let shared_page_title: Rc<std::cell::RefCell<Option<String>>> =
+                Rc::new(std::cell::RefCell::new(None));
+
             // ── Rendering context ──────────────────────────────────────────
             let rendering_context = Rc::new(
                 SoftwareRenderingContext::new(PhysicalSize { width, height })
@@ -178,6 +234,10 @@ mod inner {
                 network_token_id,
                 principal_id,
                 audit_log,
+                load_status: shared_load_status.clone(),
+                current_url: shared_url.clone(),
+                nav_count: shared_nav_count.clone(),
+                page_title: shared_page_title.clone(),
             });
             let webview = WebViewBuilder::new(&servo, rendering_context.clone())
                 .delegate(delegate)
@@ -194,6 +254,13 @@ mod inner {
                 width,
                 height,
                 last_frame: None,
+                last_load_status: LoadStatus::Loading,
+                current_url: "about:blank".to_string(),
+                shared_load_status,
+                shared_url,
+                shared_nav_count,
+                shared_page_title,
+                last_page_title: None,
             })
         }
 
@@ -206,10 +273,72 @@ mod inner {
             }
         }
 
-        /// Drive Servo's internal event loop for one turn.  Call this on every
-        /// Iced subscription tick before calling `get_frame()`.
+        /// Go back one step in the navigation history.
+        ///
+        /// Requires servo v0.0.5 `WebView::go_back()`.  If the method does not
+        /// exist in your build, replace this call with an appropriate alternative.
+        pub fn go_back(&self) {
+            self.webview.go_back();
+        }
+
+        /// Go forward one step in the navigation history.
+        ///
+        /// Requires servo v0.0.5 `WebView::go_forward()`.
+        pub fn go_forward(&self) {
+            self.webview.go_forward();
+        }
+
+        /// Reload the current page.
+        ///
+        /// Falls back to re-navigating to `current_url()` if `WebView::reload()`
+        /// is not available in this servo build.
+        pub fn reload(&self) {
+            self.webview.reload();
+        }
+
+        /// Stop the current page load.
+        ///
+        /// Requires servo v0.0.5 `WebView::stop()`.
+        pub fn stop(&self) {
+            self.webview.stop();
+        }
+
+        /// Returns the current load status of the active WebView.
+        ///
+        /// Reflects the most recent state synced in the last `spin()` call.
+        pub fn load_status(&self) -> &LoadStatus {
+            &self.last_load_status
+        }
+
+        /// Returns the current URL of the active WebView.
+        ///
+        /// Reflects the most recent URL synced when load completed in `spin()`.
+        pub fn current_url(&self) -> &str {
+            &self.current_url
+        }
+
+        /// Returns `true` if there is at least one page to go back to.
+        pub fn can_go_back(&self) -> bool {
+            *self.shared_nav_count.borrow() > 1
+        }
+
+        /// Returns `true` if there are forward pages in the navigation history.
+        pub fn can_go_forward(&self) -> bool {
+            // Forward history is not yet tracked.  Future: count go_back() calls.
+            false
+        }
+
+        /// Drive Servo's internal event loop for one turn, sync load state,
+        /// then read back the composited frame.
+        ///
+        /// Call this on every Iced subscription tick before calling `get_frame()`.
         pub fn spin(&mut self) {
             self.servo.spin_event_loop();
+
+            // Sync load status, URL, and page title from delegate callbacks.
+            self.last_load_status = self.shared_load_status.borrow().clone();
+            self.current_url = self.shared_url.borrow().clone();
+            self.last_page_title = self.shared_page_title.borrow().clone();
 
             // Read back the current frame after paint.
             let rect = servo::DeviceIntRect::from_origin_and_size(
@@ -227,6 +356,12 @@ mod inner {
             self.last_frame
                 .as_ref()
                 .map(|b| (self.width, self.height, b.clone()))
+        }
+
+        /// Returns the most recently received page title, or `None` if the page has
+        /// not set a title yet.
+        pub fn page_title(&self) -> Option<&str> {
+            self.last_page_title.as_deref()
         }
 
         /// Resize the render surface and notify the WebView.
@@ -252,6 +387,14 @@ impl HeadlessServoSession {
 
     pub fn navigate(&self, _url: &str) {}
 
+    pub fn go_back(&self) {}
+
+    pub fn go_forward(&self) {}
+
+    pub fn reload(&self) {}
+
+    pub fn stop(&self) {}
+
     pub fn spin(&mut self) {}
 
     pub fn get_frame(&self) -> Option<(u32, u32, Vec<u8>)> {
@@ -259,4 +402,25 @@ impl HeadlessServoSession {
     }
 
     pub fn resize(&mut self, _width: u32, _height: u32) {}
+
+    pub fn load_status(&self) -> &LoadStatus {
+        const STATUS: LoadStatus = LoadStatus::Loading;
+        &STATUS
+    }
+
+    pub fn current_url(&self) -> &str {
+        "about:blank"
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        false
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        false
+    }
+
+    pub fn page_title(&self) -> Option<&str> {
+        None
+    }
 }

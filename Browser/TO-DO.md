@@ -71,7 +71,7 @@ Use servo v0.0.5 embedding API. If the exact method names differ from above, use
 ```
 Exit condition: `cargo run -p ferrite-shell window` opens a window, Servo initialises without panicking (check terminal — no crash), and the window renders (even if blank/white).![Result](/output_images/image-1.png)
 
-### Block 4: Navigate to a real URL  |  ⏳ In progress
+### Block 4: Navigate to a real URL  |  ✅ Done
 What it does: Points Servo at https://example.com and renders it. This is the Month 1 R1 milestone — "Servo renders a page".
 
 Prompt for Claude Code:
@@ -449,3 +449,483 @@ In crates/ferrite-ui/src/lib.rs:
 6. In view(): render the frame from servo_sessions[active_tab].
 ```
 Exit condition: Opening two tabs and navigating each to a different URL shows independent pages. Closing one tab doesn't affect the other.
+
+## Task 6: Containerization
+### Prompt 1:
+What it does: Creates a multi-stage Dockerfile. First stage installs all Servo build dependencies and pre-warms the Cargo registry by doing a dependency-only build. Second stage is the working image. Cargo's registry and compiled dependencies are cached in a Docker layer so subsequent builds only recompile changed code — not re-download crates.
+
+```
+Create .devcontainer/Dockerfile at the repo root
+(C:\Users\Divit\OneDrive\Desktop\Major Project\.devcontainer\Dockerfile)
+with this exact content:
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH=/usr/local/cargo/bin:$PATH
+
+# ── System dependencies ────────────────────────────────────────────────────
+# Servo requires: clang, lld, cmake, pkg-config, python3, gstreamer,
+# libdbus, libfreetype, libfontconfig, libssl, libxcb + friends
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    pkg-config \
+    cmake \
+    clang \
+    lld \
+    llvm \
+    python3 \
+    python3-pip \
+    libssl-dev \
+    libdbus-1-dev \
+    libfreetype6-dev \
+    libfontconfig1-dev \
+    libglib2.0-dev \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    libgstreamer-plugins-bad1.0-dev \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    libxcb1-dev \
+    libxcb-render0-dev \
+    libxcb-shape0-dev \
+    libxcb-xfixes0-dev \
+    libx11-dev \
+    libxext-dev \
+    libxrandr-dev \
+    libxi-dev \
+    libxcursor-dev \
+    sqlite3 \
+    libsqlite3-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Rust toolchain ─────────────────────────────────────────────────────────
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable --no-modify-path && \
+    rustup target add wasm32-unknown-unknown && \
+    rustup component add clippy rustfmt rust-analyzer
+
+# ── Pre-warm Cargo registry ────────────────────────────────────────────────
+# Copy only manifests first so this layer is cached unless deps change.
+WORKDIR /build/Browser
+COPY Browser/Cargo.toml ./Cargo.toml
+COPY Browser/crates/ferrite-shell/Cargo.toml          ./crates/ferrite-shell/Cargo.toml
+COPY Browser/crates/ferrite-capability-broker/Cargo.toml ./crates/ferrite-capability-broker/Cargo.toml
+COPY Browser/crates/ferrite-audit-log/Cargo.toml      ./crates/ferrite-audit-log/Cargo.toml
+COPY Browser/crates/ferrite-policy/Cargo.toml         ./crates/ferrite-policy/Cargo.toml
+COPY Browser/crates/ferrite-servo/Cargo.toml          ./crates/ferrite-servo/Cargo.toml
+COPY Browser/crates/ferrite-ui/Cargo.toml             ./crates/ferrite-ui/Cargo.toml
+COPY Browser/crates/ferrite-sandbox/Cargo.toml        ./crates/ferrite-sandbox/Cargo.toml
+
+# Create stub lib.rs / main.rs for each crate so `cargo fetch` resolves fully
+RUN for dir in \
+        ferrite-capability-broker \
+        ferrite-audit-log \
+        ferrite-policy \
+        ferrite-servo \
+        ferrite-ui \
+        ferrite-sandbox; do \
+    mkdir -p crates/$dir/src && \
+    echo "// stub" > crates/$dir/src/lib.rs; \
+    done && \
+    mkdir -p crates/ferrite-shell/src && \
+    echo "fn main(){}" > crates/ferrite-shell/src/main.rs
+
+# Fetch all dependencies (populates CARGO_HOME registry cache)
+RUN cargo fetch
+
+# ── Working directory for actual development ───────────────────────────────
+WORKDIR /workspace
+```
+Exit condition: `docker build -f .devcontainer/Dockerfile -t ferrite-dev .` from the `Major Project\` root completes without errors. The image exists locally.
+
+### Prompt 2:
+What it does: Creates `.devcontainer/devcontainer.json` so Antigravity detects the container automatically and offers to reopen inside it. Mounts the repo, sets the workspace, installs extensions, forwards port 9222 for the future agent WebSocket server.
+
+```
+Create .devcontainer/devcontainer.json at the repo root
+(C:\Users\Divit\OneDrive\Desktop\Major Project\.devcontainer\devcontainer.json)
+with this content:
+
+{
+  "name": "Ferrite Browser Dev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    "source=ferrite-cargo-cache,target=/usr/local/cargo/registry,type=volume",
+    "source=ferrite-target-cache,target=/workspace/Browser/target,type=volume"
+  ],
+  "forwardPorts": [9222],
+  "portsAttributes": {
+    "9222": {
+      "label": "Ferrite Agent WebSocket",
+      "onAutoForward": "silent"
+    }
+  },
+  "customizations": {
+    "antigravity": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "serayuzgur.crates",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.buildScripts.enable": true,
+        "rust-analyzer.checkOnSave.command": "clippy",
+        "rust-analyzer.checkOnSave.extraArgs": ["--", "-D", "warnings"],
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    },
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "serayuzgur.crates",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb"
+      ]
+    }
+  },
+  "postCreateCommand": "cd /workspace/Browser && cargo fetch",
+  "remoteUser": "root"
+}
+
+Also create .devcontainer/.dockerignore at the same path:
+target/
+.git/
+*.pdf
+*.pptx
+*.html
+```
+Exit condition: Antigravity shows a "Reopen in Container" notification when the `Major Project` folder is opened. Accepting it builds and opens the container. `rustc --version` inside the container terminal prints stable Rust.
+
+### Prompt 3:
+What it does: Updates `.github/workflows/ci.yml` to install the same system dependencies as the Dockerfile so CI matches the local container environment exactly. Also adds the `wasm32-unknown-unknown` target and runs `cargo fetch` before building to use GitHub's cache effectively.
+
+```
+Replace the contents of .github/workflows/ci.yml with:
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Browser/**'
+      - '.devcontainer/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Browser/**'
+      - '.devcontainer/**'
+      - '.github/workflows/ci.yml'
+
+defaults:
+  run:
+    working-directory: Browser
+
+jobs:
+  ci:
+    name: Build, Lint & Test
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake clang lld llvm python3 \
+            libssl-dev libdbus-1-dev libfreetype6-dev libfontconfig1-dev \
+            libglib2.0-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libx11-dev \
+            sqlite3 libsqlite3-dev
+        working-directory: .
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Browser
+
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy (zero warnings)
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Build hello-ext Wasm
+        run: |
+          cd ../extensions/hello-ext
+          cargo build --target wasm32-unknown-unknown --release
+        working-directory: Browser
+```
+Exit condition: Push to main. GitHub Actions runs green on the updated workflow including the Wasm build step.
+
+## Task 7: UI Polish 1.0
+### Block 1: Navigation controls + loading state
+What it does: Adds back/forward/reload/stop buttons to the toolbar. Adds a loading indicator (animated progress bar under the address bar) that appears when a page is loading. Address bar updates to the actual loaded URL after navigation. Requires adding a message channel from `HeadlessServoSession` back to the Iced event loop for load status events.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-servo/src/session.rs:
+
+1. Add a LoadStatus enum:
+   pub enum LoadStatus { Loading, Complete, Failed(String) }
+
+2. Add to HeadlessServoSession:
+   - last_load_status: LoadStatus (default Loading)
+   - current_url: String (default "about:blank")
+   - pub fn load_status(&self) -> &LoadStatus
+   - pub fn current_url(&self) -> &str
+
+3. In HeadlessDelegate (WebViewDelegate impl):
+   - Implement notify_load_status_changed (or equivalent in servo v0.0.5):
+     LoadStatus::Complete → store in session, update current_url
+     LoadStatus::Failed → store error string
+
+4. In HeadlessServoSession::spin():
+   - After servo event loop tick, update self.last_load_status from delegate
+
+---
+
+In crates/ferrite-ui/src/lib.rs:
+
+1. Add to FerriteBrowser state:
+   - is_loading: bool (default false)
+   - can_go_back: bool (default false)
+   - can_go_forward: bool (default false)
+
+2. Add to FerriteBrowserMessage:
+   - GoBack
+   - GoForward
+   - Reload
+   - StopLoading
+   - LoadStatusChanged { tab: usize, status: String, url: String }
+
+3. Add to update():
+   - GoBack → call session.go_back() if exists, set is_loading = true
+   - GoForward → call session.go_forward() if exists, set is_loading = true
+   - Reload → call session.reload() if exists, set is_loading = true
+   - StopLoading → call session.stop() if exists, set is_loading = false
+   - LoadStatusChanged → update is_loading, update address_bar_input and
+     tab_urls[tab] to the new url if different from what was typed
+   - NavigateRequested → set is_loading = true (immediately on submit)
+
+4. In the ServoFrame tick in update(), after spin():
+   - Read session.load_status() and send LoadStatusChanged if it changed
+   - Read session.can_go_back() and session.can_go_forward() and update state
+
+5. In view(), replace the current address bar row with a proper toolbar:
+   
+   Row layout (left to right):
+   [←] [→] [⟳/✕]   [🔒 https://... address bar (fills width) ]
+   
+   - Back button (←): sends GoBack, disabled (greyed) when can_go_back = false
+   - Forward button (→): sends GoForward, disabled when can_go_forward = false
+   - Reload/Stop button: shows ⟳ when not loading (sends Reload),
+     shows ✕ when is_loading = true (sends StopLoading)
+   - Address bar: full width text_input as before
+   - Show a lock icon (🔒) prefix in the address bar when url starts with https://
+   
+   Below the toolbar, when is_loading = true:
+   - A thin (3px) progress bar spanning full width using primary accent colour
+   - Animate it as a moving stripe (indeterminate) using iced subscription tick
+   - Hide it completely when is_loading = false
+```
+Exit condition: `cargo run -p ferrite-shell ui` shows the toolbar with back/forward/reload buttons. The progress bar appears when navigating and disappears when the page loads. The address bar updates to the final URL after navigation.
+
+### Block 2: Visual chrome overhaul
+What it does: Redesigns the overall visual layout to look like a real browser. Consistent spacing, proper colour hierarchy, improved tab design, tighter typography. No functional changes — purely visual.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ui/src/lib.rs, apply the following visual changes:
+
+LAYOUT CONSTANTS (define as const at top of file):
+  TOOLBAR_HEIGHT: f32 = 44.0
+  TAB_BAR_HEIGHT: f32 = 36.0
+  TAB_MIN_WIDTH: f32 = 120.0
+  TAB_MAX_WIDTH: f32 = 240.0
+  BORDER_RADIUS: f32 = 6.0
+  PANEL_PADDING: u16 = 8
+
+COLOUR PALETTE (derive from iced Theme::Dark extended palette):
+  - Window background: palette.background.base.color (darkest)
+  - Tab bar background: palette.background.weak.color (slightly lighter)
+  - Toolbar background: palette.background.base.color (same as window)
+  - Active tab: palette.primary.base.color with 0.15 alpha overlay
+  - Address bar background: palette.background.strong.color
+  - Text primary: palette.background.base.text
+  - Text secondary: Color { a: 0.6, ..palette.background.base.text }
+  - Accent: palette.primary.strong.color
+  - Danger: palette.danger.base.color
+
+TAB BAR changes:
+  - Fixed height TAB_BAR_HEIGHT
+  - Each tab is a rounded rectangle (BORDER_RADIUS) with horizontal padding 12px
+  - Tab label text: size 13, truncated to TAB_MAX_WIDTH
+  - Active tab has a 2px bottom border in accent colour
+  - Inactive tabs have no border, hover shows background.strong
+  - Close (×) button is 16x16, only visible on hover of that tab
+  - "+" button is square, 36x36, at right end of tab strip
+  - Tab strip scrolls horizontally if tabs overflow (use iced Scrollable horizontal)
+
+TOOLBAR changes:
+  - Fixed height TOOLBAR_HEIGHT
+  - Back/Forward buttons: 32x32 rounded squares, icon text size 16
+  - Reload/Stop button: 32x32 rounded square
+  - 8px gap between navigation buttons and address bar
+  - Address bar: height 32px, border radius 16px (pill shape),
+    background address bar colour, 10px horizontal padding inside
+    font size 13, monospace-ish (use default but size 13)
+  - Lock icon left of URL text, colour: green if https, grey if http/other
+  - 8px padding on each side of toolbar
+
+GENERAL:
+  - 1px separator line between tab bar and toolbar (use palette.background.strong)
+  - 1px separator line between toolbar and viewport
+  - Audit panel drawer: rounded top corners, subtle shadow effect via border
+  - All button text size: 14
+  - Consistent 4px spacing between all toolbar elements
+```
+Exit condition: `cargo run -p ferrite-shell ui` looks like a real browser. Tab bar is visually distinct from toolbar. Address bar is pill-shaped. Navigation buttons are clearly interactive. Overall impression is a polished dark-theme developer browser.
+
+### Block 3: Keyboard shortcuts + smart URL handling
+What it does: Adds the keyboard shortcuts developers expect, and makes the address bar smart — auto-prepends `https://`, and falls back to DuckDuckGo Lite search for non-URL input.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ui/src/lib.rs:
+
+1. Add keyboard shortcut handling via iced::keyboard::on_key_press subscription.
+   Merge it with the existing ServoFrame subscription using Subscription::batch.
+
+   Shortcuts:
+   Ctrl+T → AddTab
+   Ctrl+W → CloseTab(active_tab)
+   Ctrl+R or F5 → Reload
+   Ctrl+L → FocusAddressBar (new message, see below)
+   Alt+Left → GoBack
+   Alt+Right → GoForward
+   Escape → StopLoading (if is_loading), else ClearAddressBarFocus
+
+2. Add to FerriteBrowserMessage:
+   - FocusAddressBar  (selects all text in address bar, focuses it)
+   - ClearAddressBarFocus
+
+3. Add to update():
+   - FocusAddressBar → set a focused: bool = true flag on state, return
+     Task::widget(text_input::focus(ADDRESS_BAR_ID)) using iced text_input Id
+   - ClearAddressBarFocus → focused = false
+
+4. Give the address bar text_input a static Id:
+   const ADDRESS_BAR_ID: &str = "ferrite_address_bar";
+   Use text_input::Id::new(ADDRESS_BAR_ID) in view()
+
+5. Smart URL handling — update the NavigateRequested handler in update():
+
+   fn resolve_url(input: &str) -> String {
+     let trimmed = input.trim();
+     // Already has a scheme
+     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+       return trimmed.to_string();
+     }
+     // Looks like a domain (contains a dot, no spaces)
+     if !trimmed.contains(' ') && trimmed.contains('.') {
+       return format!("https://{}", trimmed);
+     }
+     // Treat as search query
+     let encoded = url_encode(trimmed); // use percent-encoding or urlencoding crate
+     format!("https://lite.duckduckgo.com/lite/?q={}", encoded)
+   }
+
+   Add urlencoding = "2" to ferrite-ui/Cargo.toml.
+   Call resolve_url on the input before passing to session.navigate().
+   Update address_bar_input and tab_urls with the resolved URL.
+```
+Exit condition: `cargo run -p ferrite-shell ui`. Press `Ctrl+T` — new tab opens. Press `Ctrl+L` — address bar focuses. Type `rust-lang.org` — navigates to `https://rust-lang.org`. Type `what is ownership in rust` — navigates to DuckDuckGo Lite search results.
+
+### Block 4: Error states + new tab page
+What it does: Handles navigation failures gracefully with an error page. Replaces the blank `about:blank` with a styled new-tab page. Updates tab titles from the actual page title. Adds a favicon placeholder.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ui/src/lib.rs:
+
+1. ERROR PAGE
+   When LoadStatusChanged arrives with status = "Failed":
+   - Set a new state field: tab_error: Vec<Option<String>> (parallel to tabs)
+     containing the error message for that tab, or None if no error
+   - In view() content area: if tab_error[active_tab] is Some(msg), render
+     an error page instead of the servo frame:
+     
+     Centred column containing:
+     - Large "⚠" icon (text, size 48, colour danger)
+     - Text "Could not load page" (size 20, bold)
+     - Text showing the failed URL (size 13, secondary colour, monospace)
+     - Text showing the error message (size 12, secondary colour)
+     - Button "Try Again" that sends Reload
+     - Button "Go Home" that sends NavigateRequested("https://lite.duckduckgo.com")
+     
+     Style: centred in the content area, comfortable vertical spacing
+
+2. NEW TAB PAGE
+   When the active tab's URL is "about:blank" and no error, render instead
+   of the servo frame:
+   
+   Centred column containing:
+   - Text "ferrite" (size 48, bold, accent colour)
+   - Text "capability-governed browser" (size 14, secondary colour)
+   - 32px vertical space
+   - A large text_input (width 480px, height 44px, pill-shaped border radius 22px)
+     placeholder: "Search or enter address"
+     on_submit → NavigateRequested (with smart URL resolution from UI-P3)
+     separate state field: new_tab_search_input: String
+   - 16px vertical space
+   - Row of quick-access link buttons (sends NavigateRequested on press):
+     "DuckDuckGo" → https://lite.duckduckgo.com
+     "Rust Docs" → https://doc.rust-lang.org
+     "Servo" → https://servo.org
+   
+   Style: dark background matching window, accent colour for the logo
+
+3. TAB TITLES
+   Add tab_titles: Vec<String> to state (parallel to tabs, default "New Tab")
+   In LoadStatusChanged handler: update tab_titles[tab] with the page title
+   if available from session.page_title() (add page_title() to HeadlessServoSession
+   returning Option<String> from the WebViewDelegate title callback)
+   In view() tab bar: use tab_titles[i] instead of tabs[i] for display
+
+4. FAVICON PLACEHOLDER
+   Add a small "🌐" text (size 12) to the left of each tab label.
+   When a tab is loading, show a "⟳" instead.
+   (Real favicons from Servo come later — this is just the placeholder)
+```
+Exit condition: `cargo run -p ferrite-shell ui`. New tab shows the Ferrite home page with working search bar. Navigating to an invalid URL shows the error page with Try Again button. Tab labels update to page titles after loading. Tabs show globe or spinner icon.

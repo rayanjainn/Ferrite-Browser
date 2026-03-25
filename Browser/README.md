@@ -47,11 +47,13 @@ Browser/                            ← Cargo workspace root
 ├── PROGRESS.md                     ← detailed change log and milestone tracker
 ├── TO-DO.md                        ← implementation task queue with prompts
 └── crates/
-    ├── ferrite-shell/              ← main binary: CLI entry point + integration smoke test
+    ├── ferrite-shell/              ← main binary: CLI entry point + integration smoke tests
     ├── ferrite-capability-broker/  ← token minting, broker logic, denial reasons
     ├── ferrite-audit-log/          ← hash-chained append-only log + SQLite persistence
     ├── ferrite-policy/             ← Regorus Rego policy engine integration
-    └── ferrite-servo/              ← winit window shell + Servo embedding (feature-gated)
+    ├── ferrite-servo/              ← winit window shell + Servo embedding (feature-gated)
+    ├── ferrite-ui/                 ← Iced UI shell: tab bar, address bar, audit log viewer
+    └── ferrite-sandbox/            ← Extism/Wasm extension sandbox + host function stubs
 ```
 
 ---
@@ -67,10 +69,12 @@ Browser/                            ← Cargo workspace root
 | `ferrite-shell` — integration smoke test | Done |
 | GitHub Actions CI pipeline | Done |
 | `ferrite-servo` crate scaffolded | Done |
-| Servo embedding shell (window rendering) | In progress |
-| Iced UI shell (tab bar, address bar) | Not started |
-| Extism extension sandbox | Not started |
-| Audit log viewer panel | Not started |
+| Servo embedding shell — WindowRenderingContext + WebView + https://example.com | Done |
+| Iced UI shell (`ferrite-ui` — tab bar, address bar) | Done |
+| Extism extension sandbox (`ferrite-sandbox`) | Done |
+| Audit log viewer panel in Iced UI | Done |
+| Broker ↔ Servo integration (request interception) | Not started |
+| Agent runtime | Not started |
 
 ---
 
@@ -194,7 +198,7 @@ The Servo feature is **off by default** — the smoke test and bare winit window
 
 ---
 
-## Setup
+## Setup & Build
 
 ```bash
 # 1. Clone the repository
@@ -208,11 +212,51 @@ rustup show
 cargo build
 ```
 
+This builds all seven crates: `ferrite-shell`, `ferrite-capability-broker`, `ferrite-audit-log`, `ferrite-policy`, `ferrite-servo`, `ferrite-ui`, and `ferrite-sandbox`.
+
 If `cargo build` succeeds with no errors, the environment is correctly configured.
 
 ---
 
 ## Running the Project
+
+### Sandbox Demo — Extension Capability Demo
+
+Loads `hello-ext` (a Wasm extension) into the Extism sandbox, exercises `dom.read`, `network.fetch`, and `storage.read` through the capability broker, then revokes the `dom.read` token and verifies the denial is enforced.
+
+**First time only** — install the Wasm target and build the extension:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cd extensions/hello-ext && cargo build --target wasm32-unknown-unknown --release
+cd ../..   # back to Browser/
+```
+
+Then run the demo:
+
+```bash
+cargo run -p ferrite-shell sandbox
+```
+
+Expected output:
+```
+[ferrite] loading extension from: extensions/hello-ext/target/wasm32-unknown-unknown/release/hello_ext.wasm
+[ferrite-sandbox] --- capability demo ---
+[ferrite-sandbox] test_dom_read     → <div>stub DOM content for selector: h1</div>
+[ferrite-sandbox] test_network_fetch → stub response body for: https://example.com/api
+[ferrite-sandbox] test_storage_read  → stub value for key: user_prefs
+[ferrite-sandbox] dom_read token revoked
+[ferrite-sandbox] test_dom_read (post-revoke) → ERROR: dom.read denied
+[ferrite-sandbox] demo complete — 4 audit entries, chain verified
+```
+
+The demo exercises:
+- `CapabilityBroker` minting tokens for `DomRead`, `NetworkFetch`, `StorageRead`
+- Wasm extension calling host functions via Extism PDK
+- Token revocation blocking subsequent requests
+- Audit log recording 4 entries with a verified hash chain
+
+---
 
 ### Smoke Test — Integration Check (no window)
 
@@ -236,15 +280,15 @@ The smoke test exercises:
 
 ### Windowed Shell — Blank Window (no Servo)
 
-Opens a native 1280×800 window using winit. No browser engine yet — just the windowing layer.
+Opens a native 1280×800 window using winit. No browser engine — just the windowing layer.
 
 ```bash
 cargo run -p ferrite-shell window
 ```
 
-Expected result: A blank window titled "Ferrite Browser" opens. Close it with the X button.
+Expected result: A blank window titled "Ferrite Browser" opens. Close with X or Escape. On exit, prints the audit chain summary.
 
-### Windowed Shell — With Servo Engine (slow build)
+### Windowed Shell — With Servo Engine (slow first build)
 
 Builds and runs the full Servo embedding. First build downloads and compiles Servo from git (~10–20 min).
 
@@ -252,7 +296,15 @@ Builds and runs the full Servo embedding. First build downloads and compiles Ser
 cargo run -p ferrite-shell --features ferrite-servo/servo window
 ```
 
-Expected result: A window opens and Servo initialises (check terminal for any errors).
+Expected result:
+- A window opens and Servo initialises its internal event loop
+- `WindowRenderingContext` is created from the native window handles
+- A WebView is created and immediately navigates to `https://example.com`
+- Every network request is checked against the `CapabilityBroker` via `load_web_resource`
+- Terminal prints: `[ferrite] page load complete: https://example.com/`
+- On Escape or X: audit chain is verified and a grant/denial summary is printed
+
+The `FerriteWebViewDelegate` intercepts all outgoing fetches. To test the block path, revoke the `network_token_id` on a running shell — subsequent requests will print `[ferrite] BLOCKED: <url> reason: ...`.
 
 ---
 
@@ -277,8 +329,8 @@ cargo test -p ferrite-policy
 | Test | Crate | What it verifies |
 |------|-------|-----------------|
 | `default_policy_allows_all` | `ferrite-policy` | Regorus evaluates default Rego policy — extensions and agents are allowed |
-| Broker `check()` logic | `ferrite-capability-broker` | Token expiry, origin matching, `BrokerDecision` variants |
-| `verify_chain()` | `ferrite-audit-log` | SHA-256 hash chain is intact after appending entries |
+| `audit_log_records_grants_and_denials` | `ferrite-shell` | Broker decisions are persisted to the audit log with correct event kinds |
+| `revoke_blocks_subsequent_requests` | `ferrite-shell` | Revoking a token causes all subsequent `check()` calls to return `Denied` |
 
 ---
 
@@ -293,6 +345,12 @@ cargo build -p ferrite-audit-log
 
 # Policy engine only
 cargo build -p ferrite-policy
+
+# Iced UI shell only
+cargo build -p ferrite-ui
+
+# Extension sandbox only
+cargo build -p ferrite-sandbox
 
 # Servo embedding (no Servo feature — fast)
 cargo build -p ferrite-servo
