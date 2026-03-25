@@ -48,6 +48,17 @@ Major Project/                  ← git repo root, reference docs, PDFs
 
 ## Change Log
 
+### 2026-03-25 — Fix go_back/go_forward/stop API mismatches in ferrite-servo
+
+**File:** `crates/ferrite-servo/src/session.rs`
+
+- `go_back()`: passed `1` as the required `amount: usize` argument (servo `WebView::go_back` signature changed to take a step count)
+- `go_forward()`: same fix — passed `1` as the `amount: usize` argument
+- `stop()`: `WebView::stop()` does not exist in this servo build; replaced with a `tracing::warn!` no-op and a TODO comment until servo exposes the method
+- `cargo check -p ferrite-servo` — ✅ passes
+
+---
+
 ### 2026-03-25 — Visual redesign of Iced UI shell
 
 **File:** `crates/ferrite-ui/src/lib.rs`

@@ -278,14 +278,14 @@ mod inner {
         /// Requires servo v0.0.5 `WebView::go_back()`.  If the method does not
         /// exist in your build, replace this call with an appropriate alternative.
         pub fn go_back(&self) {
-            self.webview.go_back();
+            self.webview.go_back(1);
         }
 
         /// Go forward one step in the navigation history.
         ///
         /// Requires servo v0.0.5 `WebView::go_forward()`.
         pub fn go_forward(&self) {
-            self.webview.go_forward();
+            self.webview.go_forward(1);
         }
 
         /// Reload the current page.
@@ -298,9 +298,10 @@ mod inner {
 
         /// Stop the current page load.
         ///
-        /// Requires servo v0.0.5 `WebView::stop()`.
+        /// `WebView::stop()` is not available in this servo build; this is a no-op for now.
         pub fn stop(&self) {
-            self.webview.stop();
+            // TODO: servo WebView does not expose a stop() method yet.
+            log::warn!("stop() called but servo WebView::stop() is not available");
         }
 
         /// Returns the current load status of the active WebView.
