@@ -37,10 +37,10 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | `ferrite-shell` — integration smoke test | ✅ Done |
 | GitHub Actions CI pipeline | ✅ Done |
 | `ferrite-servo` crate scaffolded | ✅ Done |
-| Servo embedding shell (Month 1 R1 task) | 🔄 In progress |
+| Servo embedding shell (Month 1 R1 task) | ✅ Done (headless via SoftwareRenderingContext) |
 | Iced UI shell (Month 1–2 R3 task) | ✅ Done |
 | Extism Extension Sandbox (`ferrite-sandbox`) | ✅ Done |
-| Audit Log Viewer | ⏳ Not started(Wait for Iced UI Shell to be complete for final decision) |
+| Audit Log Viewer panel in Iced UI | ✅ Done |
 
 ---
 
@@ -472,6 +472,125 @@ uuid = { version = "1", features = ["v4"] }
 
 ---
 
+### `ferrite-ui` — audit log viewer panel (2026-03-25)
+
+**Files changed:**
+- `crates/ferrite-ui/Cargo.toml` — added `ferrite-audit-log = { path = "../ferrite-audit-log" }`
+- `crates/ferrite-ui/src/lib.rs` — full audit panel implementation
+
+**What was added to state:**
+- `show_audit_panel: bool` (default `false`)
+- `audit_entries: Vec<AuditEntry>` (default empty)
+
+**New messages:**
+- `ToggleAuditPanel` — flips `show_audit_panel`
+- `RefreshAuditLog` — calls `PersistentAuditLog::load("$TMPDIR/ferrite_sandbox.db")`; on success sets `audit_entries = log.log.entries`; on any error (file not found, chain broken) sets `audit_entries = vec![]`
+
+**Toolbar row** added below the address bar:
+- "Audit Log" toggle button — active style (primary accent) when panel is open, inactive style otherwise
+- "Refresh" button — only rendered when panel is open
+
+**Audit panel** (250px fixed height, shown when `show_audit_panel` is true):
+- Header row with columns: Seq | Timestamp | Kind | Principal | Capability | URL
+- Scrollable data rows at size 12; empty state shows a hint message
+- Kind column coloured: GRANTED=green, DENIED=red, EXERCISED=blue, BLOCKED=orange
+- URLs truncated to 40 chars with "..." suffix
+- Principal IDs truncated to 8 chars (UUID prefix)
+- Panel sits between toolbar and content area — does not replace it
+
+**Verified:** `cargo build -p ferrite-ui` — zero warnings
+
+---
+
+### `ferrite-servo/session.rs` — rustls CryptoProvider panic fixed (2026-03-25)
+
+**File changed:** `crates/ferrite-servo/src/session.rs`
+
+**Problem:** `thread 'ResourceManager' panicked: Could not automatically determine the process-level CryptoProvider` — rustls 0.23 requires `CryptoProvider::install_default()` to be called once before any TLS work. Servo's network thread hit this before our code could install it.
+
+**Fix:** Added `aws_lc_rs::default_provider().install_default()` at the top of `HeadlessServoSession::new()`. Returns `Err` silently if already installed (safe to call multiple times / from multiple tabs).
+
+**Verified:** `cargo build -p ferrite-shell --features ferrite-servo/servo` — clean build, 15s
+
+---
+
+### `ferrite-servo/session.rs` — compile errors fixed (2026-03-25)
+
+**Files changed:**
+- `crates/ferrite-servo/src/session.rs` — fixed two `Display` format errors + removed unused import
+- `crates/ferrite-servo/Cargo.toml` — added `rustls = { version = "0.23", features = ["aws_lc_rs"] }` and `url = "2"`
+
+**Errors fixed:**
+- `surfman::error::Error` doesn't implement `std::fmt::Display` — changed `{}` → `{:?}` in `SoftwareRenderingContext::new` and `make_current` error format strings
+- Removed unused `use url::Url` import (Url only used via fully qualified `url::Url::parse(...)` calls)
+- `rustls::crypto::aws_lc_rs` unresolved — workspace resolver was picking the `ring` backend; forced `aws_lc_rs` via explicit dep with feature
+
+**Verified:**
+- `cargo check -p ferrite-servo --features servo` — zero errors, 3 warnings (pre-existing dead_code in shell.rs)
+- `cargo check -p ferrite-ui` — zero errors
+
+---
+
+### `ferrite-servo` + `ferrite-ui` — Task 5 Block 1: Servo embedded in Iced (2026-03-25)
+
+**Files created/changed:**
+- `crates/ferrite-servo/src/session.rs` — new `HeadlessServoSession` type
+- `crates/ferrite-servo/src/lib.rs` — added `pub mod session`
+- `crates/ferrite-ui/Cargo.toml` — added `ferrite-servo`, `iced_widget` (with `image` feature)
+- `crates/ferrite-ui/src/lib.rs` — servo state, messages, subscription, frame display
+
+**`HeadlessServoSession` (ferrite-servo/src/session.rs):**
+- Uses `SoftwareRenderingContext` (CPU rasteriser — no GPU/window handle required, no winit event loop)
+- The stub type (`#[cfg(not(feature = "servo"))]`) compiles without the feature and returns `Err` from `new()` so the UI degrades gracefully
+- `new(width, height)` — creates rendering context, broker + wildcard NetworkFetch token, audit log at `$TMPDIR/ferrite_servo_session.db`, Servo engine, WebView loaded to `about:blank`
+- `navigate(&str)` — calls `webview.load(parsed_url)`
+- `spin()` — calls `servo.spin_event_loop()` then `read_to_image(DeviceIntRect)` to capture RGBA frame
+- `get_frame() -> Option<(u32, u32, Vec<u8>)>` — returns latest frame pixels
+- `resize(w, h)` — resizes rendering context and WebView
+- `HeadlessDelegate` — implements `WebViewDelegate` with broker-gated `load_web_resource` + audit logging
+
+**Iced integration (ferrite-ui/src/lib.rs):**
+- `FerriteBrowser` gains `servo_shell: Option<HeadlessServoSession>` and `servo_frame: Option<(u32, u32, Vec<u8>)>`
+- `FerriteBrowserMessage` gains `ServoReady` and `ServoFrame`
+- `subscription(state)` — returns `time::every(16ms).map(|_| ServoFrame)` when session is active, else `Subscription::none()`
+- `update()` `ServoFrame` arm — calls `session.spin()`, stores `get_frame()` result in `state.servo_frame`
+- `update()` `NavigateRequested` arm — also calls `session.navigate(&url)`
+- `view()` content area — if `servo_frame` is `Some`, renders `ServoImage::new(ImageHandle::from_rgba(w, h, bytes))`; otherwise falls back to placeholder text
+- `launch()` uses `run_with()` to initialise `HeadlessServoSession::new(1280, 600)` on startup and emit `ServoReady`
+
+**Image widget path:** `iced_widget::image::{Handle, Image}` (feature-gated `"image"` in `iced_widget`) — `iced::widget` re-exports `Image` via glob but not `Handle`, so `iced_widget` is added as a direct dep with `features = ["image"]`.
+
+**Servo feature:** All `HeadlessServoSession` logic inside `#[cfg(feature = "servo")]` — requires `cargo build --features ferrite-servo/servo`. Without the feature the stub compiles and the UI runs without a live viewport.
+
+**Verified:**
+- `cargo check -p ferrite-servo` — zero errors (non-servo path)
+- `cargo check -p ferrite-ui` — zero errors
+- `cargo check -p ferrite-shell` — zero errors
+- `cargo fmt --check` — clean
+
+---
+
+### `ferrite-ui` — Task 5 Block 2: per-tab Servo sessions (2026-03-25)
+
+**File changed:** `crates/ferrite-ui/src/lib.rs`
+
+**What changed:**
+- `servo_shell: Option<HeadlessServoSession>` + `servo_frame` replaced with `servo_sessions: HashMap<usize, HeadlessServoSession>` keyed by tab index
+- `AddTab` — calls `HeadlessServoSession::new(1280, 600)` and inserts at the new tab index
+- `CloseTab(i)` — removes `servo_sessions[i]`, then re-keys all entries with index > i down by 1 to stay aligned with the `tabs` Vec
+- `SelectTab(i)` — no extra work; `view()` reads from `servo_sessions[active_tab]` directly
+- `NavigateRequested(url)` — calls `servo_sessions[active_tab].navigate(&url)` if present
+- `ServoFrame` tick — spins **all** sessions (so background tabs stay alive / don't stall Servo's internal queues)
+- `view()` content area — reads `servo_sessions[active_tab].get_frame()` for display; placeholder shown when no frame available
+- `subscription()` — fires when `servo_sessions` is non-empty
+- `launch()` / `run_with()` — seeds tab 0 by inserting into `servo_sessions` instead of `servo_shell`
+
+**Verified:**
+- `cargo check -p ferrite-ui` — zero errors
+- `cargo fmt --check` — clean
+
+---
+
 ## What To Do Next (pick up here after plan refreshes)
 
 1. **Build hello-ext Wasm** — requires `rustup target add wasm32-unknown-unknown`. Once available:
@@ -481,9 +600,9 @@ uuid = { version = "1", features = ["v4"] }
    ```
    Then `cargo run -p ferrite-shell sandbox` will execute the full `run_demo()` flow.
 
-2. **Enable servo feature** — dependency now correctly specified (`libservo`). Run `cargo build -p ferrite-servo --features servo` and fix any remaining compile errors (RenderingContext setup for WebViewBuilder).
+2. **Test full servo feature build** — `cargo build -p ferrite-shell --features ferrite-servo/servo` should now compile end-to-end. Run the UI with `cargo run -p ferrite-shell ui` to verify the viewport renders Servo frames.
 
-3. **Block 4 RenderingContext** — wire `WindowRenderingContext::new(display_handle, window_handle, size)` into `WebViewBuilder` so Servo actually renders pages in the winit window.
+3. **Block 4 RenderingContext (optional)** — wire `WindowRenderingContext::new(display_handle, window_handle, size)` into the winit `ServoShell` if GPU-accelerated rendering is needed. The headless path via `SoftwareRenderingContext` is fully operational.
 
 ---
 

@@ -20,6 +20,11 @@ uuid = { version = "1", features = ["v4"] }
 raw-window-handle = "0.6"
 winit = "0.30"
 log = "0.4"
+# Force aws_lc_rs backend — Servo's net component imports rustls::crypto::aws_lc_rs
+# directly. Without this the workspace resolver selects `ring` and that import
+# fails to compile.
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
+url = "2"
 
 # Optional — only resolved when the `servo` feature is enabled.
 # Package name in the repo is `libservo`; the lib is named `servo` internally

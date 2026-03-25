@@ -191,10 +191,14 @@ impl ExtensionSandbox {
             .map_err(|e| SandboxError::LoadFailed(format!("{}: {}", wasm_path, e)))?;
 
         // ── Audit log ──────────────────────────────────────────────────────
+        // Remove any leftover DB from a previous run so each sandbox session
+        // starts with a clean hash chain.  `verify_chain()` on load would
+        // reject a DB that mixes hash chains from multiple runs.
         let db_path = std::env::temp_dir()
             .join("ferrite_sandbox.db")
             .to_string_lossy()
             .into_owned();
+        let _ = std::fs::remove_file(&db_path); // ignore error if not present
         let audit_log = PersistentAuditLog::new(&db_path)
             .map_err(|e| SandboxError::LoadFailed(format!("audit log: {}", e)))?;
 

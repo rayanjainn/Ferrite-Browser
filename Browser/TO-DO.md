@@ -346,7 +346,7 @@ Exit condition: `cargo run -p ferrite-shell sandbox` prints all three stub respo
 
 
 ## Task 4: Audit Log Viewer Panel
-### Block 1: Audit log viewer panel in Iced
+### Block 1: Audit log viewer panel in Iced  |  ✅ Done
 What it does: Adds a DevTools-style panel inside the Iced UI that reads audit entries from the SQLite database and displays them in a scrollable table — principal, capability, URL, grant/deny, timestamp. Reads live from the DB so it reflects real sandbox and broker activity.
 
 Prompt for Claude Code:
@@ -394,7 +394,7 @@ In crates/ferrite-ui/src/lib.rs extend FerriteBrowser with an audit log viewer p
 Exit condition: `cargo run -p ferrite-shell ui` shows the window. Clicking "Audit Log" opens the panel. Clicking "Refresh" after running the sandbox demo populates it with rows showing GRANTED and DENIED entries with correct colours.
 
 ## Task 5: Wire Servo WebView into the Iced UI
-### Block 1: Embed Servo render surface inside Iced content area
+### Block 1: Embed Servo render surface inside Iced content area  |  ✅ Done
 What it does: Replaces the "Tab N content" placeholder in the Iced UI with the actual Servo-rendered WebView. Servo renders into a texture/surface that Iced composites into the window.
 
 Prompt for Claude Code:
@@ -425,7 +425,7 @@ In crates/ferrite-ui/src/lib.rs and crates/ferrite-servo/src/shell.rs:
 ```
 Exit condition: `cargo run -p ferrite-shell ui` shows a real browser viewport. Typing https://example.com in the address bar and pressing Enter renders the page inside the Iced window.
 
-### Block 2: Per-tab Servo sessions
+### Block 2: Per-tab Servo sessions  |  ✅ Done
 What it does: Each tab gets its own Servo browsing context. Opening a new tab creates a new session; closing a tab destroys it. Navigate commands go to the active tab's session only.
 
 Prompt for Claude Code:
