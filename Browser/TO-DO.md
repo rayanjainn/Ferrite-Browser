@@ -94,7 +94,7 @@ Exit condition: `cargo run -p ferrite-shell window` opens a window, loads https:
 ### Block 5: Wire the capability broker to Servo's network requests  |  ✅ Done
 What it does: Intercepts outgoing network requests from Servo and routes them through `CapabilityBroker::check()` before allowing them. Denied requests are blocked. This is the first real integration of the broker with the engine.
 
-Prompt for Claude COde:
+Prompt for Claude Code:
 ```
 In crates/ferrite-servo/src/shell.rs:
 
@@ -346,4 +346,106 @@ Exit condition: `cargo run -p ferrite-shell sandbox` prints all three stub respo
 
 
 ## Task 4: Audit Log Viewer Panel
-### Depends on Iced UI being done first (Single Block)
+### Block 1: Audit log viewer panel in Iced
+What it does: Adds a DevTools-style panel inside the Iced UI that reads audit entries from the SQLite database and displays them in a scrollable table — principal, capability, URL, grant/deny, timestamp. Reads live from the DB so it reflects real sandbox and broker activity.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ui/src/lib.rs extend FerriteBrowser with an audit log viewer panel:
+
+1. Add ferrite-audit-log as a path dependency in crates/ferrite-ui/Cargo.toml
+
+2. Add to FerriteBrowser state:
+   - show_audit_panel: bool  (default false)
+   - audit_entries: Vec<ferrite_audit_log::AuditEntry>  (default empty)
+
+3. Add to FerriteBrowserMessage:
+   - ToggleAuditPanel
+   - RefreshAuditLog
+
+4. Add to update():
+   - ToggleAuditPanel → toggle show_audit_panel
+   - RefreshAuditLog → attempt to load PersistentAuditLog from
+     std::env::temp_dir().join("ferrite_sandbox.db"),
+     if successful set audit_entries = log.entries cloned,
+     if file doesn't exist yet set audit_entries = vec![]
+
+5. In view(), add below the address bar:
+   - A toolbar row with:
+     - A "Audit Log" toggle button that sends ToggleAuditPanel
+       (visually active/inactive based on show_audit_panel)
+     - A "Refresh" button (only visible when show_audit_panel is true)
+       that sends RefreshAuditLog
+
+   - When show_audit_panel is true, render a scrollable table below the
+     toolbar with columns:
+     Seq | Timestamp | Kind | Principal | Capability | URL
+     Each row maps to one AuditEntry.
+     Kind should display as "GRANTED" (green text) or "DENIED" (red text)
+     for CapabilityGranted/CapabilityDenied, and "EXERCISED"/"BLOCKED"
+     for the others.
+     Truncate long URLs to 40 chars with "..." suffix.
+     Use a monospace-style small font (size 12) for table rows.
+     When show_audit_panel is false, render the normal content area instead.
+
+6. The audit panel height should be fixed at 250px, sitting above the
+   main content area (not replacing it) — like a real DevTools drawer.
+```
+Exit condition: `cargo run -p ferrite-shell ui` shows the window. Clicking "Audit Log" opens the panel. Clicking "Refresh" after running the sandbox demo populates it with rows showing GRANTED and DENIED entries with correct colours.
+
+## Task 5: Wire Servo WebView into the Iced UI
+### Block 1: Embed Servo render surface inside Iced content area
+What it does: Replaces the "Tab N content" placeholder in the Iced UI with the actual Servo-rendered WebView. Servo renders into a texture/surface that Iced composites into the window.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ui/src/lib.rs and crates/ferrite-servo/src/shell.rs:
+
+1. Add ferrite-servo as a path dependency in crates/ferrite-ui/Cargo.toml
+
+2. Add to FerriteBrowser state:
+   - servo_shell: Option<ferrite_servo::shell::ServoShell>
+
+3. Add to FerriteBrowserMessage:
+   - ServoReady
+   - ServoFrame  (emitted each time Servo has a new frame to display)
+
+4. In FerriteBrowser::default(), initialise servo_shell as None.
+   Add a subscription that initialises ServoShell on startup and emits
+   ServoReady, then emits ServoFrame on each animation tick.
+
+5. In view(), when servo_shell is Some:
+   - Replace the "Tab N content" placeholder with an iced::widget::image
+     or canvas widget that displays the latest frame rendered by Servo.
+   - Servo renders to an offscreen buffer; read it as raw RGBA bytes and
+     wrap in iced::widget::image::Handle::from_rgba().
+
+6. Forward NavigateRequested(url) messages to ServoShell::navigate(url)
+   so typing a URL in the address bar actually drives Servo.
+```
+Exit condition: `cargo run -p ferrite-shell ui` shows a real browser viewport. Typing https://example.com in the address bar and pressing Enter renders the page inside the Iced window.
+
+### Block 2: Per-tab Servo sessions
+What it does: Each tab gets its own Servo browsing context. Opening a new tab creates a new session; closing a tab destroys it. Navigate commands go to the active tab's session only.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ui/src/lib.rs:
+
+1. Replace servo_shell: Option<ServoShell> with
+   servo_sessions: HashMap<usize, ServoShell>
+   where the key is the tab index.
+
+2. On AddTab: create a new ServoShell for the new tab index,
+   load "about:blank" in it.
+
+3. On CloseTab(i): call servo_sessions.remove(&i), then re-key
+   remaining sessions to reflect the new indices after removal.
+
+4. On SelectTab(i): switch the active render source to servo_sessions[i].
+
+5. On NavigateRequested(url): call servo_sessions[active_tab].navigate(url)
+
+6. In view(): render the frame from servo_sessions[active_tab].
+```
+Exit condition: Opening two tabs and navigating each to a different URL shows independent pages. Closing one tab doesn't affect the other.
