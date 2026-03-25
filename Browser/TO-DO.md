@@ -71,7 +71,7 @@ Use servo v0.0.5 embedding API. If the exact method names differ from above, use
 ```
 Exit condition: `cargo run -p ferrite-shell window` opens a window, Servo initialises without panicking (check terminal — no crash), and the window renders (even if blank/white).![Result](/output_images/image-1.png)
 
-### Block 4: Navigate to a real URL
+### Block 4: Navigate to a real URL  |  ⏳ In progress
 What it does: Points Servo at https://example.com and renders it. This is the Month 1 R1 milestone — "Servo renders a page".
 
 Prompt for Claude Code:
@@ -91,7 +91,7 @@ In crates/ferrite-servo/src/shell.rs:
 ```
 Exit condition: `cargo run -p ferrite-shell window` opens a window, loads https://example.com, and the page content is visible. Terminal prints the load complete message.
 
-### Block 5: Wire the capability broker to Servo's network requests
+### Block 5: Wire the capability broker to Servo's network requests  |  ✅ Done
 What it does: Intercepts outgoing network requests from Servo and routes them through `CapabilityBroker::check()` before allowing them. Denied requests are blocked. This is the first real integration of the broker with the engine.
 
 Prompt for Claude COde:
@@ -115,7 +115,7 @@ If servo v0.0.5 does not expose a fetch interceptor hook, implement this instead
 ```
 Exit condition: Blocking the token stops network requests. Terminal shows `[ferrite] BLOCKED:` log lines when the token is revoked.
 
-### Block 6: Log broker decisions to the audit log
+### Block 6: Log broker decisions to the audit log  |  ✅ Done
 What it does: Every network request decision (grant or deny) is written to `PersistentAuditLog`. This closes the loop — Servo → broker → audit log — which is the core architecture working end-to-end for the first time.
 
 Prompt for Claude Code:
@@ -272,7 +272,7 @@ In ferrite-shell/src/main.rs add CLI arg "sandbox" → instantiate ExtensionSand
 ```
 Exit condition: After compiling `hello-ext` to Wasm and running `cargo run -p ferrite-shell sandbox`, terminal prints `pong`.
 
-### Block 2: Host functions for `dom.read`, `network.fetch`, `storage.read`
+### Block 2: Host functions for `dom.read`, `network.fetch`, `storage.read`  |  ✅ Done
 What it does: Defines host functions that Wasm extensions can call to request capabilities — host_dom_read, host_network_fetch, host_storage_read. Each host function checks with CapabilityBroker before doing anything. No real DOM or network access yet — host functions return stub data if granted, or an error string if denied.
 
 Prompt for Claude Code:
@@ -313,7 +313,7 @@ In crates/ferrite-sandbox/src/lib.rs extend ExtensionSandbox with host functions
 ```
 Exit condition: Running `cargo run -p ferrite-shell sandbox` calls all three test functions and prints the stub responses. Revoking a token before the call prints the denied error instead.
 
-### Block 3: Demo extension: Wasm module that calls `host_dom_read` and receives a response
+### Block 3: Demo extension: Wasm module that calls `host_dom_read` and receives a response  |  ✅ Done
 What it does: Wires the sandbox to the audit log so every host function call — granted or denied — is recorded. Then runs a complete demo: extension loads, calls `host_dom_read`, gets stub DOM back, and the entire interaction is in the audit log with a verified chain. This is the Month 2 milestone.
 
 Prompt for Claude Code:

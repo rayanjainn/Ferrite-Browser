@@ -8,4 +8,6 @@ ferrite-capability-broker = { path = "../ferrite-capability-broker" }
 ferrite-audit-log = { path = "../ferrite-audit-log" }
 ferrite-policy = { path = "../ferrite-policy" }
 ferrite-servo = { path = "../ferrite-servo" }
+ferrite-ui = { path = "../ferrite-ui" }
+ferrite-sandbox = { path = "../ferrite-sandbox" }
 uuid = { version = "1", features = ["v4"] }

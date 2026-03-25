@@ -14,6 +14,9 @@ edition = "2021"
 servo = ["dep:libservo"]
 
 [dependencies]
+ferrite-capability-broker = { path = "../ferrite-capability-broker" }
+ferrite-audit-log = { path = "../ferrite-audit-log" }
+uuid = { version = "1", features = ["v4"] }
 raw-window-handle = "0.6"
 winit = "0.30"
 log = "0.4"

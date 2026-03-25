@@ -8,11 +8,26 @@ use uuid::Uuid;
 
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
-    if arg == "window" {
-        ServoShell::new().run();
-    } else {
-        run_smoke_test();
+    match arg.as_str() {
+        "ui" => ferrite_ui::launch().expect("Ferrite UI exited with error"),
+        "window" => ServoShell::new().run(),
+        "sandbox" => run_sandbox_smoke_test(),
+        _ => run_smoke_test(),
     }
+}
+
+fn run_sandbox_smoke_test() {
+    // Resolve the hello-ext Wasm path relative to the workspace root.
+    // When run via `cargo run -p ferrite-shell`, the working directory is the
+    // workspace root (Browser/), so this path resolves correctly.
+    let wasm_path = "extensions/hello-ext/target/wasm32-unknown-unknown/release/hello_ext.wasm";
+
+    println!("[ferrite] loading extension from: {}", wasm_path);
+
+    let mut sandbox = ferrite_sandbox::ExtensionSandbox::new(wasm_path)
+        .expect("failed to load hello-ext Wasm module — build it first:\n  cd extensions/hello-ext && cargo build --target wasm32-unknown-unknown --release");
+
+    sandbox.run_demo();
 }
 
 fn run_smoke_test() {
