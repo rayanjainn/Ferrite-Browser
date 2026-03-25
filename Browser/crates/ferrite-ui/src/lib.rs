@@ -573,7 +573,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     if let Some(panel) = audit_panel {
         layout.push(panel);
     }
-    layout.push(content.into());
+    layout.push(content);
 
     column(layout).into()
 }
