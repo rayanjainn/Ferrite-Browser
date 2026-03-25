@@ -180,9 +180,7 @@ fn add_tab_style(theme: &Theme, status: button::Status) -> button::Style {
     let palette = theme.extended_palette();
     button::Style {
         background: Some(Background::Color(match status {
-            button::Status::Hovered | button::Status::Pressed => {
-                palette.background.strong.color
-            }
+            button::Status::Hovered | button::Status::Pressed => palette.background.strong.color,
             _ => Color::TRANSPARENT,
         })),
         text_color: palette.background.base.text,

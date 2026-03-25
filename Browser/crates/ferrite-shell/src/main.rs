@@ -36,8 +36,8 @@ fn run_smoke_test() {
 
     // 2. Create PersistentAuditLog at temp dir
     let db_path = std::env::temp_dir().join("ferrite_smoke_test.db");
-    let mut audit_log = PersistentAuditLog::new(db_path.to_str().unwrap())
-        .expect("failed to open audit log");
+    let mut audit_log =
+        PersistentAuditLog::new(db_path.to_str().unwrap()).expect("failed to open audit log");
 
     // 3. Create PolicyEngine
     let mut policy = PolicyEngine::new();

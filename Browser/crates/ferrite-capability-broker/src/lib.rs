@@ -107,15 +107,25 @@ impl CapabilityBroker {
     pub fn check(&self, token_id: Uuid, url: &str) -> BrokerDecision {
         let token = match self.tokens.get(&token_id) {
             Some(t) => t,
-            None => return BrokerDecision::Denied { reason: DenialReason::UnknownPrincipal },
+            None => {
+                return BrokerDecision::Denied {
+                    reason: DenialReason::UnknownPrincipal,
+                };
+            }
         };
 
         if token.is_expired() {
-            BrokerDecision::Denied { reason: DenialReason::TokenExpired }
+            BrokerDecision::Denied {
+                reason: DenialReason::TokenExpired,
+            }
         } else if !url.starts_with(&token.origin_scope) && token.origin_scope != "*" {
-            BrokerDecision::Denied { reason: DenialReason::OriginMismatch }
+            BrokerDecision::Denied {
+                reason: DenialReason::OriginMismatch,
+            }
         } else {
-            BrokerDecision::Granted { token: token.clone() }
+            BrokerDecision::Granted {
+                token: token.clone(),
+            }
         }
     }
 

@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
-use rusqlite::{params, Connection};
-use std::str::FromStr;#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AuditEventKind {
     CapabilityGranted,
     CapabilityDenied,
@@ -39,7 +40,9 @@ pub enum AuditError {
         expected: String,
         actual: String,
     },
-    #[error("Chain broken at entry {sequence}: prev_hash {actual_prev} != previous entry_hash {expected_prev}")]
+    #[error(
+        "Chain broken at entry {sequence}: prev_hash {actual_prev} != previous entry_hash {expected_prev}"
+    )]
     ChainBroken {
         sequence: u64,
         expected_prev: String,
@@ -166,7 +169,8 @@ impl PersistentAuditLog {
                 entry_hash TEXT
             )",
             [],
-        ).map_err(|e| AuditError::Sql(e.to_string()))?;
+        )
+        .map_err(|e| AuditError::Sql(e.to_string()))?;
 
         Ok(Self {
             log: AuditLog::new(),
@@ -181,10 +185,12 @@ impl PersistentAuditLog {
         capability: Option<String>,
         url: Option<String>,
     ) -> Result<(), AuditError> {
-        self.log.append(kind.clone(), principal_id, capability.clone(), url.clone());
+        self.log
+            .append(kind.clone(), principal_id, capability.clone(), url.clone());
         let entry = self.log.entries.last().unwrap();
-        
-        let kind_str = serde_json::to_string(&entry.kind).map_err(|e| AuditError::Serialization(e.to_string()))?;
+
+        let kind_str = serde_json::to_string(&entry.kind)
+            .map_err(|e| AuditError::Serialization(e.to_string()))?;
 
         self.conn.execute(
             "INSERT INTO audit_entries (entry_id, sequence, timestamp, kind, principal_id, capability, url, prev_hash, entry_hash)
@@ -207,32 +213,59 @@ impl PersistentAuditLog {
 
     pub fn load(db_path: &str) -> Result<Self, AuditError> {
         let conn = Connection::open(db_path).map_err(|e| AuditError::Sql(e.to_string()))?;
-        
+
         let entries = {
             let mut stmt = conn.prepare("SELECT entry_id, sequence, timestamp, kind, principal_id, capability, url, prev_hash, entry_hash FROM audit_entries ORDER BY sequence ASC").map_err(|e| AuditError::Sql(e.to_string()))?;
-            
-            let entry_iter = stmt.query_map([], |row| {
-                let entry_id_str: String = row.get(0)?;
-                let sequence: u64 = row.get(1)?;
-                let timestamp_str: String = row.get(2)?;
-                let kind_str: String = row.get(3)?;
-                let principal_id_str: String = row.get(4)?;
-                let capability: Option<String> = row.get(5)?;
-                let url: Option<String> = row.get(6)?;
-                let prev_hash: String = row.get(7)?;
-                let entry_hash: String = row.get(8)?;
-                
-                Ok((entry_id_str, sequence, timestamp_str, kind_str, principal_id_str, capability, url, prev_hash, entry_hash))
-            }).map_err(|e| AuditError::Sql(e.to_string()))?;
+
+            let entry_iter = stmt
+                .query_map([], |row| {
+                    let entry_id_str: String = row.get(0)?;
+                    let sequence: u64 = row.get(1)?;
+                    let timestamp_str: String = row.get(2)?;
+                    let kind_str: String = row.get(3)?;
+                    let principal_id_str: String = row.get(4)?;
+                    let capability: Option<String> = row.get(5)?;
+                    let url: Option<String> = row.get(6)?;
+                    let prev_hash: String = row.get(7)?;
+                    let entry_hash: String = row.get(8)?;
+
+                    Ok((
+                        entry_id_str,
+                        sequence,
+                        timestamp_str,
+                        kind_str,
+                        principal_id_str,
+                        capability,
+                        url,
+                        prev_hash,
+                        entry_hash,
+                    ))
+                })
+                .map_err(|e| AuditError::Sql(e.to_string()))?;
 
             let mut entries = Vec::new();
             for row_result in entry_iter {
-                let (entry_id_str, sequence, timestamp_str, kind_str, principal_id_str, capability, url, prev_hash, entry_hash) = row_result.map_err(|e| AuditError::Sql(e.to_string()))?;
-                
-                let entry_id = Uuid::from_str(&entry_id_str).map_err(|e| AuditError::Parse(e.to_string()))?;
-                let timestamp = DateTime::parse_from_rfc3339(&timestamp_str).map_err(|e| AuditError::Parse(e.to_string()))?.with_timezone(&Utc);
-                let kind: AuditEventKind = serde_json::from_str(&kind_str).map_err(|e| AuditError::Serialization(e.to_string()))?;
-                let principal_id = Uuid::from_str(&principal_id_str).map_err(|e| AuditError::Parse(e.to_string()))?;
+                let (
+                    entry_id_str,
+                    sequence,
+                    timestamp_str,
+                    kind_str,
+                    principal_id_str,
+                    capability,
+                    url,
+                    prev_hash,
+                    entry_hash,
+                ) = row_result.map_err(|e| AuditError::Sql(e.to_string()))?;
+
+                let entry_id =
+                    Uuid::from_str(&entry_id_str).map_err(|e| AuditError::Parse(e.to_string()))?;
+                let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
+                    .map_err(|e| AuditError::Parse(e.to_string()))?
+                    .with_timezone(&Utc);
+                let kind: AuditEventKind = serde_json::from_str(&kind_str)
+                    .map_err(|e| AuditError::Serialization(e.to_string()))?;
+                let principal_id = Uuid::from_str(&principal_id_str)
+                    .map_err(|e| AuditError::Parse(e.to_string()))?;
 
                 entries.push(AuditEntry {
                     entry_id,
@@ -250,7 +283,7 @@ impl PersistentAuditLog {
         };
 
         let sequence_counter = entries.last().map(|e| e.sequence + 1).unwrap_or(0);
-        
+
         let log = AuditLog {
             entries,
             sequence_counter,

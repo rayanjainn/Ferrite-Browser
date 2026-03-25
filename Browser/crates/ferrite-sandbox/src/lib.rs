@@ -30,7 +30,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use extism::{Function, Manifest, Plugin, PTR, UserData, Wasm};
+use extism::{Function, Manifest, Plugin, UserData, Wasm, PTR};
 use ferrite_audit_log::{AuditEventKind, PersistentAuditLog};
 use ferrite_capability_broker::{
     BrokerDecision, CapabilityBroker, CapabilityType, Principal, PrincipalKind,
@@ -247,13 +247,7 @@ impl ExtensionSandbox {
         //
         // params/results = [PTR] for string-in / string-out.
         // No explicit namespace → extism defaults to "extism:host/user".
-        let f_dom_read = Function::new(
-            "host_dom_read",
-            [PTR],
-            [PTR],
-            state.clone(),
-            host_dom_read,
-        );
+        let f_dom_read = Function::new("host_dom_read", [PTR], [PTR], state.clone(), host_dom_read);
         let f_network_fetch = Function::new(
             "host_network_fetch",
             [PTR],
@@ -272,8 +266,12 @@ impl ExtensionSandbox {
         // ── Build plugin ───────────────────────────────────────────────────
         let wasm = Wasm::data(bytes);
         let manifest = Manifest::new([wasm]);
-        let plugin = Plugin::new(manifest, [f_dom_read, f_network_fetch, f_storage_read], false)
-            .map_err(|e| SandboxError::LoadFailed(e.to_string()))?;
+        let plugin = Plugin::new(
+            manifest,
+            [f_dom_read, f_network_fetch, f_storage_read],
+            false,
+        )
+        .map_err(|e| SandboxError::LoadFailed(e.to_string()))?;
 
         Ok(Self {
             plugin,
@@ -297,7 +295,9 @@ impl ExtensionSandbox {
     pub fn run_demo(&mut self) {
         println!("[ferrite-sandbox] --- capability demo ---");
 
-        let dom = self.call_test("test_dom_read").expect("test_dom_read failed");
+        let dom = self
+            .call_test("test_dom_read")
+            .expect("test_dom_read failed");
         println!("[ferrite-sandbox] test_dom_read     → {}", dom);
 
         let net = self

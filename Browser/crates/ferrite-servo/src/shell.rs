@@ -46,11 +46,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use ferrite_audit_log::{AuditEventKind, PersistentAuditLog};
 #[cfg_attr(not(feature = "servo"), allow(unused_imports))]
 use ferrite_capability_broker::{
     BrokerDecision, CapabilityBroker, CapabilityType, Principal, PrincipalKind,
 };
-use ferrite_audit_log::{AuditEventKind, PersistentAuditLog};
 use uuid::Uuid;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -195,10 +195,7 @@ impl AppHandler {
         let entries = &log.log.entries;
 
         if log.log.verify_chain() {
-            println!(
-                "[ferrite] audit chain verified: {} entries",
-                entries.len()
-            );
+            println!("[ferrite] audit chain verified: {} entries", entries.len());
         } else {
             println!("[ferrite] AUDIT CHAIN BROKEN — investigate immediately");
         }
@@ -293,9 +290,10 @@ impl ApplicationHandler for AppHandler {
                 event_loop.exit();
             }
 
-            WindowEvent::KeyboardInput { event: key_event, .. }
-                if key_event.state == ElementState::Pressed
-                    && key_event.logical_key == Key::Named(NamedKey::Escape) =>
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } if key_event.state == ElementState::Pressed
+                && key_event.logical_key == Key::Named(NamedKey::Escape) =>
             {
                 self.print_exit_summary();
                 event_loop.exit();
@@ -304,9 +302,7 @@ impl ApplicationHandler for AppHandler {
             WindowEvent::RedrawRequested => {
                 // ── Drive Servo and composite ───────────────────────────────
                 #[cfg(feature = "servo")]
-                if let (Some(servo), Some(webview)) =
-                    (&mut self.servo, &mut self.webview)
-                {
+                if let (Some(servo), Some(webview)) = (&mut self.servo, &mut self.webview) {
                     servo.spin_event_loop();
                     webview.paint();
                 }
@@ -384,8 +380,7 @@ impl ServoShell {
             .join("ferrite_servo.db")
             .to_string_lossy()
             .into_owned();
-        let audit_log = PersistentAuditLog::new(&db_path)
-            .expect("failed to open audit log");
+        let audit_log = PersistentAuditLog::new(&db_path).expect("failed to open audit log");
 
         let event_loop = EventLoop::new().expect("failed to create event loop");
         ServoShell {
@@ -505,8 +500,8 @@ mod tests {
             .to_string_lossy()
             .into_owned();
 
-        let mut audit_log = PersistentAuditLog::new(&db_path)
-            .expect("failed to open test audit log");
+        let mut audit_log =
+            PersistentAuditLog::new(&db_path).expect("failed to open test audit log");
 
         let principal_id = Uuid::new_v4();
 
