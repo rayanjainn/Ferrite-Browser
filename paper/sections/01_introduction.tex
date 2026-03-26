@@ -1,0 +1,110 @@
+% ============================================================
+% Section 1: Introduction
+% ============================================================
+% Target length: ~1 column (500–700 words)
+% Write early (Month 4) — refine as project matures
+% Structure: problem → why existing solutions fail →
+%            our approach → contributions → paper outline
+% ============================================================
+
+\section{Introduction}
+\label{sec:introduction}
+
+% ── Paragraph 1: The problem ────────────────────────────────
+% Hook: browsers were designed for humans, not agents
+% Establish the governance vacuum
+
+The web browser was designed thirty years ago for human users
+clicking links and reading pages.
+In 2026, AI agents autonomously browse, fill forms, execute purchases,
+and orchestrate complex multi-step workflows inside that same
+architecture---yet browsers expose no formal mechanism for governing,
+auditing, or limiting what an agent can do.
+The result is a governance vacuum with real consequences.
+
+% ── Paragraph 2: Real attacks (cite them all) ───────────────
+% Establish urgency — this is not theoretical
+
+In 2025, this vacuum was repeatedly exploited.
+CometJacking~\cite{layerx_cometjacking_2025} exfiltrated emails and
+calendar data from Perplexity Comet via hidden instructions.
+Screenshot Injection~\cite{brave_screenshot_injection_2025} hijacked
+Comet and Fellou agents using text invisible to the human user.
+Tainted Memories~\cite{layerx_tainted_memories_2025} poisoned
+ChatGPT Atlas's long-term memory via CSRF.
+HashJack~\cite{cato_hashjack_2025} embedded malicious instructions
+in URL fragments.
+In each case, the browser granted the agent the same privileges as
+the human user, with no capability boundary and no audit trail.
+
+% ── Paragraph 3: Why existing defenses fail ─────────────────
+% Model-level defenses are insufficient — cite OpenAI admission
+
+Existing defenses operate at the model level: adversarial training,
+classifiers, and red-teaming.
+OpenAI acknowledged in December 2025 that prompt injection
+``may never be fully solved'' at the model
+level~\cite{openai_prompt_injection_2025}.
+A concurrent study by researchers at OpenAI, Anthropic, and
+DeepMind tested twelve prompt injection defenses and found all
+fail against adaptive attacks~\cite{nasr2025}.
+The conclusion is clear: model-level defenses are insufficient,
+and architectural enforcement is necessary.
+
+% ── Paragraph 4: Our approach ───────────────────────────────
+% Introduce Ferrite, the key insight, and the architecture
+
+We present \ferrite{}, a browser built from the ground up to
+enforce capability-based governance over all agent and extension
+actions.
+\ferrite{}'s central insight is that the capability broker---not
+the rendering engine, not the agent, not the extension---is the
+sole privileged boundary.
+Every action touching sensitive resources requires an unforgeable
+capability token, evaluated against composable Rego policies,
+and recorded in a tamper-evident cryptographic audit log.
+A successfully prompt-injected agent cannot exfiltrate data if
+the capability to read mail was never granted.
+A malicious extension cannot perform unauthorized network requests
+if its token has already expired.
+The architecture enforces security independently of model behavior.
+
+% ── Paragraph 5: Contributions ──────────────────────────────
+
+\noindent This paper makes the following contributions:
+
+\begin{itemize}
+  \item \textbf{Architecture.} The first formal capability-based
+    governance model for LLM browser agents, combining the
+    Capsicum/COWL lineage~\cite{watson2010capsicum,stefan2014cowl}
+    with Certificate Transparency-style audit
+    logs~\cite{laurie2013rfc6962}.
+
+  \item \textbf{Implementation.} \ferrite{}, a working browser
+    prototype in Rust on the Servo engine, with a policy-evaluated
+    capability broker, hash-chained audit log upgrading to a Merkle
+    tree, and a Wasm extension sandbox with capability-gated host
+    functions.
+
+  \item \textbf{Developer tools.} An Extension Security Analyzer
+    (CLI) and an Agent Action Inspector (UI), usable independently
+    of the browser.
+
+  \item \textbf{Evaluation.} Demonstration that \ferrite{} blocks
+    \todo{N} adversarial scenarios including reproductions of the
+    four 2025 real-world attacks, with median broker latency of
+    \todo{X}$\mu$s---showing architectural enforcement is both
+    effective and efficient.
+\end{itemize}
+
+% ── Paragraph 6: Paper outline ──────────────────────────────
+
+The remainder of this paper is structured as follows.
+\S\ref{sec:background} provides background on capability systems
+and agentic browsers.
+\S\ref{sec:threat_model} defines our threat model and adversary.
+\S\ref{sec:design} presents \ferrite{}'s architecture and design.
+\S\ref{sec:implementation} describes the implementation.
+\S\ref{sec:evaluation} presents our evaluation.
+\S\ref{sec:related_work} discusses related work.
+\S\ref{sec:conclusion} concludes.

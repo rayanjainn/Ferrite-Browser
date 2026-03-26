@@ -1,0 +1,36 @@
+% ============================================================
+% Section 8: Conclusion
+% ============================================================
+% Target length: ~0.3 column (150–200 words)
+% Write: Month 7, after evaluation is complete
+% ============================================================
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\todo{Write after evaluation data is in.
+      Structure:
+      Para 1: restate the problem and our approach in 2 sentences
+      Para 2: summarise the 3 key results (enforcement, latency, bandwidth)
+      Para 3: the broader point -- architectural enforcement as a
+              necessary complement to model-level defenses
+      Para 4: future work (2--3 bullet points max)}
+
+% TEMPLATE:
+%
+% We presented \ferrite{}, the first browser to enforce capability-based
+% governance over AI agent and extension actions with cryptographically
+% verifiable audit trails.
+% Our evaluation demonstrates that \ferrite{} blocks 100\% of
+% \todo{N} adversarial scenarios including reproductions of four
+% real-world 2025 attacks, with median broker latency of \todo{X}$\mu$s.
+%
+% When OpenAI reports that prompt injection ``may never be fully solved''
+% at the model level, \ferrite{}'s capability broker provides a
+% complementary architectural layer: even a successfully compromised
+% agent cannot exceed its granted capabilities, and every decision
+% is verifiably recorded.
+%
+% Future work includes formal verification of capability token properties,
+% integration with public transparency logs (Sigstore Rekor), and
+% evaluation on the CEF/Chromium Track B to validate engine-agnostic deployment.

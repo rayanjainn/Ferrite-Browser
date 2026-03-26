@@ -1,0 +1,6 @@
+url,bytes_without_blocking,bytes_with_blocking,reduction_pct
+# Fill this file by running bandwidth tests with/without adblock-rust
+# Test URLs: cnn.com, bbc.com, reddit.com, theguardian.com, forbes.com,
+#            huffpost.com, dailymail.co.uk, usatoday.com, nypost.com, msn.com
+# Run each 3 times, take median bytes
+# Compute reduction_pct = (1 - bytes_with/bytes_without) * 100

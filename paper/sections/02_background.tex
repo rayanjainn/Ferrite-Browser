@@ -1,0 +1,64 @@
+% ============================================================
+% Section 2: Background
+% ============================================================
+% Target length: ~0.75 column (400–500 words)
+% Write: Month 4, build incrementally
+% Structure: capability systems → agentic browsers →
+%            audit logs → why combining them is novel
+% ============================================================
+
+\section{Background}
+\label{sec:background}
+
+\subsection{Capability-Based Security}
+
+Capability systems restrict access to resources by requiring
+unforgeable tokens (capabilities) that confer specific rights.
+Capsicum~\cite{watson2010capsicum} extended POSIX with
+capability-mode processes and capability file descriptors,
+preventing applications from accessing resources beyond
+explicitly granted capabilities.
+COWL~\cite{stefan2014cowl} brought label-based information
+flow control to web browsers, restricting cross-origin
+communication for browser workers.
+RLBox~\cite{narayan2020rlbox} sandboxed third-party libraries
+in Firefox using WebAssembly, demonstrating capability isolation
+within a production browser context.
+None of these systems addressed the agentic context where
+an AI principal acts with user-level privileges.
+
+\subsection{Agentic Browsers}
+
+\todo{Write when product landscape is fully confirmed.
+      Cover: Perplexity Comet, ChatGPT Atlas, Dia (Atlassian),
+      Brave Leo, Chrome/Edge Copilot integrations.
+      Key point: all grant agents ambient authority with no
+      formal capability model.}
+
+\subsection{Prompt Injection}
+
+Prompt injection attacks embed malicious instructions in content
+that AI agents process, causing them to perform unauthorized
+actions~\cite{greshake2023not}.
+Indirect injection---where instructions are hidden in web content
+rather than the user's direct input---is particularly dangerous
+in browser contexts~\cite{nasr2025}.
+\todo{Add SecureWebArena, WASP, BrowseSafe citations when confirmed.}
+
+\subsection{Cryptographic Audit Logs}
+
+Certificate Transparency (CT)~\cite{laurie2013rfc6962} introduced
+append-only Merkle logs for TLS certificate issuance, enabling
+public auditability of certificate authority behavior.
+Sigstore/Rekor~\cite{sigstore_rekor} extended this model to
+software supply chain verification.
+\ferrite{} applies the same principle to browser agent actions:
+every capability grant, denial, and exercise is recorded in a
+hash-chained log (upgrading to a Merkle tree), enabling
+post-hoc verification that every agent action was authorized.
+
+\subsection{The Gap}
+
+\todo{One paragraph synthesising why no existing work combines
+      these three areas. This is the core research gap claim.
+      Reference the table from PROJECT\_REFERENCE.md.}

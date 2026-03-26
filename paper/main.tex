@@ -1,0 +1,123 @@
+% ============================================================
+% Ferrite Browser — Main Paper File
+% ============================================================
+% Build command (from paper/ directory):
+%   pdflatex main.tex
+%   bibtex main
+%   pdflatex main.tex
+%   pdflatex main.tex
+%
+% Or with latexmk (recommended):
+%   latexmk -pdf main.tex
+%
+% Target venues (update as decided):
+%   Primary:   ARES 2026 (submission ~April 2026)
+%   Prestige:  USENIX Security 2027 (submission Jan 2027)
+%
+% Style notes:
+%   - Switch \documentclass options for different venues:
+%     USENIX: use usenix2023_ae style
+%     ACM (ACSAC/CCS): use acmart with sigconf option
+%     IEEE (EuroS&P): use IEEEtran
+%   - Currently set up for a generic two-column conference format
+% ============================================================
+
+\documentclass[10pt,twocolumn]{article}
+
+% ── Packages ────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{microtype}
+\usepackage{times}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{balance}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{multirow}
+\usepackage{subcaption}
+
+% ── Listing style for Rust code ──────────────────────────────
+\lstdefinelanguage{Rust}{
+  keywords={fn, let, mut, pub, struct, enum, impl, trait, use,
+            match, if, else, return, true, false, Some, None,
+            Ok, Err, Self, self, for, in, while, loop, type,
+            where, async, await, move},
+  keywordstyle=\color{blue}\bfseries,
+  comment=[l]{//},
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{orange},
+  morestring=[b]",
+}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  captionpos=b,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+}
+
+% ── Hyperref setup ───────────────────────────────────────────
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue,
+}
+
+% ── Custom commands ──────────────────────────────────────────
+\newcommand{\ferrite}{\textsc{Ferrite}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+\newcommand{\note}[1]{\textcolor{blue}{\textbf{[NOTE: #1]}}}
+\newcommand{\review}[1]{\textcolor{orange}{\textbf{[REVIEW: #1]}}}
+
+% ── Title ────────────────────────────────────────────────────
+\title{\textbf{\ferrite: Capability-Governed Agentic Browsing\\
+               with Verifiable Audit Trails}}
+
+\author{
+  % Author names redacted for blind review
+  % Uncomment for camera-ready:
+  % Author One \and Author Two \and Author Three \\
+  % Institution Name \\
+  % \texttt{email@institution.edu}
+  Anonymous Authors
+}
+
+\date{}
+
+% ============================================================
+\begin{document}
+% ============================================================
+
+\maketitle
+
+% ── Abstract ────────────────────────────────────────────────
+\input{sections/abstract}
+
+% ── Body sections ───────────────────────────────────────────
+\input{sections/01_introduction}
+\input{sections/02_background}
+\input{sections/03_threat_model}
+\input{sections/04_design}
+\input{sections/05_implementation}
+\input{sections/06_evaluation}
+\input{sections/07_related_work}
+\input{sections/08_conclusion}
+
+% ── Acknowledgements (uncomment for camera-ready) ───────────
+% \section*{Acknowledgements}
+% \todo{Add acknowledgements for camera-ready version.}
+
+% ── Bibliography ────────────────────────────────────────────
+\bibliographystyle{plain}
+\bibliography{bibliography}
+
+\end{document}

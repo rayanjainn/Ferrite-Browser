@@ -177,7 +177,30 @@ mod inner {
         ///
         /// Opens `$TMPDIR/ferrite_servo_session.db` for the audit log and mints
         /// a wildcard `NetworkFetch` token (3600 s TTL).
+        ///
+        /// On Windows, Servo's EGL/surfman backend requires ANGLE (`libEGL.dll`,
+        /// `libGLESv2.dll`) in the executable's directory or on PATH.  If those
+        /// DLLs are absent the EGL bindings panic at function-pointer load time.
+        /// This constructor wraps the entire initialisation in `catch_unwind` so
+        /// the panic is converted to an `Err` rather than crashing the process —
+        /// the caller can then fall back to a no-Servo UI gracefully.
         pub fn new(width: u32, height: u32) -> Result<Self, String> {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::new_inner(width, height)
+            }))
+            .unwrap_or_else(|payload| {
+                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                    format!("Servo init panic: {}", s)
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    format!("Servo init panic: {}", s)
+                } else {
+                    "Servo init panic: EGL not available (ANGLE DLLs missing on Windows?)".to_string()
+                };
+                Err(msg)
+            })
+        }
+
+        fn new_inner(width: u32, height: u32) -> Result<Self, String> {
             // ── rustls crypto provider ─────────────────────────────────────
             let _ = aws_lc_rs::default_provider().install_default();
 

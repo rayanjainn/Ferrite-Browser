@@ -1,0 +1,25 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.loa
+
+# Output PDF (regenerated from source — do not commit)
+main.pdf
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor files
+.vscode/
+*.swp
+*~

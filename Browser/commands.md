@@ -212,7 +212,7 @@ docker build -f .devcontainer/Dockerfile -t ferrite-dev .
 
 ### Run a shell inside the container
 ```bash
-docker run --rm -it -v "%cd%":/workspace ferrite-dev bash
+docker run --rm -it -v "${PWD}:/workspace" ferrite-dev bash
 ```
 
 ---

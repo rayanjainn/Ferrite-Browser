@@ -1,0 +1,8 @@
+This file to be filled by running:
+
+  cd Browser
+  cargo install tokei
+  tokei crates/ --output json
+
+Then copy the JSON output here.
+Used for the LoC table in Section 5 (Implementation).

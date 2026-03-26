@@ -1,0 +1,89 @@
+% ============================================================
+% Section 5: Implementation
+% ============================================================
+% Target length: ~1 column (500–700 words)
+% Write: Month 6 (R1 + R3)
+% Include: crate structure, LoC table, key implementation
+%          decisions, known limitations
+% ============================================================
+
+\section{Implementation}
+\label{sec:implementation}
+
+\ferrite{} is implemented in Rust (edition 2021) as a Cargo
+workspace of \todo{N} crates totalling approximately \todo{X}
+lines of code.
+The browser is built on Servo v0.0.5~\cite{servo} for rendering
+and Iced~\cite{iced} for the UI shell.
+
+\subsection{Crate Structure}
+
+\begin{table}[h]
+  \centering
+  \caption{Ferrite crate structure and lines of code.
+           \todo{Fill LoC column from `tokei` output in Month 6.}}
+  \label{tab:crates}
+  \begin{tabular}{lrp{3.5cm}}
+    \toprule
+    Crate & LoC & Responsibility \\
+    \midrule
+    \texttt{ferrite-capability-broker} & \todo{N} & Token minting, validation, policy dispatch \\
+    \texttt{ferrite-audit-log}         & \todo{N} & Hash-chained log, SQLite index \\
+    \texttt{ferrite-policy}            & \todo{N} & Regorus/Rego policy engine wrapper \\
+    \texttt{ferrite-sandbox}           & \todo{N} & Extism/Wasmtime extension host \\
+    \texttt{ferrite-servo}             & \todo{N} & Servo embedding, fetch interception \\
+    \texttt{ferrite-ui}                & \todo{N} & Iced UI shell, consent dialogs \\
+    \texttt{ferrite-agent}             & \todo{N} & JSON-RPC WebSocket agent runtime \\
+    \texttt{ferrite-tools}             & \todo{N} & CLI analyzer, agent inspector \\
+    \texttt{ferrite-shell}             & \todo{N} & Binary entry point, integration tests \\
+    \midrule
+    Total                              & \todo{N} & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% HOW TO GET LoC:
+% Run from Browser/ directory:
+%   cargo install tokei
+%   tokei crates/ --output json > ../paper/data/loc.json
+% Then extract per-crate Rust LoC from the JSON.
+
+\subsection{Capability Broker}
+
+\todo{2--3 paragraphs on broker implementation.
+      Key points: HashMap token store, check() flow,
+      policy evaluation integration, &mut self issue and
+      how it was resolved, performance characteristics.}
+
+\subsection{Audit Log}
+
+\todo{2 paragraphs on audit log implementation.
+      Key points: SHA-256 hash chain formula, dual storage
+      (append-only + SQLite), verify\_chain() correctness,
+      Merkle tree upgrade path with rs\_merkle.}
+
+\subsection{Extension Sandbox}
+
+\todo{2 paragraphs on Extism sandbox.
+      Key points: host\_fn! macro ABI, UserData<SandboxState>
+      shared state pattern, capability check before each
+      host function returns, audit log integration.}
+
+\subsection{Engine Integration}
+
+\todo{2 paragraphs on Servo integration.
+      Key points: HeadlessServoSession, SoftwareRenderingContext,
+      load\_web\_resource fetch interception hook,
+      feature flag separation.
+      CEF Track B: describe if implemented, otherwise note
+      as future work.}
+
+\subsection{Implementation Limitations}
+
+\todo{Be honest here -- reviewers respect honesty more than
+      silence. Known limitations to document:
+      - Servo web compatibility (not all sites render correctly)
+      - Rate limiting field exists but not yet enforced
+      - Token signatures not yet Ed25519 (UUID-based nonce only)
+      - CEF Track B status
+      - Windows vs Linux build differences}

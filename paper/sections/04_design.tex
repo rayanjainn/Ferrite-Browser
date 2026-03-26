@@ -1,0 +1,128 @@
+% ============================================================
+% Section 4: Design
+% ============================================================
+% Target length: ~1.5 columns (800–1000 words)
+% Write: Month 5 (R1 + R2)
+% This is the core technical contribution section
+% Figures needed: architecture diagram, token format,
+%                 data flow diagram
+% ============================================================
+
+\section{Design}
+\label{sec:design}
+
+\subsection{Design Principles}
+
+\ferrite{} is built around three principles:
+
+\begin{enumerate}
+  \item \textbf{Single privileged boundary.} The capability
+    broker is the sole component with authority to grant access
+    to sensitive resources. No ambient authority exists anywhere
+    in the system.
+
+  \item \textbf{No trust in untrusted code.} Web content,
+    extensions, and agent outputs are treated as potentially
+    hostile. Capability requests from these components are
+    evaluated against policy before any action is taken.
+
+  \item \textbf{Complete auditability.} Every capability grant,
+    denial, and exercise is recorded in a tamper-evident log.
+    The log provides cryptographic proof that every agent action
+    was (or was not) authorized.
+\end{enumerate}
+
+\subsection{Architecture Overview}
+
+\todo{Insert architecture diagram here.
+      Figure should show: Trusted Zone (broker, policy engine,
+      audit log, UI shell) vs Untrusted Zone (Servo, extension
+      sandbox, agent runtime, network stack).
+      Show capability request flow across the boundary.}
+
+\begin{figure}[h]
+  \centering
+  % \includegraphics[width=\columnwidth]{figures/architecture.pdf}
+  \todo{Figure: architecture diagram — generate from the
+        architecture doc diagrams}
+  \caption{\ferrite{} architecture. The capability broker is
+           the sole privileged boundary between trusted and
+           untrusted components.}
+  \label{fig:architecture}
+\end{figure}
+
+\subsection{Capability Token System}
+
+A capability token is an unforgeable, scoped, time-bounded
+authorization credential.
+Formally, a token $T$ is a tuple:
+
+\[
+T = \langle id, P, C, O, R, t_{exp}, \sigma \rangle
+\]
+
+where:
+\begin{itemize}
+  \item $id$ is a globally unique token identifier (UUID v7)
+  \item $P$ is the principal identity (extension, agent, or web content)
+  \item $C \in \mathcal{C}$ is the capability type from the
+    capability lattice $\mathcal{C}$
+  \item $O$ is the origin scope (URL prefix or wildcard)
+  \item $R \in \{\text{Low}, \text{Medium}, \text{High}\}$
+    is the risk classification
+  \item $t_{exp}$ is the absolute expiry timestamp
+  \item $\sigma$ is the broker's Ed25519 signature over the
+    token fields
+\end{itemize}
+
+A token is valid iff: (1) $\sigma$ verifies under the broker's
+public key, (2) $t_{now} < t_{exp}$, (3) the request URL
+matches $O$, and (4) the policy engine evaluates the token
+as allowed.
+
+\subsection{Capability Types}
+\label{subsec:capability_types}
+
+\todo{Table of Wave 1 and Wave 2 capability types.
+      Copy from CLAUDE.md capability table.}
+
+\subsection{Policy Engine}
+
+\ferrite{} uses Regorus~\cite{regorus}, a pure-Rust implementation
+of the Open Policy Agent (OPA) Rego language, as its policy engine.
+Policies are composable Rego rules loaded from a directory hierarchy
+at broker startup, with a deny-by-default base policy and per-principal
+override files.
+
+\todo{Show example Rego policy snippet. Include the default.rego
+      deny-by-default rule from policies/default.rego.}
+
+\subsection{Risk Classification and Step-Up Consent}
+
+Capabilities are classified into three risk tiers:
+Low (read-only, auto-approved), Medium (write or sensitive read,
+logged and auto-approved), and High (credentials, clipboard,
+downloads -- requires explicit user consent).
+
+High-risk requests cause the broker to return a
+\texttt{ConsentRequired} response rather than a grant.
+The UI shell renders a consent dialog in the trusted browser chrome,
+isolated from web content.
+The agent receives no token until the user explicitly approves.
+
+\subsection{Verifiable Audit Log}
+
+\todo{Describe hash chain structure and Merkle tree upgrade.
+      Include the hash computation formula.
+      Reference Certificate Transparency lineage.}
+
+\subsection{Extension Sandbox}
+
+\todo{Describe Extism/Wasmtime sandbox.
+      Explain capability-gated host functions.
+      Explain why ungranted host functions are not linked.}
+
+\subsection{Agent Protocol}
+
+\todo{Describe JSON-RPC over WebSocket agent protocol.
+      This section written in Month 4 after agent runtime is built.}

@@ -1,0 +1,6 @@
+scenario,iteration,latency_us
+# Fill this file by running:
+# cargo run --release -p ferrite-shell bench
+# Format: scenario name, iteration number, latency in microseconds
+# Scenarios: no_policy, allow_all, deny_by_default
+# Run 10000 iterations per scenario

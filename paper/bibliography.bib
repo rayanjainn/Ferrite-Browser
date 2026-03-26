@@ -1,0 +1,203 @@
+% ============================================================
+% Bibliography
+% ============================================================
+% Add entries here as you read papers.
+% DO NOT wait until writing time to add citations.
+% Every paper you read that is relevant goes here immediately.
+%
+% Format: use BibTeX. Get entries from:
+%   - Google Scholar → Cite → BibTeX
+%   - DBLP (https://dblp.org) for CS papers
+%   - ACM DL / IEEE Xplore / USENIX for venue papers
+% ============================================================
+
+% ── Core capability systems ──────────────────────────────────
+
+@inproceedings{watson2010capsicum,
+  title     = {Capsicum: Practical Capabilities for {UNIX}},
+  author    = {Watson, Robert N. M. and Anderson, Jonathan and
+               Laurie, Ben and Kennaway, Kris},
+  booktitle = {Proceedings of the 19th USENIX Security Symposium},
+  year      = {2010},
+  pages     = {29--46},
+  publisher = {USENIX Association},
+}
+
+@inproceedings{stefan2014cowl,
+  title     = {{COWL}: A Content Security Policy for Privileged Browser
+               Extensions},
+  author    = {Stefan, Deian and Yang, Edward Z. and Marchetti, Petr and
+               Russo, Alejandro and Heule, Stefan and Pfaff, Ben and
+               Mazi{\`e}res, David},
+  booktitle = {11th USENIX Symposium on Operating Systems Design and
+               Implementation (OSDI)},
+  year      = {2014},
+  publisher = {USENIX Association},
+  note      = {\todo{Verify exact title and page numbers from DBLP}},
+}
+
+@inproceedings{narayan2020rlbox,
+  title     = {{RLBox}: Retrofitting Fine-Grained Isolation in the
+               {Firefox} Renderer},
+  author    = {Narayan, Shravan and Disselkoen, Craig and
+               Garfinkel, Tal and Froyd, Nathan and Brown, Eric and
+               Lerner, Sorin and Shacham, Hovav and Stefan, Deian},
+  booktitle = {Proceedings of the 2020 USENIX Annual Technical Conference},
+  year      = {2020},
+  publisher = {USENIX Association},
+}
+
+% ── Prompt injection ─────────────────────────────────────────
+
+@inproceedings{greshake2023not,
+  title     = {Not What You've Signed Up For: Compromising Real-World
+               {LLM}-Integrated Applications with Indirect Prompt Injection},
+  author    = {Greshake, Kai and Abdelnabi, Sahar and Mishra, Shailesh and
+               Endres, Christoph and Holz, Thorsten and Fritz, Mario},
+  booktitle = {Proceedings of the 16th ACM Workshop on Artificial
+               Intelligence and Security},
+  year      = {2023},
+  publisher = {ACM},
+}
+
+@misc{nasr2025,
+  title     = {Defeating Prompt Injections by Design},
+  author    = {Nasr, Milad and others},
+  year      = {2025},
+  month     = {October},
+  note      = {OpenAI, Anthropic, DeepMind joint study.
+               \todo{Find arxiv ID or publication venue and update}},
+}
+
+@misc{openai_prompt_injection_2025,
+  title     = {{OpenAI} acknowledgement that prompt injection may never
+               be fully solved},
+  author    = {{OpenAI}},
+  year      = {2025},
+  month     = {December},
+  note      = {\todo{Find exact source URL or report and update citation}},
+}
+
+% ── Audit logs and transparency ──────────────────────────────
+
+@techreport{laurie2013rfc6962,
+  title       = {Certificate Transparency},
+  author      = {Laurie, Ben and Langley, Adam and Kasper, Emilia},
+  institution = {IETF},
+  type        = {RFC},
+  number      = {6962},
+  year        = {2013},
+  month       = {June},
+  url         = {https://www.rfc-editor.org/rfc/rfc6962},
+}
+
+@misc{sigstore_rekor,
+  title        = {Rekor: Immutable tamper resistant ledger of metadata
+                  generated within a software projects supply chain},
+  author       = {{Sigstore}},
+  year         = {2021},
+  howpublished = {\url{https://github.com/sigstore/rekor}},
+}
+
+% ── Real-world 2025 attacks ──────────────────────────────────
+
+@misc{layerx_cometjacking_2025,
+  title        = {{CometJacking}: How Attackers Can Hijack {AI} Browser
+                  Agents to Exfiltrate Data},
+  author       = {{LayerX Security}},
+  year         = {2025},
+  month        = {October},
+  howpublished = {\url{https://layerxsecurity.com/blog/cometjacking}},
+  note         = {\todo{Verify exact URL}},
+}
+
+@misc{brave_screenshot_injection_2025,
+  title        = {Screenshot Injection Attack Against {AI} Browser Agents},
+  author       = {{Brave Security Research}},
+  year         = {2025},
+  month        = {October},
+  howpublished = {\url{https://brave.com/research/screenshot-injection}},
+  note         = {\todo{Verify exact URL}},
+}
+
+@misc{layerx_tainted_memories_2025,
+  title        = {Tainted Memories: Poisoning {AI} Agent Memory via {CSRF}},
+  author       = {{LayerX Security}},
+  year         = {2025},
+  month        = {October},
+  howpublished = {\url{https://layerxsecurity.com/blog/tainted-memories}},
+  note         = {\todo{Verify exact URLs for all LayerX reports}},
+}
+
+@misc{cato_hashjack_2025,
+  title        = {{HashJack}: Exploiting {URL} Fragments for Prompt Injection},
+  author       = {{Cato Networks}},
+  year         = {2025},
+  month        = {November},
+  howpublished = {\url{https://www.catonetworks.com/blog/hashjack}},
+  note         = {\todo{Verify exact URL}},
+}
+
+% ── Benchmarks and attack surface studies ────────────────────
+
+@misc{wasp2025,
+  title        = {{WASP}: Web Agent Security and Privacy Benchmark},
+  author       = {\todo{Authors}},
+  year         = {2025},
+  note         = {\todo{Find full citation -- arxiv or conference}},
+}
+
+@misc{browsesafe2025,
+  title        = {{BrowseSafe}: \todo{Full title}},
+  author       = {\todo{Authors}},
+  year         = {2025},
+  note         = {\todo{Find full citation}},
+}
+
+@misc{securewebarena2025,
+  title        = {{SecureWebArena}: \todo{Full title}},
+  author       = {\todo{Authors}},
+  year         = {2025},
+  note         = {\todo{Find full citation}},
+}
+
+% ── Google agentic security ───────────────────────────────────
+
+@misc{google_agentic_security_2025,
+  title        = {Agentic {AI} Security Architecture},
+  author       = {{Google Security Research}},
+  year         = {2025},
+  month        = {December},
+  note         = {\todo{Find exact paper title and URL}},
+}
+
+% ── Implementation dependencies ──────────────────────────────
+
+@misc{servo,
+  title        = {Servo, the Parallel Browser Engine},
+  author       = {{The Servo Project}},
+  howpublished = {\url{https://servo.org}},
+  year         = {2012},
+  note         = {v0.0.5},
+}
+
+@misc{iced,
+  title        = {Iced: A cross-platform {GUI} library for {Rust}},
+  author       = {Cerna, H{\'e}ctor},
+  howpublished = {\url{https://github.com/iced-rs/iced}},
+  year         = {2019},
+}
+
+@misc{regorus,
+  title        = {Regorus: A fast, lightweight {Rego} interpreter},
+  author       = {{Microsoft}},
+  howpublished = {\url{https://github.com/microsoft/regorus}},
+  year         = {2023},
+}
+
+@misc{extism,
+  title        = {Extism: The universal plug-in system},
+  author       = {{Dylibso}},
+  howpublished = {\url{https://extism.org}},
+  year         = {2022},
+}

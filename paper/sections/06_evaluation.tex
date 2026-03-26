@@ -1,0 +1,174 @@
+% ============================================================
+% Section 6: Evaluation
+% ============================================================
+% Target length: ~1.5 columns (800–1000 words)
+% Write: Month 6–7 (all team members)
+% THIS IS THE MOST IMPORTANT SECTION FOR ACCEPTANCE
+%
+% DATA COLLECTION INSTRUCTIONS (see paper/data/ directory):
+% All raw data goes in paper/data/ as CSV files.
+% All measurement scripts go in Browser/scripts/bench/
+% ============================================================
+
+\section{Evaluation}
+\label{sec:evaluation}
+
+We evaluate \ferrite{} against four research questions:
+
+\begin{enumerate}
+  \item[\textbf{RQ1}] Does \ferrite{} enforce capability governance
+    with 100\% coverage against realistic attacks?
+  \item[\textbf{RQ2}] What is the performance overhead of the
+    capability broker?
+  \item[\textbf{RQ3}] Does the audit log maintain cryptographic
+    integrity under adversarial conditions?
+  \item[\textbf{RQ4}] Does content blocking provide measurable
+    bandwidth savings?
+\end{enumerate}
+
+\subsection{Experimental Setup}
+
+\todo{Describe the machine used for benchmarks.
+      Required fields: CPU model, core count, RAM, OS,
+      Rust version, Servo version.
+      Also describe the test environment: network conditions,
+      whether tests are run in Docker or on host.}
+
+% DATA TO COLLECT FOR THIS SUBSECTION:
+% - Run: systeminfo (Windows) or uname -a + lscpu (Linux)
+% - Record: CPU, RAM, OS, kernel version
+% - Save to: paper/data/system_info.txt
+
+\subsection{RQ1: Enforcement Coverage}
+
+% ── How to collect this data ────────────────────────────────
+% Run: cargo test --workspace 2>&1 | tee ../paper/data/test_results.txt
+% The adversarial test suite in:
+%   crates/ferrite-shell/tests/broker_adversarial.rs
+%   crates/ferrite-audit-log/tests/audit_adversarial.rs
+% Each test = one adversarial scenario.
+% Document each scenario in the table below.
+% Add attack reproduction tests for the 4 real-world attacks.
+
+\todo{Table: adversarial scenario results.
+      Columns: Scenario ID | Attack Type | Component Tested |
+               Expected Outcome | Result | Notes
+      Target: 20+ rows.
+      Real-world attack reproductions must appear as named rows:
+      CometJacking, Screenshot Injection, Tainted Memories, HashJack.}
+
+\begin{table}[h]
+  \centering
+  \caption{Adversarial scenario results. \cmark{} = blocked as expected.}
+  \label{tab:adversarial}
+  \begin{tabular}{llll}
+    \toprule
+    ID & Attack Scenario & Component & Result \\
+    \midrule
+    A1  & Expired token     & Broker & \todo{\cmark} \\
+    A2  & Origin mismatch   & Broker & \todo{\cmark} \\
+    A3  & Policy rejection (DomWrite) & Policy & \todo{\cmark} \\
+    A4  & Token revocation  & Broker & \todo{\cmark} \\
+    A5  & Unknown token ID  & Broker & \todo{\cmark} \\
+    A6  & WebContent principal & Policy & \todo{\cmark} \\
+    A7  & CometJacking repro & Broker+Policy & \todo{\cmark} \\
+    A8  & Screenshot Injection repro & Broker & \todo{\cmark} \\
+    A9  & Tainted Memories repro & Broker+Audit & \todo{\cmark} \\
+    A10 & HashJack repro    & Broker & \todo{\cmark} \\
+    \todo{...} & \todo{10+ more} & & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{RQ2: Broker Performance}
+
+% ── How to collect this data ────────────────────────────────
+% Add a benchmark binary: crates/ferrite-shell/src/bin/bench_broker.rs
+% Measure:
+%   - 10,000 iterations of broker.check() with a valid token
+%   - 10,000 iterations with an expired token (fast path)
+%   - 10,000 iterations with policy evaluation (regorus)
+% Record: min, median, p95, p99, max in microseconds
+% Also measure with 1, 10, 50 active tokens in the HashMap
+% Save raw output to: paper/data/broker_latency.csv
+% Format: scenario,iteration,latency_us
+%
+% Run on BOTH debug and release builds.
+% Report release build numbers in the paper.
+%
+% Command:
+%   cargo build --release -p ferrite-shell
+%   cargo run --release -p ferrite-shell bench 2>&1 | tee ../paper/data/broker_latency_raw.txt
+
+\todo{Figure: CDF or box plot of broker latency distribution.
+      X-axis: latency in microseconds.
+      Y-axis: cumulative fraction of requests.
+      Show three lines: no-policy, allow-all policy, deny-by-default policy.
+      Generate with: python3 scripts/plot_latency.py paper/data/broker_latency.csv}
+
+\begin{table}[h]
+  \centering
+  \caption{Capability broker latency (\textmu s), release build.
+           \todo{Fill from paper/data/broker\_latency.csv}}
+  \label{tab:latency}
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Scenario & Min & Median & P95 & P99 & Max \\
+    \midrule
+    No policy     & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+    Allow-all     & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+    Deny-by-default & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{RQ3: Audit Log Integrity}
+
+% ── How to collect this data ────────────────────────────────
+% Tests in: crates/ferrite-audit-log/tests/audit_adversarial.rs
+% Specifically:
+%   - test_tampered_entry_hash_detected
+%   - test_tampered_prev_hash_detected
+%   - test_sqlite_detects_tampered_chain_on_load
+%   - test_100_entries_chain_valid
+% Record: verify_chain() result, time to verify N entries
+% Save to: paper/data/audit_integrity.csv
+%
+% Also measure: time to verify chains of 100, 1000, 10000 entries
+% This shows the log scales correctly.
+
+\todo{Table or figure: chain verification time vs number of entries.
+      Show it scales linearly (expected for hash chain).
+      Show that any single-entry tamper is detected.}
+
+\subsection{RQ4: Bandwidth Savings}
+
+% ── How to collect this data ────────────────────────────────
+% Test URLs (tracker-heavy sites):
+%   cnn.com, bbc.com, reddit.com, theguardian.com, forbes.com,
+%   huffpost.com, dailymail.co.uk, usatoday.com, nypost.com, msn.com
+%
+% Method:
+%   1. Disable adblock-rust in Servo (feature flag or config)
+%   2. Load each URL, record total bytes from Servo network stats
+%   3. Enable adblock-rust
+%   4. Load each URL again, record total bytes
+%   5. Compute % reduction per site
+%   Save to: paper/data/bandwidth_savings.csv
+%   Format: url,bytes_without_blocking,bytes_with_blocking,reduction_pct
+%
+% Note: control for caching by clearing between runs
+% Run each URL 3 times, take median
+
+\todo{Figure: bar chart of bandwidth savings per site.
+      Show \% reduction on Y-axis, site name on X-axis.
+      Mark the 10\% target line.}
+
+\subsection{Discussion}
+
+\todo{3--4 paragraphs:
+      1. What the results mean for the research questions
+      2. Honest discussion of limitations (Servo compat, etc.)
+      3. Comparison to model-level defenses (cite Nasr et al.)
+      4. The key claim: architectural enforcement works
+         independently of model behavior}

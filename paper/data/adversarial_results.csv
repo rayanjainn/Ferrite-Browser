@@ -1,0 +1,5 @@
+scenario_id,attack_type,component,expected,actual,notes
+# Fill this file from cargo test --workspace output
+# One row per adversarial test case
+# expected and actual values: BLOCKED or ALLOWED
+# All rows should have expected=BLOCKED, actual=BLOCKED for a passing suite

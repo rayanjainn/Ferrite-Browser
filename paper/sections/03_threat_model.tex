@@ -1,0 +1,66 @@
+% ============================================================
+% Section 3: Threat Model
+% ============================================================
+% Target length: ~0.5 column (300 words)
+% Write: Month 3 (R2 — security person)
+% This section should be written early and not change much
+% ============================================================
+
+\section{Threat Model}
+\label{sec:threat_model}
+
+\subsection{Assets}
+
+We protect the following assets on behalf of the browser user:
+
+\begin{itemize}
+  \item \textbf{Private data} — cookies, localStorage, session
+    tokens, form contents, and any data accessible via the DOM
+    of pages the user has authenticated to.
+  \item \textbf{System resources} — the local filesystem,
+    clipboard, notification system, and download directory.
+  \item \textbf{User intent} — actions performed by agents or
+    extensions must reflect what the user authorised, not
+    what an attacker injected.
+\end{itemize}
+
+\subsection{Adversary Model}
+
+We consider the following adversary:
+
+\begin{itemize}
+  \item \textbf{Web content adversary.} Malicious web pages
+    that embed hidden instructions (prompt injection) designed
+    to manipulate an LLM agent into performing unauthorized
+    actions. The adversary controls the content of visited pages
+    but does not control the browser process or OS.
+
+  \item \textbf{Malicious extension.} A browser extension
+    that attempts to exceed its declared capabilities, access
+    capabilities of other extensions, or exfiltrate data
+    without authorization.
+
+  \item \textbf{Compromised agent.} An LLM agent that has
+    been successfully prompt-injected and issues capability
+    requests beyond what the user intended. We do not assume
+    the LLM itself is trustworthy.
+\end{itemize}
+
+\subsection{Trust Assumptions}
+
+We assume the following are trusted:
+the browser binary, the OS kernel, and the user's direct input
+to the browser chrome (address bar, consent dialogs).
+We explicitly do \emph{not} trust: web content, LLM outputs,
+extension code, or the rendering engine.
+
+\subsection{Out of Scope}
+
+Physical attacks, OS-level compromise, and attacks on the LLM
+API provider are out of scope.
+Side-channel attacks on the capability broker are not addressed
+in this work.
+
+\todo{Review threat model against the four 2025 attacks to ensure
+      each attack falls within scope and the adversary model
+      covers the attacker's position in each case.}

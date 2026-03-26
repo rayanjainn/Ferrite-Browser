@@ -1,0 +1,71 @@
+% ============================================================
+% Section 7: Related Work
+% ============================================================
+% Target length: ~0.75 column (400–500 words)
+% Write: Month 4, update incrementally as you read papers
+% ADD NEW PAPERS HERE as you find them — don't wait
+% ============================================================
+
+\section{Related Work}
+\label{sec:related_work}
+
+\subsection{Browser Security and Compartmentalization}
+
+Capsicum~\cite{watson2010capsicum} introduced capability-mode
+processes to FreeBSD, restricting applications to explicitly
+granted file descriptors and system calls.
+COWL~\cite{stefan2014cowl} extended label-based mandatory
+access control to browser workers, preventing cross-origin
+information leaks in web applications.
+RLBox~\cite{narayan2020rlbox} sandboxed third-party libraries
+in Firefox using WebAssembly, demonstrating practical capability
+isolation in a production browser.
+\ferrite{} extends this lineage to the agentic context, where
+the principal is an AI agent rather than a browser worker or
+library.
+
+\subsection{Prompt Injection and Agentic Security}
+
+Greshake et al.~\cite{greshake2023not} provided the first
+systematic study of indirect prompt injection, demonstrating
+that web content could hijack LLM agents browsing on behalf
+of users.
+Nasr et al.~\cite{nasr2025} evaluated twelve prompt injection
+defenses across models from OpenAI, Anthropic, and DeepMind,
+finding all fail against adaptive adversaries.
+\todo{Add WASP, BrowseSafe, SecureWebArena citations.}
+These works motivate architectural rather than model-level defenses.
+\ferrite{}'s capability broker provides enforcement independent
+of model behavior---a successfully injected agent cannot exceed
+its granted capabilities regardless of what instructions it receives.
+
+\subsection{Web Agent Security Benchmarks}
+
+\todo{Cover WASP, BrowseSafe, SecureWebArena (2025).
+      Key point: these benchmarks characterize the attack surface
+      but propose no architectural defense. We provide the defense.}
+
+\subsection{Transparency and Auditability}
+
+Certificate Transparency~\cite{laurie2013rfc6962} established
+append-only Merkle logs for public auditability of TLS certificate
+issuance, enabling detection of mis-issuance.
+Sigstore/Rekor~\cite{sigstore_rekor} extended this model to
+software artifact signing and supply chain verification.
+\ferrite{} applies the same cryptographic auditability primitive
+to browser agent actions, enabling post-hoc verification that
+every action was authorized under the active policy.
+
+\subsection{Extension Security}
+
+\todo{Cover Chrome MV3 permission model, Firefox extension
+      sandboxing. Key differentiator: MV3 is coarse-grained
+      and not connected to an audit system. Ferrite's per-capability
+      per-origin Wasm sandbox with audit integration is finer-grained.}
+
+\subsection{Existing Agentic Browsers}
+
+\todo{Cover Perplexity Comet, ChatGPT Atlas, Dia, Brave Leo.
+      Key point: none implement formal capability-based access control
+      or verifiable audit trails. Cite the 2025 vulnerability reports
+      for each where available.}

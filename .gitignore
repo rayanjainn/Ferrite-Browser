@@ -1,2 +1,46 @@
-ferrite_viva_prep_guide.html
+# ── Ferrite Browser — repo root .gitignore ──────────────────
+# This file covers the entire Major Project/ repo.
+# A separate .gitignore inside paper/ covers LaTeX artifacts.
+# A separate .gitignore inside Browser/ covers Rust artifacts.
+
+# ── Rust build output ────────────────────────────────────────
+Browser/target/
+
+# ── LaTeX build artifacts ────────────────────────────────────
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.log
+paper/*.out
+paper/*.synctex.gz
+paper/*.toc
+paper/*.lof
+paper/*.lot
+paper/*.loa
+# Don't commit the compiled PDF — regenerate from source
+paper/main.pdf
+
+# ── Python cache ─────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Wasm build output ────────────────────────────────────────
+extensions/*/target/
+
+# ── Cargo lock for binaries (keep for reproducibility) ───────
+# Browser/Cargo.lock  ← intentionally NOT ignored for a binary crate
+
+# ── OS and editor files ──────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/settings.json
+.idea/
+
+# ── Claude / AI tool artifacts ───────────────────────────────
 .claude/
+Resources/ferrite_viva_prep_guide.html
