@@ -38,14 +38,36 @@ pub use inner::HeadlessServoSession;
 
 #[cfg(feature = "servo")]
 mod inner {
+    use std::cell::RefCell;
     use std::rc::Rc;
 
     use rustls::crypto::aws_lc_rs;
     use servo::{
-        RenderingContext, ServoBuilder, ServoDelegate, SoftwareRenderingContext, WebViewBuilder,
-        WebViewDelegate,
+        RenderingContext, Servo, ServoBuilder, ServoDelegate, SoftwareRenderingContext,
+        WebViewBuilder, WebViewDelegate,
     };
     use winit::dpi::PhysicalSize;
+
+    // Servo's `opts` module uses a global singleton that panics if initialised
+    // more than once per process.  We therefore create the `Servo` engine once
+    // and share it (via `Clone`, which is a cheap `Rc` bump) across all tabs.
+    thread_local! {
+        static SERVO_ENGINE: RefCell<Option<Servo>> = const { RefCell::new(None) };
+    }
+
+    /// Return (or lazily create) the process-wide `Servo` engine.
+    ///
+    /// The first call builds the engine; every subsequent call clones the `Rc`
+    /// wrapper, so `opts::initialize_options` is only ever called once.
+    fn get_or_init_servo() -> Servo {
+        SERVO_ENGINE.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            if guard.is_none() {
+                *guard = Some(ServoBuilder::default().build());
+            }
+            guard.as_ref().unwrap().clone()
+        })
+    }
 
     use ferrite_audit_log::{AuditEventKind, PersistentAuditLog};
     use ferrite_capability_broker::{
@@ -248,7 +270,9 @@ mod inner {
                 .map_err(|e| format!("make_current: {:?}", e))?;
 
             // ── Servo engine ───────────────────────────────────────────────
-            let servo = ServoBuilder::default().build();
+            // Reuse the process-wide Servo instance (opts can only be
+            // initialised once; subsequent tabs clone the Rc handle).
+            let servo = get_or_init_servo();
             servo.set_delegate(Rc::new(HeadlessServoDelegate));
 
             // ── WebView ───────────────────────────────────────────────────
@@ -352,19 +376,33 @@ mod inner {
             false
         }
 
-        /// Drive Servo's internal event loop for one turn, sync load state,
-        /// then read back the composited frame.
+        /// Pump the shared Servo engine for one turn.
         ///
-        /// Call this on every Iced subscription tick before calling `get_frame()`.
-        pub fn spin(&mut self) {
+        /// When multiple tabs are open this must be called **exactly once per
+        /// tick** (on any one session) before calling `sync_and_read()` on
+        /// every session.  Calling it more than once per tick risks double-
+        /// processing paint messages and can cause a segfault inside Servo.
+        pub fn pump_engine(&self) {
             self.servo.spin_event_loop();
+        }
 
+        /// Sync per-tab state from delegate callbacks and read back the latest
+        /// composited frame into `last_frame`.
+        ///
+        /// Call this on **every** session after one `pump_engine()` call.
+        pub fn sync_and_read(&mut self) {
             // Sync load status, URL, and page title from delegate callbacks.
             self.last_load_status = self.shared_load_status.borrow().clone();
             self.current_url = self.shared_url.borrow().clone();
             self.last_page_title = self.shared_page_title.borrow().clone();
 
             // Read back the current frame after paint.
+            //
+            // `pump_engine()` may have called `make_current()` on another
+            // tab's rendering context (GL context is a per-thread global).
+            // Re-establish this tab's context as current before the readback so
+            // `glReadPixels` reads the correct surface.
+            let _ = self.rendering_context.make_current();
             let rect = servo::DeviceIntRect::from_origin_and_size(
                 servo::DeviceIntPoint::origin(),
                 servo::DeviceIntSize::new(self.width as i32, self.height as i32),
@@ -372,6 +410,12 @@ mod inner {
             if let Some(rgba) = self.rendering_context.read_to_image(rect) {
                 self.last_frame = Some(rgba.into_raw());
             }
+        }
+
+        /// Convenience wrapper for the single-tab case: pump + sync + read in one call.
+        pub fn spin(&mut self) {
+            self.pump_engine();
+            self.sync_and_read();
         }
 
         /// Returns `(width, height, rgba_bytes)` of the most recently rendered
@@ -418,6 +462,10 @@ impl HeadlessServoSession {
     pub fn reload(&self) {}
 
     pub fn stop(&self) {}
+
+    pub fn pump_engine(&self) {}
+
+    pub fn sync_and_read(&mut self) {}
 
     pub fn spin(&mut self) {}
 

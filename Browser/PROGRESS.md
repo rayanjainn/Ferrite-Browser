@@ -48,6 +48,47 @@ Major Project/                  ← git repo root, reference docs, PDFs
 
 ## Change Log
 
+### 2026-03-26 — Fix segfault with 2+ tabs + full UI visual overhaul
+
+**Files:** `crates/ferrite-servo/src/session.rs`, `crates/ferrite-ui/src/lib.rs`
+
+**Segfault fix:**
+- Root cause: `spin()` (which calls `servo.spin_event_loop()`) was being called once per tab per tick — N calls per tick for N tabs. Since all tabs share one `Servo`, this double-processes paint messages and triggers a segfault inside Servo's compositor.
+- Fix: split `spin()` into `pump_engine()` (call once per tick, on any session) and `sync_and_read()` (call on every session). The `ServoFrame` handler now calls `pump_engine` once then `sync_and_read` on all sessions.
+
+**UI overhaul:**
+- Replaced `Theme::Dark` palette references with a hand-crafted dark colour system: `C_BASE`, `C_SURFACE`, `C_RAISED`, `C_DIVIDER`, `C_TEXT`, `C_TEXT_DIM`, `C_ACCENT` (electric indigo), `C_INPUT`, `C_SAFE`, `C_WARN`
+- Tab bar: tabs use rounded top corners; active tab drops to `C_BASE` (feels attached to content); accent underline uses `C_ACCENT`; inactive tabs show `C_TEXT_DIM` labels, brightening on hover
+- Navigation toolbar: single-character `‹` `›` `↺` glyphs sized for crisp rendering; pill address bar with `C_INPUT` background and `C_ACCENT` focus ring; `⚿` HTTPS indicator in `C_SAFE` green
+- Progress bar: 2 px pulsing `C_ACCENT` stripe reserved at all times to prevent content layout shift
+- New-tab page: `⬡` hexagon logo mark at 52 px; wordmark at 36 px; shortcut cards with `C_SURFACE` background and subtle border, hex icons; large search bar with 26 px border radius
+- Error page: accent-coloured primary CTA button with shadow; cleaner copy
+- Audit panel: `C_RAISED` header row, `C_TEXT_DIM` column labels, tighter row spacing
+- All style functions now use palette constants directly instead of `theme.extended_palette()` tokens
+- `cargo build --features ferrite-servo/servo -p ferrite-shell` — ✅
+
+---
+
+### 2026-03-26 — Fix tab isolation: wrong page shown after switching tabs
+
+**File:** `crates/ferrite-servo/src/session.rs`
+
+- Root cause: GL context is a per-thread global. `spin_event_loop()` drives all WebViews and calls `make_current()` on each painter's rendering context as it renders. After the loop, the last context to render (tab 2) is left as "current". When tab 1's `spin()` then calls `read_to_image` (which uses `glReadPixels`), it reads from whichever surface was last made current — tab 2's — giving the wrong pixels.
+- Fix: call `self.rendering_context.make_current()` immediately before `read_to_image` in `spin()` to re-establish the correct GL context for this tab before the readback.
+- `cargo build --features ferrite-servo/servo -p ferrite-shell` — ✅ passes
+
+---
+
+### 2026-03-26 — Fix "Already initialized" panic when opening multiple tabs
+
+**File:** `crates/ferrite-servo/src/session.rs`
+
+- Root cause: `ServoBuilder::default().build()` calls `opts::initialize_options()` which uses a process-wide global and panics if called more than once. Every `HeadlessServoSession::new()` call (one per tab) was triggering this.
+- Fix: added a `thread_local! { static SERVO_ENGINE: RefCell<Option<Servo>> }` singleton and a `get_or_init_servo()` helper that builds the `Servo` engine on the first call and `.clone()`s the `Rc` wrapper on all subsequent calls. `ServoBuilder` is only invoked once per process.
+- `cargo build --features ferrite-servo/servo -p ferrite-shell` — ✅ passes
+
+---
+
 ### 2026-03-25 — Fix go_back/go_forward/stop API mismatches in ferrite-servo
 
 **File:** `crates/ferrite-servo/src/session.rs`
