@@ -41,7 +41,7 @@ In crates/ferrite-shell/src/main.rs add a second binary target or a feature flag
 
 Add ferrite-servo as a path dependency in ferrite-shell/Cargo.toml.
 ```
-Exit condition: `cargo run --bin ferrite-shell window` opens a blank window titled "Ferrite Browser" and closes cleanly when you press the 'X' button.![Result](image.png)
+Exit condition: `cargo run --bin ferrite-shell window` opens a blank window titled "Ferrite Browser" and closes cleanly when you press the 'X' button.
 
 ### Block 3: Embed Servo, render a blank page  |  ✅ Done
 What it does: Initialises Servo inside the window and loads about:blank. The window now has a live browser engine running in it, even though it shows nothing visible. This is the hardest block — Servo's embedding API has a specific initialisation sequence.
@@ -69,7 +69,7 @@ In crates/ferrite-servo/src/shell.rs extend ServoShell to embed Servo:
 
 Use servo v0.0.5 embedding API. If the exact method names differ from above, use the closest equivalents from the servo embedding crate's public API.
 ```
-Exit condition: `cargo run -p ferrite-shell window` opens a window, Servo initialises without panicking (check terminal — no crash), and the window renders (even if blank/white).![Result](/output_images/image-1.png)
+Exit condition: `cargo run -p ferrite-shell window` opens a window, Servo initialises without panicking (check terminal — no crash), and the window renders (even if blank/white).
 
 ### Block 4: Navigate to a real URL  |  ✅ Done
 What it does: Points Servo at https://example.com and renders it. This is the Month 1 R1 milestone — "Servo renders a page".
