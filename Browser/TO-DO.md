@@ -929,3 +929,138 @@ In crates/ferrite-ui/src/lib.rs:
    (Real favicons from Servo come later — this is just the placeholder)
 ```
 Exit condition: `cargo run -p ferrite-shell ui`. New tab shows the Ferrite home page with working search bar. Navigating to an invalid URL shows the error page with Try Again button. Tab labels update to page titles after loading. Tabs show globe or spinner icon.
+
+## Task 8: JavaScript Engine Integration
+### Block 1: Verify SpiderMonkey is active and JS runs on real pages
+What it does: Confirms that Servo's embedded SpiderMonkey JS engine is correctly processing JavaScript on loaded pages. Tests against progressively JS-heavy sites to establish a baseline of what works and what doesn't. Documents the current JS compatibility ceiling as a known limitation for the paper.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-servo/src/session.rs:
+
+1. Add a JSCompatResult struct:
+   pub struct JSCompatResult {
+     pub url: String,
+     pub js_executed: bool,       // did any JS run at all
+     pub console_errors: Vec<String>, // JS errors from the page
+     pub page_title: Option<String>,  // title set by JS (proves JS ran)
+   }
+
+2. Add to HeadlessServoSession:
+   - js_console_errors: Vec<String> collected via the WebViewDelegate
+     console message callback (implement notify_console_message or equivalent
+     in servo v0.0.5 WebViewDelegate)
+   - pub fn take_console_errors(&mut self) -> Vec<String>
+     drains and returns the collected errors
+
+3. Add a HeadlessServoSession::test_js_compat(url: &str) -> JSCompatResult method:
+   - Navigates to the URL
+   - Calls spin() in a loop for up to 5 seconds (or until load completes)
+   - Returns JSCompatResult with:
+     - js_executed: true if page_title changed from None (JS set it)
+     - console_errors: any errors collected during load
+     - page_title: the final title
+
+4. In ferrite-shell/src/main.rs add CLI arg "jstest":
+   - Creates a HeadlessServoSession
+   - Runs test_js_compat on these URLs in order:
+     "https://example.com"           (minimal JS)
+     "https://lite.duckduckgo.com"   (light JS)
+     "https://doc.rust-lang.org"     (moderate JS)
+   - Prints a table:
+     URL | JS Executed | Title | Errors
+   - Prints summary: "JS compat baseline complete"
+   - Saves results to paper/data/js_compat_baseline.csv
+```
+Exit condition: `cargo run -p ferrite-shell -- jstest` prints the compatibility table and creates the CSV file. example.com should show JS executed = true. Results document Servo's actual JS support level.
+
+### Block 2: Expose `js.execute` as a broker-gated capability
+What it does: Adds `JsExecute` as a new capability type in the broker. Agents and extensions can request to run a JavaScript snippet on the current page via a `host_js_execute` host function. The broker gates this with policy — JS execution is classified as High risk by default, requiring step-up consent. Every execution is logged to the audit trail with the script content hashed (not stored raw, for privacy).
+
+Prompt for Claude Code:
+```
+1. In crates/ferrite-capability-broker/src/lib.rs:
+   - Add JsExecute to the CapabilityType enum
+   - Add JsExecute → RiskLevel::High in classify_risk()
+   - Update PrincipalKind → capability allow rules in policies/default.rego:
+     Add a rule: allow if { input.principal_kind == "agent", input.capability == "js_execute" }
+     (agents may request JS execution; policy will still require consent via High risk classification)
+
+2. In crates/ferrite-servo/src/session.rs:
+   - Add to HeadlessServoSession:
+     pub fn execute_js(&mut self, script: &str) -> Result<String, String>
+     Uses servo's WebView JS evaluation API (webview.evaluate_script() or equivalent)
+     Returns the result as a string, or an error string if execution fails
+     Logs: println!("[ferrite-js] execute: {} chars, result: {}", script.len(), &result[..50.min(result.len())])
+
+3. In crates/ferrite-sandbox/src/lib.rs:
+   - Add a JsExecute token to SandboxState (minted at construction, High risk)
+   - Add host function host_js_execute(script: String) -> String:
+     Calls broker.check(js_execute_token, "*")
+     If Granted → call session.execute_js(&script), return result
+     If Denied → return "ERROR: js.execute denied"
+     Append to audit log: capability "js.execute", url = SHA-256 hash of script
+       (hash the script rather than storing it raw — privacy preservation)
+   - Add test export to hello-ext: test_js_execute
+     Calls host_js_execute("1 + 1") and returns the result
+
+4. Update run_demo() in ExtensionSandbox to also call test_js_execute
+   and print the result.
+```
+Exit condition: `cargo run -p ferrite-shell sandbox` prints the JS execution result ("2" for "1 + 1"). The audit log contains a JsExecute entry with the script hash, not the raw script. The broker correctly classifies JsExecute as High risk.
+
+### Block 3: DevTools JS console panel in Iced UI
+What it does: Adds a JavaScript console panel to the Iced DevTools drawer — an input field where the developer can type JS snippets and execute them on the current page, with output displayed below. Connected to Servo's JS runtime via the broker. All executions are capability-checked and audit-logged. The panel sits alongside the existing audit log panel.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ui/src/lib.rs:
+
+1. Add to FerriteBrowser state:
+   - show_js_console: bool (default false)
+   - js_input: String (the live console input text)
+   - js_output: Vec<(String, String)> — Vec of (input_snippet, result) pairs
+   - js_broker: Option<CapabilityBroker> with a JsExecute token minted for
+     PrincipalKind::Agent, origin "*", 3600s TTL
+
+2. Add to FerriteBrowserMessage:
+   - ToggleJsConsole
+   - JsInputChanged(String)
+   - JsExecuteRequested
+
+3. Add to update():
+   - ToggleJsConsole → toggle show_js_console
+   - JsInputChanged(s) → set js_input = s
+   - JsExecuteRequested:
+     1. Clone js_input as the script
+     2. Call broker.check(js_execute_token, "*") on js_broker
+     3. If Granted → call servo_sessions[active_tab].execute_js(&script)
+        Append (script, result) to js_output
+     4. If ConsentRequired → append (script, "BLOCKED: step-up consent required") to js_output
+        (Full consent dialog wiring comes in Month 3 — for now just show the message)
+     5. Clear js_input
+
+4. In view(), add a second panel toggle button in the DevTools toolbar:
+   - "JS Console" button alongside the existing "Audit Log" button
+   - Same active/inactive visual style
+
+5. When show_js_console is true, render below the toolbar (250px fixed height,
+   same as audit panel — they share the drawer space, toggled exclusively):
+
+   Column:
+   - Header row: "JavaScript Console" label + "Clear" button (clears js_output)
+   - Scrollable output area (fills available height minus input row):
+     Each entry shows:
+       "> {input_snippet}" in accent colour (size 12, monospace)
+       "  {result}" in white/primary text (size 12, monospace)
+       Errors shown in red
+   - Input row at bottom:
+     ">" label + text_input bound to js_input + "Run" button
+     on_submit and "Run" both send JsExecuteRequested
+     Ctrl+Enter also sends JsExecuteRequested (via keyboard subscription)
+
+6. The JS console and audit log panels are mutually exclusive:
+   Opening one closes the other. Add this logic to ToggleJsConsole
+   and ToggleAuditPanel handlers.
+```
+Exit condition: `cargo run -p ferrite-shell ui --features ferrite-servo/servo`. Navigate to example.com. Open the JS Console panel. Type `document.title` and press Enter — the page title appears in the output. Type `1 + 1` — output shows "2". Type a syntax error — output shows the error in red. The audit log shows JsExecute entries when refreshed.
