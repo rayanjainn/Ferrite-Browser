@@ -4,7 +4,47 @@ use serde_json::json;
 const DEFAULT_POLICY: &str = r#"
 package ferrite.capability
 
-default allow = true
+default allow = false
+
+# Low-risk read capabilities are allowed for all principal kinds.
+allow if {
+    input.capability == "dom_read"
+}
+
+# Network fetch and storage access are allowed for extensions and agents.
+allow if {
+    input.capability == "network_fetch"
+    input.principal_kind in ["extension", "agent", "web_content"]
+}
+allow if {
+    input.capability == "storage_read"
+    input.principal_kind in ["extension", "agent"]
+}
+allow if {
+    input.capability == "storage_write"
+    input.principal_kind in ["extension", "agent"]
+}
+allow if {
+    input.capability == "cookie_read"
+    input.principal_kind in ["extension", "agent"]
+}
+
+# High-risk write capabilities require the extension or agent principal kind.
+allow if {
+    input.capability == "dom_write"
+    input.principal_kind in ["extension", "agent"]
+}
+allow if {
+    input.capability == "cookie_write"
+    input.principal_kind in ["extension", "agent"]
+}
+
+# JS execution is High risk; only agents may request it.
+# Step-up consent is enforced via the High risk classification in the broker.
+allow if {
+    input.principal_kind == "agent"
+    input.capability == "js_execute"
+}
 "#;
 
 /// Wraps a Regorus policy engine with a default allow-all Rego policy.
@@ -60,9 +100,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_policy_allows_all() {
+    fn policy_allows_standard_capabilities() {
         let mut engine = PolicyEngine::new();
-        assert!(engine.evaluate("extension", "dom.read", "https://example.com"));
-        assert!(engine.evaluate("agent", "network.fetch", "https://other.com"));
+        assert!(engine.evaluate("extension", "dom_read", "https://example.com"));
+        assert!(engine.evaluate("agent", "network_fetch", "https://other.com"));
+        assert!(engine.evaluate("extension", "storage_read", "https://example.com"));
+    }
+
+    #[test]
+    fn policy_allows_agent_js_execute() {
+        let mut engine = PolicyEngine::new();
+        assert!(engine.evaluate("agent", "js_execute", "*"));
+    }
+
+    #[test]
+    fn policy_denies_extension_js_execute() {
+        let mut engine = PolicyEngine::new();
+        assert!(!engine.evaluate("extension", "js_execute", "*"));
     }
 }

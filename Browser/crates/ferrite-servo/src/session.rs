@@ -19,6 +19,20 @@
 //       // display with iced::widget::image(handle)
 //   }
 
+/// Result of a JS compatibility probe run by [`HeadlessServoSession::test_js_compat`].
+#[derive(Debug, Clone)]
+pub struct JSCompatResult {
+    /// The URL that was probed.
+    pub url: String,
+    /// `true` if any JavaScript ran — inferred from the page title being set by JS.
+    pub js_executed: bool,
+    /// JavaScript console errors collected during the load (requires the
+    /// `servo` feature; always empty in stub builds).
+    pub console_errors: Vec<String>,
+    /// Final page title as set by JS (or `None` if the page never set one).
+    pub page_title: Option<String>,
+}
+
 /// Load state of the active WebView.
 ///
 /// Produced by [`HeadlessServoSession::load_status()`] and synced from the
@@ -43,8 +57,10 @@ mod inner {
 
     use rustls::crypto::aws_lc_rs;
     use servo::{
-        RenderingContext, Servo, ServoBuilder, ServoDelegate, SoftwareRenderingContext,
-        WebViewBuilder, WebViewDelegate,
+        DevicePoint, DeviceVector2D, InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent,
+        MouseMoveEvent, RenderingContext, Scroll, Servo, ServoBuilder, ServoDelegate,
+        SoftwareRenderingContext, WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta,
+        WheelEvent, WheelMode,
     };
     use winit::dpi::PhysicalSize;
 
@@ -101,6 +117,9 @@ mod inner {
         nav_count: Rc<std::cell::RefCell<u32>>,
         /// Shared page title — written by `notify_page_title_changed`, read in `spin()`.
         page_title: Rc<std::cell::RefCell<Option<String>>>,
+        /// Accumulated JS console errors — appended by `notify_console_message`, drained by
+        /// `HeadlessServoSession::take_console_errors()`.
+        console_errors: Rc<std::cell::RefCell<Vec<String>>>,
     }
 
     impl WebViewDelegate for HeadlessDelegate {
@@ -128,6 +147,19 @@ mod inner {
 
         fn notify_page_title_changed(&self, _webview: servo::WebView, title: Option<String>) {
             *self.page_title.borrow_mut() = title;
+        }
+
+        fn show_console_message(
+            &self,
+            _webview: servo::WebView,
+            level: servo::ConsoleLogLevel,
+            message: String,
+        ) {
+            // Only capture error-level messages to keep the list focused on
+            // actionable JS failures.
+            if matches!(level, servo::ConsoleLogLevel::Error) {
+                self.console_errors.borrow_mut().push(message);
+            }
         }
 
         fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
@@ -192,6 +224,8 @@ mod inner {
         shared_page_title: Rc<std::cell::RefCell<Option<String>>>,
         /// Most recently synced page title (updated in `spin()`).
         last_page_title: Option<String>,
+        /// JS console errors shared with `HeadlessDelegate` — accumulated until drained.
+        shared_console_errors: Rc<std::cell::RefCell<Vec<String>>>,
     }
 
     impl HeadlessServoSession {
@@ -259,6 +293,8 @@ mod inner {
             let shared_nav_count = Rc::new(std::cell::RefCell::new(0u32));
             let shared_page_title: Rc<std::cell::RefCell<Option<String>>> =
                 Rc::new(std::cell::RefCell::new(None));
+            let shared_console_errors: Rc<std::cell::RefCell<Vec<String>>> =
+                Rc::new(std::cell::RefCell::new(Vec::new()));
 
             // ── Rendering context ──────────────────────────────────────────
             let rendering_context = Rc::new(
@@ -285,6 +321,7 @@ mod inner {
                 current_url: shared_url.clone(),
                 nav_count: shared_nav_count.clone(),
                 page_title: shared_page_title.clone(),
+                console_errors: shared_console_errors.clone(),
             });
             let webview = WebViewBuilder::new(&servo, rendering_context.clone())
                 .delegate(delegate)
@@ -308,6 +345,7 @@ mod inner {
                 shared_nav_count,
                 shared_page_title,
                 last_page_title: None,
+                shared_console_errors,
             })
         }
 
@@ -432,6 +470,106 @@ mod inner {
             self.last_page_title.as_deref()
         }
 
+        /// Execute `script` in the active WebView and return the result as a `String`.
+        ///
+        /// Uses `WebView::evaluate_javascript` (servo v0.0.5).  The result is
+        /// serialised to JSON by Servo and returned as-is.  Returns `Err` if the
+        /// WebView call itself fails (e.g. engine not initialised).
+        pub fn execute_js(&mut self, script: &str) -> Result<String, String> {
+            // Servo v0.0.5 exposes evaluate_javascript on WebView.
+            // The callback receives Option<String> (Some = success, None = exception).
+            let result_cell: Rc<std::cell::RefCell<Option<Result<String, String>>>> =
+                Rc::new(std::cell::RefCell::new(None));
+            let cell_clone = result_cell.clone();
+
+            self.webview.evaluate_javascript(script, move |res| {
+                *cell_clone.borrow_mut() = Some(match res {
+                    Ok(v) => Ok(format!("{:?}", v)),
+                    Err(e) => Err(format!("{:?}", e)),
+                });
+            });
+
+            // Drive the event loop until the callback fires (max 2 s).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                self.pump_engine();
+                if result_cell.borrow().is_some() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err("JS evaluation timed out".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(16));
+            }
+
+            let result = result_cell
+                .borrow_mut()
+                .take()
+                .unwrap_or_else(|| Err("JS evaluation result missing".to_string()));
+
+            match &result {
+                Ok(v) => println!(
+                    "[ferrite-js] execute: {} chars, result: {}",
+                    script.len(),
+                    &v[..50.min(v.len())]
+                ),
+                Err(e) => println!(
+                    "[ferrite-js] execute: {} chars, error: {}",
+                    script.len(),
+                    e
+                ),
+            }
+
+            result
+        }
+
+        /// Drains and returns all JS console errors collected since the last call.
+        pub fn take_console_errors(&mut self) -> Vec<String> {
+            std::mem::take(&mut *self.shared_console_errors.borrow_mut())
+        }
+
+        /// Navigate to `url`, drive the event loop for up to `timeout_secs`, and
+        /// return a [`JSCompatResult`] summarising what happened.
+        ///
+        /// JS execution is inferred from whether the page title changed from
+        /// `None` — most non-trivial pages set their `<title>` via JS.
+        pub fn test_js_compat(&mut self, url: &str) -> super::JSCompatResult {
+            // Clear any state left over from a previous probe.
+            *self.shared_page_title.borrow_mut() = None;
+            self.last_page_title = None;
+            let _ = self.take_console_errors();
+
+            self.navigate(url);
+
+            let timeout = std::time::Duration::from_secs(5);
+            let started = std::time::Instant::now();
+
+            loop {
+                self.spin();
+
+                if matches!(self.last_load_status, LoadStatus::Complete | LoadStatus::Failed(_)) {
+                    break;
+                }
+                if started.elapsed() >= timeout {
+                    break;
+                }
+
+                // Yield the thread briefly so we don't busy-spin at 100% CPU.
+                std::thread::sleep(std::time::Duration::from_millis(16));
+            }
+
+            let title = self.last_page_title.clone();
+            let js_executed = title.is_some();
+            let console_errors = self.take_console_errors();
+
+            super::JSCompatResult {
+                url: url.to_string(),
+                js_executed,
+                console_errors,
+                page_title: title,
+            }
+        }
+
         /// Resize the render surface and notify the WebView.
         pub fn resize(&mut self, width: u32, height: u32) {
             self.width = width;
@@ -439,6 +577,72 @@ mod inner {
             let size = PhysicalSize { width, height };
             self.rendering_context.resize(size);
             self.webview.resize(size);
+        }
+
+        /// Send a mouse-move event to the WebView at pixel coordinates `(x, y)`.
+        pub fn send_mouse_move(&self, x: f32, y: f32) {
+            let point = WebViewPoint::Device(DevicePoint::new(x, y));
+            self.webview
+                .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(point)));
+        }
+
+        /// Send a mouse-button down+up (click) at pixel coordinates `(x, y)`.
+        pub fn send_mouse_click(&self, x: f32, y: f32) {
+            let point = WebViewPoint::Device(DevicePoint::new(x, y));
+            self.webview.notify_input_event(InputEvent::MouseButton(
+                MouseButtonEvent::new(MouseButtonAction::Down, MouseButton::Left, point),
+            ));
+            self.webview.notify_input_event(InputEvent::MouseButton(
+                MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Left, point),
+            ));
+        }
+
+        /// Send a right mouse-button click at pixel coordinates `(x, y)`.
+        pub fn send_right_click(&self, x: f32, y: f32) {
+            let point = WebViewPoint::Device(DevicePoint::new(x, y));
+            self.webview.notify_input_event(InputEvent::MouseButton(
+                MouseButtonEvent::new(MouseButtonAction::Down, MouseButton::Right, point),
+            ));
+            self.webview.notify_input_event(InputEvent::MouseButton(
+                MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Right, point),
+            ));
+        }
+
+        /// Send a scroll (wheel) event at pixel coordinates `(x, y)`.
+        ///
+        /// `delta_x` and `delta_y` are in CSS pixels; positive `delta_y` scrolls down.
+        pub fn send_scroll(&self, x: f32, y: f32, delta_x: f64, delta_y: f64) {
+            let point = WebViewPoint::Device(DevicePoint::new(x, y));
+            self.webview.notify_input_event(InputEvent::Wheel(WheelEvent::new(
+                WheelDelta {
+                    x: delta_x,
+                    y: delta_y,
+                    z: 0.0,
+                    mode: WheelMode::DeltaPixel,
+                },
+                point,
+            )));
+            // Also drive the scroll via the legacy Scroll API so Servo's
+            // compositor can recomposite the page without waiting for a paint.
+            let scroll_vec = DeviceVector2D::new(-delta_x as f32, -delta_y as f32);
+            self.webview
+                .notify_scroll_event(Scroll::Delta(scroll_vec.into()), point);
+        }
+
+        /// Send a mouse-down event (without the subsequent up) — for drag start.
+        pub fn send_mouse_down(&self, x: f32, y: f32) {
+            let point = WebViewPoint::Device(DevicePoint::new(x, y));
+            self.webview.notify_input_event(InputEvent::MouseButton(
+                MouseButtonEvent::new(MouseButtonAction::Down, MouseButton::Left, point),
+            ));
+        }
+
+        /// Send a mouse-up event — for drag end.
+        pub fn send_mouse_up(&self, x: f32, y: f32) {
+            let point = WebViewPoint::Device(DevicePoint::new(x, y));
+            self.webview.notify_input_event(InputEvent::MouseButton(
+                MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Left, point),
+            ));
         }
     }
 }
@@ -495,4 +699,28 @@ impl HeadlessServoSession {
     pub fn page_title(&self) -> Option<&str> {
         None
     }
+
+    pub fn execute_js(&mut self, _script: &str) -> Result<String, String> {
+        Err("ferrite-servo compiled without the `servo` feature".to_string())
+    }
+
+    pub fn take_console_errors(&mut self) -> Vec<String> {
+        vec![]
+    }
+
+    pub fn test_js_compat(&mut self, url: &str) -> JSCompatResult {
+        JSCompatResult {
+            url: url.to_string(),
+            js_executed: false,
+            console_errors: vec![],
+            page_title: None,
+        }
+    }
+
+    pub fn send_mouse_move(&self, _x: f32, _y: f32) {}
+    pub fn send_mouse_click(&self, _x: f32, _y: f32) {}
+    pub fn send_right_click(&self, _x: f32, _y: f32) {}
+    pub fn send_scroll(&self, _x: f32, _y: f32, _dx: f64, _dy: f64) {}
+    pub fn send_mouse_down(&self, _x: f32, _y: f32) {}
+    pub fn send_mouse_up(&self, _x: f32, _y: f32) {}
 }

@@ -13,6 +13,32 @@ pub enum CapabilityType {
     StorageWrite,
     CookieRead,
     CookieWrite,
+    /// Execute arbitrary JavaScript in the active WebView — High risk.
+    JsExecute,
+}
+
+/// Risk classification for a capability type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+impl CapabilityType {
+    /// Returns the default risk level for this capability.
+    pub fn classify_risk(&self) -> RiskLevel {
+        match self {
+            CapabilityType::DomRead => RiskLevel::Low,
+            CapabilityType::NetworkFetch => RiskLevel::Medium,
+            CapabilityType::StorageRead => RiskLevel::Medium,
+            CapabilityType::StorageWrite => RiskLevel::Medium,
+            CapabilityType::CookieRead => RiskLevel::Medium,
+            CapabilityType::DomWrite => RiskLevel::High,
+            CapabilityType::CookieWrite => RiskLevel::High,
+            CapabilityType::JsExecute => RiskLevel::High,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

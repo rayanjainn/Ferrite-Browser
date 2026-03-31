@@ -10,3 +10,4 @@ log = "0.4"
 ferrite-capability-broker = { path = "../ferrite-capability-broker" }
 ferrite-audit-log = { path = "../ferrite-audit-log" }
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"

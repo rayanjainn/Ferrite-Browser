@@ -139,7 +139,7 @@ In crates/ferrite-servo/src/shell.rs:
 Exit condition: On exit, terminal shows the audit chain verified message with a non-zero entry count. The SQLite file exists at the temp path and contains rows.
 
 ## Task 2: Iced UI Shell
-### Block 1: `ferrite-ui` crate, Iced hello-world with dark theme
+### Block 1: `ferrite-ui` crate, Iced hello-world with dark theme  |  ✅ Done
 What it does: Creates the ferrite-ui crate, gets Iced running with a dark theme window at the right size. Nothing functional yet — just proves Iced renders on your machine.
 
 Prompt for Claude Code:
@@ -166,7 +166,7 @@ In ferrite-shell/src/main.rs, add a CLI arg branch: if first arg is "ui" → cal
 ```
 Exit condition: `cargo run -p ferrite-shell ui` opens a 1280x800 window titled "Ferrite Browser" with a dark theme and the text "Ferrite Browser — loading..." centered. The window closes cleanly when you press the 'X' button.
 
-### Block 2: Tab bar component (add/close tabs, active tab highlights)
+### Block 2: Tab bar component (add/close tabs, active tab highlights)  |  ✅ Done
 What it does: Adds a working tab bar at the top of the window. Tabs can be added and closed. The active tab is visually highlighted. No browser content behind it yet.
 
 Prompt for Claude Code:
@@ -199,7 +199,7 @@ Style with dark theme colours — tab bar background slightly lighter than windo
 Exit condition:
 `cargo run -p ferrite-shell ui` shows a tab bar. Clicking "+" adds a tab. Clicking "×" removes it. Clicking a tab label selects it.
 
-### Block 3: Address bar component (text input, URL submit on Enter)
+### Block 3: Address bar component (text input, URL submit on Enter)  |  ✅ Done
 What it does: Adds an address bar below the tab bar. The user can type a URL and press Enter. The URL is stored in state and displayed as the current tab's URL. No actual navigation yet — that wires up when Servo is integrated.
 
 Prompt for Claude Code:
@@ -231,7 +231,7 @@ Exit condition:
 `cargo run -p ferrite-shell ui` shows the tab bar and address bar. Typing a URL and pressing Enter updates the displayed current URL and prints the navigate log line.
 
 ## Task 3: Extism Extension Sandbox
-### Block 1: `ferrite-sandbox` crate, Extism setup, Wasm module loading
+### Block 1: `ferrite-sandbox` crate, Extism setup, Wasm module loading  |  ✅ Done
 What it does: Creates the ferrite-sandbox crate, adds Extism, and loads a pre-compiled Wasm module from disk. The module doesn't do anything meaningful yet — just proves Extism initialises and a .wasm file can be loaded.
 
 Prompt for Claude Code:
@@ -689,7 +689,7 @@ jobs:
 Exit condition: Push to main. GitHub Actions runs green on the updated workflow including the Wasm build step.
 
 ## Task 7: UI Polish 1.0
-### Block 1: Navigation controls + loading state
+### Block 1: Navigation controls + loading state  |  ✅ Done
 What it does: Adds back/forward/reload/stop buttons to the toolbar. Adds a loading indicator (animated progress bar under the address bar) that appears when a page is loading. Address bar updates to the actual loaded URL after navigation. Requires adding a message channel from `HeadlessServoSession` back to the Iced event loop for load status events.
 
 Prompt for Claude Code:
@@ -761,7 +761,7 @@ In crates/ferrite-ui/src/lib.rs:
 ```
 Exit condition: `cargo run -p ferrite-shell ui` shows the toolbar with back/forward/reload buttons. The progress bar appears when navigating and disappears when the page loads. The address bar updates to the final URL after navigation.
 
-### Block 2: Visual chrome overhaul
+### Block 2: Visual chrome overhaul  |  ✅ Done
 What it does: Redesigns the overall visual layout to look like a real browser. Consistent spacing, proper colour hierarchy, improved tab design, tighter typography. No functional changes — purely visual.
 
 Prompt for Claude Code:
@@ -817,7 +817,7 @@ GENERAL:
 ```
 Exit condition: `cargo run -p ferrite-shell ui` looks like a real browser. Tab bar is visually distinct from toolbar. Address bar is pill-shaped. Navigation buttons are clearly interactive. Overall impression is a polished dark-theme developer browser.
 
-### Block 3: Keyboard shortcuts + smart URL handling
+### Block 3: Keyboard shortcuts + smart URL handling  |  ✅ Done
 What it does: Adds the keyboard shortcuts developers expect, and makes the address bar smart — auto-prepends `https://`, and falls back to DuckDuckGo Lite search for non-URL input.
 
 Prompt for Claude Code:
@@ -872,7 +872,7 @@ In crates/ferrite-ui/src/lib.rs:
 ```
 Exit condition: `cargo run -p ferrite-shell ui`. Press `Ctrl+T` — new tab opens. Press `Ctrl+L` — address bar focuses. Type `rust-lang.org` — navigates to `https://rust-lang.org`. Type `what is ownership in rust` — navigates to DuckDuckGo Lite search results.
 
-### Block 4: Error states + new tab page
+### Block 4: Error states + new tab page  |  ✅ Done
 What it does: Handles navigation failures gracefully with an error page. Replaces the blank `about:blank` with a styled new-tab page. Updates tab titles from the actual page title. Adds a favicon placeholder.
 
 Prompt for Claude Code:
@@ -931,7 +931,7 @@ In crates/ferrite-ui/src/lib.rs:
 Exit condition: `cargo run -p ferrite-shell ui`. New tab shows the Ferrite home page with working search bar. Navigating to an invalid URL shows the error page with Try Again button. Tab labels update to page titles after loading. Tabs show globe or spinner icon.
 
 ## Task 8: JavaScript Engine Integration
-### Block 1: Verify SpiderMonkey is active and JS runs on real pages
+### Block 1: Verify SpiderMonkey is active and JS runs on real pages  |  ✅ Done
 What it does: Confirms that Servo's embedded SpiderMonkey JS engine is correctly processing JavaScript on loaded pages. Tests against progressively JS-heavy sites to establish a baseline of what works and what doesn't. Documents the current JS compatibility ceiling as a known limitation for the paper.
 
 Prompt for Claude Code:
@@ -974,7 +974,7 @@ In crates/ferrite-servo/src/session.rs:
 ```
 Exit condition: `cargo run -p ferrite-shell -- jstest` prints the compatibility table and creates the CSV file. example.com should show JS executed = true. Results document Servo's actual JS support level.
 
-### Block 2: Expose `js.execute` as a broker-gated capability
+### Block 2: Expose `js.execute` as a broker-gated capability  |  ✅ Done
 What it does: Adds `JsExecute` as a new capability type in the broker. Agents and extensions can request to run a JavaScript snippet on the current page via a `host_js_execute` host function. The broker gates this with policy — JS execution is classified as High risk by default, requiring step-up consent. Every execution is logged to the audit trail with the script content hashed (not stored raw, for privacy).
 
 Prompt for Claude Code:
@@ -1009,7 +1009,7 @@ Prompt for Claude Code:
 ```
 Exit condition: `cargo run -p ferrite-shell sandbox` prints the JS execution result ("2" for "1 + 1"). The audit log contains a JsExecute entry with the script hash, not the raw script. The broker correctly classifies JsExecute as High risk.
 
-### Block 3: DevTools JS console panel in Iced UI
+### Block 3: DevTools JS console panel in Iced UI  |  ✅ Done
 What it does: Adds a JavaScript console panel to the Iced DevTools drawer — an input field where the developer can type JS snippets and execute them on the current page, with output displayed below. Connected to Servo's JS runtime via the broker. All executions are capability-checked and audit-logged. The panel sits alongside the existing audit log panel.
 
 Prompt for Claude Code:

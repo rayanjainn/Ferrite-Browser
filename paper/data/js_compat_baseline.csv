@@ -1,0 +1,4 @@
+url,js_executed,page_title,error_count,first_error
+"https://example.com",false,"",0,""
+"https://lite.duckduckgo.com",false,"",0,""
+"https://doc.rust-lang.org",false,"",0,""

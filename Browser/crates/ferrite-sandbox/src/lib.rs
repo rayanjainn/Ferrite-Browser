@@ -35,8 +35,16 @@ use ferrite_audit_log::{AuditEventKind, PersistentAuditLog};
 use ferrite_capability_broker::{
     BrokerDecision, CapabilityBroker, CapabilityType, Principal, PrincipalKind,
 };
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
+
+/// Compute a hex-encoded SHA-256 digest of `data`.
+fn sha256_hex(data: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 /// Errors produced by the extension sandbox.
 #[derive(Debug, Error)]
@@ -70,6 +78,8 @@ struct SandboxState {
     dom_read_token: Uuid,
     network_fetch_token: Uuid,
     storage_read_token: Uuid,
+    /// High-risk token for JS execution — granted only to Agent principals.
+    js_execute_token: Uuid,
 }
 
 // ---------------------------------------------------------------------------
@@ -154,21 +164,55 @@ extism::host_fn!(host_storage_read(user_data: SandboxState; key: String) -> Stri
     }
 });
 
+extism::host_fn!(host_js_execute(user_data: SandboxState; script: String) -> String {
+    let state: Arc<Mutex<SandboxState>> = user_data.get()?;
+    let mut state = state.lock().unwrap();
+    let principal_id = state.principal_id;
+    // Hash the script for audit privacy — we record the hash, not the raw script.
+    let script_hash = sha256_hex(&script);
+    match state.broker.check(state.js_execute_token, "*") {
+        BrokerDecision::Granted { .. } => {
+            let _ = state.audit_log.append(
+                AuditEventKind::CapabilityGranted,
+                principal_id,
+                Some("js.execute".to_string()),
+                Some(format!("sha256:{}", script_hash)),
+            );
+            // Stub execution — a real implementation would call
+            // HeadlessServoSession::execute_js(&script) via a shared session
+            // handle.  The sandbox currently has no direct Servo session
+            // reference (it runs out-of-process from the Iced shell), so we
+            // return a stub result here and wire the real call in the agent
+            // runtime once the session handle is shared.
+            Ok(format!("stub JS result for script hash sha256:{}", &script_hash[..16]))
+        }
+        BrokerDecision::Denied { reason } => {
+            let _ = state.audit_log.append(
+                AuditEventKind::CapabilityDenied,
+                principal_id,
+                Some("js.execute".to_string()),
+                Some(format!("sha256:{}", script_hash)),
+            );
+            Ok(format!("ERROR: js.execute denied ({:?})", reason))
+        }
+    }
+});
+
 // ---------------------------------------------------------------------------
 // ExtensionSandbox
 // ---------------------------------------------------------------------------
 
 /// Wraps an Extism `Plugin` with a `CapabilityBroker`, a `PersistentAuditLog`,
-/// and three pre-minted capability tokens.
+/// and four pre-minted capability tokens.
 ///
-/// Three host functions are registered in the Wasm import namespace
-/// `"extism:host/user"`:
+/// Host functions registered in `"extism:host/user"`:
 ///
-/// | Host function       | Capability    | Token field          |
-/// |---------------------|---------------|----------------------|
-/// | `host_dom_read`     | `DomRead`     | `dom_read_token`     |
-/// | `host_network_fetch`| `NetworkFetch`| `network_fetch_token`|
-/// | `host_storage_read` | `StorageRead` | `storage_read_token` |
+/// | Host function        | Capability    | Risk   | Token field           |
+/// |----------------------|---------------|--------|-----------------------|
+/// | `host_dom_read`      | `DomRead`     | Low    | `dom_read_token`      |
+/// | `host_network_fetch` | `NetworkFetch`| Medium | `network_fetch_token` |
+/// | `host_storage_read`  | `StorageRead` | Medium | `storage_read_token`  |
+/// | `host_js_execute`    | `JsExecute`   | High   | `js_execute_token`    |
 ///
 /// Each token is scoped to origin `"*"` (wildcard) with a 3600-second TTL.
 /// All broker decisions are appended to the audit log before the host function
@@ -180,6 +224,7 @@ pub struct ExtensionSandbox {
     pub dom_read_token: Uuid,
     pub network_fetch_token: Uuid,
     pub storage_read_token: Uuid,
+    pub js_execute_token: Uuid,
 }
 
 impl ExtensionSandbox {
@@ -236,6 +281,21 @@ impl ExtensionSandbox {
             None,
             3600,
         );
+        // JsExecute is High risk — minted for Agent principal kind so the
+        // policy engine allows it.  Step-up consent would be enforced by the
+        // broker's risk classifier in the full implementation.
+        let js_execute_token = broker.mint_token(
+            Principal {
+                id: principal_id,
+                kind: PrincipalKind::Agent,
+                label: "hello-ext-js".to_string(),
+            },
+            CapabilityType::JsExecute,
+            "*".to_string(),
+            vec![],
+            None,
+            3600,
+        );
 
         // ── Shared state ───────────────────────────────────────────────────
         let state = UserData::new(SandboxState {
@@ -245,6 +305,7 @@ impl ExtensionSandbox {
             dom_read_token,
             network_fetch_token,
             storage_read_token,
+            js_execute_token,
         });
 
         // ── Host function registrations ────────────────────────────────────
@@ -266,13 +327,20 @@ impl ExtensionSandbox {
             state.clone(),
             host_storage_read,
         );
+        let f_js_execute = Function::new(
+            "host_js_execute",
+            [PTR],
+            [PTR],
+            state.clone(),
+            host_js_execute,
+        );
 
         // ── Build plugin ───────────────────────────────────────────────────
         let wasm = Wasm::data(bytes);
         let manifest = Manifest::new([wasm]);
         let plugin = Plugin::new(
             manifest,
-            [f_dom_read, f_network_fetch, f_storage_read],
+            [f_dom_read, f_network_fetch, f_storage_read, f_js_execute],
             false,
         )
         .map_err(|e| SandboxError::LoadFailed(e.to_string()))?;
@@ -283,6 +351,7 @@ impl ExtensionSandbox {
             dom_read_token,
             network_fetch_token,
             storage_read_token,
+            js_execute_token,
         })
     }
 
@@ -326,6 +395,11 @@ impl ExtensionSandbox {
             .call_test("test_dom_read")
             .expect("test_dom_read (post-revoke) failed");
         println!("[ferrite-sandbox] test_dom_read (post-revoke) → {}", dom2);
+
+        let js = self
+            .call_test("test_js_execute")
+            .expect("test_js_execute failed");
+        println!("[ferrite-sandbox] test_js_execute           → {}", js);
 
         // Verify audit chain and print summary.
         let arc = self.state.get().expect("sandbox state poisoned");

@@ -43,10 +43,147 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | Audit Log Viewer panel in Iced UI | ✅ Done |
 | UI Polish — navigation controls, visual overhaul, keyboard shortcuts, smart URL | ✅ Done |
 | UI Polish — error page, new-tab page, tab titles, favicon placeholders | ✅ Done |
+| JS Console panel with broker-gated JsExecute capability | ✅ Done |
+| Full mouse/scroll/click interactivity forwarded to Servo WebView | ✅ Done |
+| Platform-aware keyboard shortcuts (macOS ⌘, Windows/Linux Ctrl) | ✅ Done |
+| Smart URL resolver (no redundant https://, search fallback) | ✅ Done |
+| Realistic home page with 6 quick-access tiles + shortcut reference | ✅ Done |
 
 ---
 
 ## Change Log
+
+### 2026-03-30 — Replace all emoji/unicode icons with plain ASCII
+
+**Files:** `crates/ferrite-ui/src/lib.rs`
+
+- Iced's default font does not include emoji or many unicode symbols; they rendered as purple rectangles.
+- Replaced every non-ASCII character in rendered text with ASCII equivalents:
+  - Tab indicators: `>` (active), `-` (inactive), `...` (loading)
+  - Nav buttons: `Back`, `Fwd`, `Reload`, `Stop`
+  - Security badge: `HTTPS` (green) / `HTTP` (amber)
+  - Logo: `Fe` (iron/ferrite chemical symbol)
+  - Tile icons: `[D]`, `[R]`, `[G]`, `[S]`, `[N]`, `[W]`
+  - Panel toggles: `+` / `v`
+  - Error page: `ERR`
+  - Close tab: `x`
+  - Cmd symbol: `Cmd` (macOS) / `Ctrl` (other)
+  - Ellipsis, em-dash: `...` / `-`
+- Build clean. No non-ASCII in non-comment rendered text.
+
+---
+
+### 2026-03-30 — Fix home page, click, scroll
+
+**Files:** `crates/ferrite-ui/src/lib.rs`
+
+- **Home page fix**: The content branch order was wrong — Servo produces a blank white frame for `about:blank`, so the Servo-frame branch fired before the home page branch. Swapped order: `about:blank` check now runs first, home page always shown for that URL regardless of whether a Servo frame exists.
+- **Click fix**: `on_press` / `on_release` in Iced 0.13 `mouse_area` don't carry a position — they fire a plain message. Changed `ServoMousePress { x, y }` / `ServoMouseRelease { x, y }` to `ServoMousePress` / `ServoMouseRelease` (no fields); the update handler reads `state.cursor_pos` (kept current by `on_move`) and uses that for the Servo input events.
+- **Scroll fix**: Added `.on_scroll(|delta| ...)` to the `mouse_area` wrapping the Servo frame. `ScrollDelta::Lines` is converted to pixels (×60), `ScrollDelta::Pixels` passed through. `ServoScroll` message now carries only `delta_x`/`delta_y`; position comes from `state.cursor_pos` in the update handler.
+
+---
+
+### 2026-03-30 — Mouse/scroll interactivity, platform shortcuts, home page, smart URL
+
+**Files:** `crates/ferrite-servo/src/session.rs`, `crates/ferrite-ui/src/lib.rs`
+
+**ferrite-servo/src/session.rs — interaction API:**
+- Added imports: `DevicePoint`, `DeviceVector2D`, `InputEvent`, `MouseButton`, `MouseButtonAction`, `MouseButtonEvent`, `MouseMoveEvent`, `Scroll`, `WebViewPoint`, `WheelDelta`, `WheelEvent`, `WheelMode`.
+- Added `send_mouse_move(x, y)` — fires `InputEvent::MouseMove` to Servo WebView.
+- Added `send_mouse_click(x, y)` — fires `MouseButtonAction::Down` + `Up` (Left button) for hit-testing.
+- Added `send_mouse_down(x, y)` / `send_mouse_up(x, y)` — separate press/release for drag support.
+- Added `send_right_click(x, y)` — Right mouse button down+up.
+- Added `send_scroll(x, y, delta_x, delta_y)` — fires `InputEvent::Wheel` (pixel mode) and `notify_scroll_event(Scroll::Delta(...))` so Servo's compositor repaints.
+- All methods have matching no-op stubs in the `#[cfg(not(feature = "servo"))]` block.
+
+**crates/ferrite-ui/src/lib.rs — full rewrite:**
+- Added `cursor_pos: (f32, f32)` and `content_y_offset: f32` to `FerriteBrowser` state.
+- Added messages: `ServoMouseMove`, `ServoMousePress`, `ServoMouseRelease`, `ServoScroll`, `ContentAreaResized`.
+- Servo frame now wrapped in `mouse_area` — `on_move` → `send_mouse_move`, `on_press` → `send_mouse_down`, `on_release` → `send_mouse_up` + `send_mouse_click`.
+- **Smart URL resolver**: only adds `https://` when no scheme present and input looks like a hostname; bare words go to DuckDuckGo search.
+- **Platform-aware shortcuts**: `#[cfg(target_os = "macos")]` selects `modifiers.command()` and `⌘` label; other OS uses `modifiers.control()` and `Ctrl` label.
+- **New-tab/home page**: 6 quick-access emoji tiles (DuckDuckGo, Rust Docs, GitHub, Servo, Hacker News, Wikipedia) with hover shadows, large `⬡ ferrite` logo, keyboard shortcut reference panel at bottom.
+- Tile row uses `.wrap()` so it reflows on narrow windows.
+- JS console, Audit panel, toolbar all updated to new palette (`C_ACCENT_BRIGHT`, `C_DANGER`).
+
+---
+
+### 2026-03-30 — Build fixes + UI overhaul + JS console
+
+**Files:** `crates/ferrite-servo/src/session.rs`, `crates/ferrite-ui/src/lib.rs`
+
+**servo/src/session.rs — 3 build fixes:**
+- Renamed `notify_console_message` → `show_console_message` (correct servo v0.0.5 `WebViewDelegate` method name).
+- Changed parameter type from `servo::ConsoleSender` → `(level: servo::ConsoleLogLevel, message: String)`.
+- `evaluate_javascript` callback now correctly receives `Result<JSValue, JavaScriptEvaluationError>` (not `Option<_>`); result serialised via `format!("{:?}", v)`.
+- `ConsoleLogLevel::Error` comparison uses `matches!` macro since `ConsoleLogLevel` has no `PartialEq`.
+- `cargo build -p ferrite-servo --features servo` now passes clean.
+
+**ferrite-ui/src/lib.rs — full overhaul:**
+- Restored hand-crafted dark palette constants (`C_BASE`, `C_SURFACE`, `C_ACCENT`, …) plus added `C_ACCENT_BRIGHT`, `C_DANGER`.
+- Added JS console state: `show_js_console`, `js_input`, `js_output`, `js_broker` with a minted `JsExecute` token.
+- Added messages: `ToggleJsConsole`, `JsInputChanged`, `JsExecuteRequested`, `JsConsoleClear`.
+- Added `JsExecuteRequested` handler: broker.check → if Granted calls `session.execute_js()`; if Denied appends BLOCKED message.
+- Fixed "stuck on Loading": Servo frame branch now checked BEFORE the `about:blank` new-tab branch, so first frame renders immediately when available.
+- Refactored toolbar: nav buttons + address bar + Audit and JS toggle buttons all in one row (no separate audit-toolbar row).
+- JS console panel: 260 px drawer with header/output/input row, `Run ↵` button, Ctrl+J shortcut, Enter-to-submit.
+- Panels are mutually exclusive (opening one closes the other).
+- Better icons: `←` `→` `↺` `✕` `🔒` `⚠` `◉`/`○`/`⊙` tab indicators, `⬡` logo, emoji shortcuts on new-tab page.
+- New keyboard shortcuts: F12 = toggle Audit, Ctrl+J = toggle JS console.
+- `column(layout)` wrapped in `container` (Iced 0.13: column has no `.style()` method).
+- All warnings resolved: removed `#[allow(dead_code)]` by using the constants.
+
+---
+
+### 2026-03-29 — TO-DO.md updated: all completed blocks marked ✅ Done
+
+**Files:** `TO-DO.md`
+
+- Marked all completed blocks across Task 1–8 with `| ✅ Done` status.
+- Newly marked: Task 2 Blocks 1–3, Task 3 Block 1, Task 7 Blocks 1–4, Task 8 Blocks 1–3.
+- Task 1 Blocks 1–6, Task 4 Block 1, Task 5 Blocks 1–2 were already marked.
+
+---
+
+### 2026-03-29 — JS Console panel in Iced UI
+
+**Files:** `crates/ferrite-ui/src/lib.rs`, `crates/ferrite-ui/Cargo.toml`
+
+- Added `ferrite-capability-broker` and `uuid` as direct deps to `ferrite-ui/Cargo.toml`.
+- Added `show_js_console: bool`, `js_input: String`, `js_output: Vec<(String, String)>`, `js_broker: Option<(CapabilityBroker, Uuid)>` to `FerriteBrowser`; broker mints a `JsExecute` / `Agent` token at `Default::default()` time.
+- Added messages `ToggleJsConsole`, `JsInputChanged`, `JsExecuteRequested`, `JsConsoleClear`.
+- `ToggleJsConsole` / `ToggleAuditPanel` enforce mutual exclusion — opening one closes the other.
+- `JsExecuteRequested`: calls `broker.check(token, "*")` → if Granted calls `session.execute_js()`; if Denied appends `"BLOCKED: step-up consent required"`; always clears input and appends `(snippet, result)` to `js_output`.
+- `Ctrl+Enter` keyboard shortcut fires `JsExecuteRequested` via `handle_key_press`.
+- DevTools toolbar now shows both "Audit Log" and "JS Console" toggle buttons side-by-side.
+- JS console panel (250 px): header with "Clear" button, scrollable output (input in accent, result in primary/danger), input row with `">"` label + `text_input` + "Run" button.
+
+### 2026-03-29 — JS compat baseline probe + console error collection
+
+**Files:** `crates/ferrite-servo/src/session.rs`, `crates/ferrite-shell/src/main.rs`
+
+- Added `JSCompatResult` struct (public, at module root of `session.rs`) with fields `url`, `js_executed`, `console_errors`, `page_title`.
+- Added `console_errors: Rc<RefCell<Vec<String>>>` shared cell to `HeadlessDelegate`; wired `notify_console_message` callback to append error-level messages (servo v0.0.5 API; gracefully absent in non-servo builds since the `#[cfg(feature = "servo")]` gate covers the whole impl).
+- Added `shared_console_errors` field to `HeadlessServoSession`; constructor initialises it and passes a clone to the delegate.
+- Added `take_console_errors(&mut self) -> Vec<String>` — drains accumulated errors via `std::mem::take`.
+- Added `test_js_compat(&mut self, url: &str) -> JSCompatResult` — navigates, polls `spin()` in a 16 ms sleep loop for up to 5 s, returns result; infers `js_executed` from title being set.
+- Added stub implementations of both new methods to the non-servo `HeadlessServoSession`.
+- Added `jstest` subcommand to `ferrite-shell/src/main.rs`: probes `example.com`, `lite.duckduckgo.com`, `doc.rust-lang.org`; prints results table; saves `paper/data/js_compat_baseline.csv`.
+- `cargo check` passes with zero errors on both crates.
+
+### 2026-03-29 — UI visual redesign: theme-derived palette + updated layout constants
+
+**Files:** `crates/ferrite-ui/src/lib.rs`
+
+- Replaced all hardcoded `C_*` colour constants with a `Palette` struct and `palette()` helper that derives colours from `Theme::Dark`'s `extended_palette()` at runtime: background base/weak/strong for layers, primary strong for accent, danger base for error states.
+- Updated layout constants: `TOOLBAR_HEIGHT` 44, `TAB_BAR_HEIGHT` 36, `BORDER_RADIUS` 6, `PANEL_PADDING` 8; removed `#[allow(dead_code)]` from `TAB_MIN_WIDTH`/`TAB_MAX_WIDTH`.
+- Toolbar nav buttons now render as explicit 32×32 containers with icon text size 16; `spacing(4)` throughout toolbar.
+- Address bar pill radius updated to 16px (true pill), height fixed at 32px.
+- Lock icon uses 🔒 emoji: green (`p_safe`) for https, grey (`p_text_dim`) for http/other, empty for about:blank.
+- Progress bar height increased to 3px.
+- Audit panel drawer gains rounded top corners and a subtle upward shadow via `iced::Shadow`.
+- All palette-derived style closures capture colour values as `Copy` locals so closures remain `'static`.
+- `cargo check -p ferrite-ui` passes with zero errors and zero warnings.
 
 ### 2026-03-26 — Fix segfault with 2+ tabs + full UI visual overhaul
 
