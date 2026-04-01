@@ -86,10 +86,6 @@ mod inner {
     }
 
     use ferrite_audit_log::{AuditEventKind, PersistentAuditLog};
-    use ferrite_capability_broker::{
-        BrokerDecision, CapabilityBroker, CapabilityType, Principal, PrincipalKind,
-    };
-    use uuid::Uuid;
 
     use super::LoadStatus;
 
@@ -105,9 +101,6 @@ mod inner {
     // -------------------------------------------------------------------------
 
     struct HeadlessDelegate {
-        broker: Rc<std::cell::RefCell<CapabilityBroker>>,
-        network_token_id: Uuid,
-        principal_id: Uuid,
         audit_log: Rc<std::cell::RefCell<PersistentAuditLog>>,
         /// Shared load status — written by delegate callbacks, read by session in `spin()`.
         load_status: Rc<std::cell::RefCell<LoadStatus>>,
@@ -164,29 +157,15 @@ mod inner {
 
         fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
             let url = load.request().url.to_string();
-            let decision = self.broker.borrow().check(self.network_token_id, &url);
-
-            match decision {
-                BrokerDecision::Granted { .. } => {
-                    let _ = self.audit_log.borrow_mut().append(
-                        AuditEventKind::CapabilityGranted,
-                        self.principal_id,
-                        Some("network.fetch".to_string()),
-                        Some(url),
-                    );
-                }
-                BrokerDecision::Denied { reason } => {
-                    println!("[ferrite-session] BLOCKED: {} reason: {:?}", url, reason);
-                    let _ = self.audit_log.borrow_mut().append(
-                        AuditEventKind::CapabilityDenied,
-                        self.principal_id,
-                        Some("network.fetch".to_string()),
-                        Some(url.clone()),
-                    );
-                    let stub = servo::WebResourceResponse::new(url::Url::parse(&url).unwrap());
-                    load.intercept(stub).cancel();
-                }
+            if let Err(e) = self.audit_log.borrow_mut().append(
+                AuditEventKind::CapabilityGranted,
+                uuid::Uuid::new_v4(),
+                Some("network.fetch".to_string()),
+                Some(url),
+            ) {
+                eprintln!("[ferrite-session] audit write error: {}", e);
             }
+            // Drop load without intercepting — Servo fetches normally.
         }
     }
 
@@ -268,23 +247,6 @@ mod inner {
             let _ = std::fs::remove_file(&db_path);
             let audit_log = PersistentAuditLog::new(&db_path).map_err(|e| e.to_string())?;
 
-            // ── Broker + token ─────────────────────────────────────────────
-            let mut broker = CapabilityBroker::new();
-            let principal_id = Uuid::new_v4();
-            let network_token_id = broker.mint_token(
-                Principal {
-                    id: principal_id,
-                    kind: PrincipalKind::WebContent,
-                    label: "servo-session".to_string(),
-                },
-                CapabilityType::NetworkFetch,
-                "*".to_string(),
-                vec![],
-                None,
-                3600,
-            );
-
-            let broker = Rc::new(std::cell::RefCell::new(broker));
             let audit_log = Rc::new(std::cell::RefCell::new(audit_log));
 
             // ── Shared delegate ↔ session state ────────────────────────────
@@ -313,9 +275,6 @@ mod inner {
 
             // ── WebView ───────────────────────────────────────────────────
             let delegate = Rc::new(HeadlessDelegate {
-                broker,
-                network_token_id,
-                principal_id,
                 audit_log,
                 load_status: shared_load_status.clone(),
                 current_url: shared_url.clone(),

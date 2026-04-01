@@ -47,11 +47,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ferrite_audit_log::{AuditEventKind, PersistentAuditLog};
-#[cfg_attr(not(feature = "servo"), allow(unused_imports))]
-use ferrite_capability_broker::{
-    BrokerDecision, CapabilityBroker, CapabilityType, Principal, PrincipalKind,
-};
-use uuid::Uuid;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -65,19 +60,11 @@ use winit::window::{Window, WindowId};
 
 /// Implements `servo::WebViewDelegate` — receives per-tab callbacks from Servo.
 ///
-/// Holds shared references to the `CapabilityBroker` and `PersistentAuditLog`
-/// so that `load_web_resource` can check and record every outgoing request
-/// before it reaches the network.
+/// Holds a shared reference to the `PersistentAuditLog` so that
+/// `load_web_resource` can record every outgoing request.
 #[cfg(feature = "servo")]
 struct FerriteWebViewDelegate {
-    /// Shared broker — `RefCell` gives interior mutability so the delegate
-    /// (behind `Rc<dyn WebViewDelegate>`) can call `revoke`.
-    broker: Rc<RefCell<CapabilityBroker>>,
-    /// Token minted at startup that authorises all network fetches.
-    network_token_id: Uuid,
-    /// `Uuid` of the servo-engine principal, written into audit entries.
-    principal_id: Uuid,
-    /// Shared audit log — written on every grant or denial.
+    /// Shared audit log — written on every request.
     audit_log: Rc<RefCell<PersistentAuditLog>>,
 }
 
@@ -100,46 +87,18 @@ impl servo::WebViewDelegate for FerriteWebViewDelegate {
     }
 
     /// Called for every outgoing network request — navigation, sub-resource,
-    /// XHR, fetch().  This is the Servo v0.0.5 fetch interception point.
-    ///
-    /// Behaviour:
-    ///   - Ask the broker whether `network_token_id` covers this URL.
-    ///   - `Granted`  → append `CapabilityGranted` to audit log; drop `load`
-    ///                  so Servo proceeds normally.
-    ///   - `Denied`   → log the block; append `CapabilityDenied` to audit log;
-    ///                  intercept + cancel so no bytes leave the process.
+    /// XHR, fetch().  Logs the request to the audit log and lets it proceed.
     fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
         let url = load.request().url.to_string();
-        let decision = self.broker.borrow().check(self.network_token_id, &url);
-
-        match decision {
-            BrokerDecision::Granted { .. } => {
-                if let Err(e) = self.audit_log.borrow_mut().append(
-                    AuditEventKind::CapabilityGranted,
-                    self.principal_id,
-                    Some("network.fetch".to_string()),
-                    Some(url),
-                ) {
-                    eprintln!("[ferrite] audit write error (granted): {}", e);
-                }
-                // Drop `load` without intercepting — Servo fetches normally.
-            }
-            BrokerDecision::Denied { reason } => {
-                println!("[ferrite] BLOCKED: {} reason: {:?}", url, reason);
-                if let Err(e) = self.audit_log.borrow_mut().append(
-                    AuditEventKind::CapabilityDenied,
-                    self.principal_id,
-                    Some("network.fetch".to_string()),
-                    Some(url.clone()),
-                ) {
-                    eprintln!("[ferrite] audit write error (denied): {}", e);
-                }
-                // Intercept with a stub response, then cancel.  This aborts
-                // the request with a network error before any bytes are sent.
-                let stub = servo::WebResourceResponse::new(url::Url::parse(&url).unwrap());
-                load.intercept(stub).cancel();
-            }
+        if let Err(e) = self.audit_log.borrow_mut().append(
+            AuditEventKind::CapabilityGranted,
+            uuid::Uuid::new_v4(),
+            Some("network.fetch".to_string()),
+            Some(url),
+        ) {
+            eprintln!("[ferrite] audit write error: {}", e);
         }
+        // Drop load without intercepting — Servo fetches normally.
     }
 
     // All other delegate methods use the default no-op implementations
@@ -162,18 +121,6 @@ impl servo::ServoDelegate for FerriteServoDelegate {
 
 struct AppHandler {
     window: Option<Arc<Window>>,
-
-    /// Shared broker — also held by `FerriteWebViewDelegate`.
-    #[cfg_attr(not(feature = "servo"), allow(dead_code))]
-    broker: Rc<RefCell<CapabilityBroker>>,
-
-    /// Token authorising all network fetches for the Servo engine principal.
-    #[cfg_attr(not(feature = "servo"), allow(dead_code))]
-    network_token_id: Uuid,
-
-    /// `Uuid` of the servo-engine principal passed into audit entries.
-    #[cfg_attr(not(feature = "servo"), allow(dead_code))]
-    principal_id: Uuid,
 
     /// Shared audit log — also held by `FerriteWebViewDelegate`.
     audit_log: Rc<RefCell<PersistentAuditLog>>,
@@ -251,14 +198,8 @@ impl ApplicationHandler for AppHandler {
             );
 
             // Create the top-level WebView and navigate to https://example.com.
-            // The FerriteWebViewDelegate intercepts every network request
-            // (load_web_resource) and checks it against the CapabilityBroker
-            // before allowing it to reach the network.
             let webview = WebViewBuilder::new(&servo, rc)
                 .delegate(Rc::new(FerriteWebViewDelegate {
-                    broker: self.broker.clone(),
-                    network_token_id: self.network_token_id,
-                    principal_id: self.principal_id,
                     audit_log: self.audit_log.clone(),
                 }))
                 .url(url::Url::parse("https://example.com").unwrap())
@@ -330,49 +271,20 @@ impl ApplicationHandler for AppHandler {
 // ServoShell public API
 // ---------------------------------------------------------------------------
 
-/// Owns the winit `EventLoop`, the `CapabilityBroker`, the `PersistentAuditLog`,
-/// and drives the browser window.
+/// Owns the winit `EventLoop` and `PersistentAuditLog`, and drives the browser
+/// window.
 ///
-/// The broker and audit log are shared (via `Rc<RefCell<>>`) with the
-/// `FerriteWebViewDelegate` so that every outgoing network request is checked
-/// and recorded before it reaches the network.
+/// The audit log is shared (via `Rc<RefCell<>>`) with `FerriteWebViewDelegate`
+/// so that every outgoing network request is recorded.
 pub struct ServoShell {
     event_loop: EventLoop<()>,
-    broker: Rc<RefCell<CapabilityBroker>>,
-    network_token_id: Uuid,
-    principal_id: Uuid,
     audit_log: Rc<RefCell<PersistentAuditLog>>,
 }
 
 impl ServoShell {
-    /// Creates the winit `EventLoop`, mints the default-allow network token,
-    /// and opens the audit log at `$TMPDIR/ferrite_servo.db`.
-    ///
-    /// A `NetworkFetch` token scoped to `"*"` (wildcard origin) with a 3600-second
-    /// TTL is minted for the Servo engine principal.  This token acts as the
-    /// "default allow" grant that permits Servo to load pages normally.
-    /// Revoking it (via `broker().borrow_mut().revoke(token_id)`) blocks all
-    /// subsequent fetches through the broker check in `load_web_resource`.
+    /// Creates the winit `EventLoop` and opens the audit log at
+    /// `$TMPDIR/ferrite_servo.db`.
     pub fn new() -> Self {
-        let mut broker = CapabilityBroker::new();
-
-        let principal_id = Uuid::new_v4();
-        let servo_principal = Principal {
-            id: principal_id,
-            kind: PrincipalKind::WebContent,
-            label: "servo-engine".to_string(),
-        };
-
-        // Wildcard origin — covers all URLs Servo may fetch.
-        let network_token_id = broker.mint_token(
-            servo_principal,
-            CapabilityType::NetworkFetch,
-            "*".to_string(), // origin_scope: wildcard
-            vec![],          // url_allowlist: empty = no additional filtering
-            None,            // rate_limit: uncapped for now
-            3600,            // TTL: 1 hour
-        );
-
         let db_path = std::env::temp_dir()
             .join("ferrite_servo.db")
             .to_string_lossy()
@@ -382,33 +294,14 @@ impl ServoShell {
         let event_loop = EventLoop::new().expect("failed to create event loop");
         ServoShell {
             event_loop,
-            broker: Rc::new(RefCell::new(broker)),
-            network_token_id,
-            principal_id,
             audit_log: Rc::new(RefCell::new(audit_log)),
         }
-    }
-
-    /// Returns the token ID for the default network-allow token.
-    ///
-    /// Callers can pass this to `broker().borrow_mut().revoke(id)` to stop all
-    /// Servo network fetches — useful for testing the block path.
-    pub fn network_token_id(&self) -> Uuid {
-        self.network_token_id
-    }
-
-    /// Returns a shared reference to the `CapabilityBroker`.
-    pub fn broker(&self) -> Rc<RefCell<CapabilityBroker>> {
-        self.broker.clone()
     }
 
     /// Starts the event loop.  Blocks until the window is closed.
     pub fn run(self) {
         let mut app = AppHandler {
             window: None,
-            broker: self.broker,
-            network_token_id: self.network_token_id,
-            principal_id: self.principal_id,
             audit_log: self.audit_log,
             #[cfg(feature = "servo")]
             servo: None,
@@ -434,59 +327,7 @@ impl Default for ServoShell {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Verifies the default-allow token lets requests through, and that
-    /// revoking it blocks subsequent checks.
-    ///
-    /// This is the unit-test equivalent of the integration scenario:
-    ///   1. Page loads via the wildcard token (Granted).
-    ///   2. Token is revoked.
-    ///   3. Navigate to a new URL — broker check returns Denied.
-    ///
-    /// The end-to-end version (revoke mid-session then observe the block log
-    /// line in the window) requires the RenderingContext to be wired (Block 4)
-    /// before it can run against a live Servo instance.
-    #[test]
-    fn revoke_blocks_subsequent_requests() {
-        let mut broker = CapabilityBroker::new();
-
-        let principal = Principal {
-            id: Uuid::new_v4(),
-            kind: PrincipalKind::WebContent,
-            label: "servo-engine".to_string(),
-        };
-
-        let token_id = broker.mint_token(
-            principal,
-            CapabilityType::NetworkFetch,
-            "*".to_string(),
-            vec![],
-            None,
-            3600,
-        );
-
-        // Before revoke — any URL should be Granted.
-        assert!(
-            matches!(
-                broker.check(token_id, "https://example.com/test"),
-                BrokerDecision::Granted { .. }
-            ),
-            "expected Granted before revoke"
-        );
-
-        // Revoke the token.
-        broker.revoke(token_id);
-
-        // After revoke — the same URL should be Denied (UnknownPrincipal,
-        // because the token entry no longer exists in the map).
-        assert!(
-            matches!(
-                broker.check(token_id, "https://example.com/test"),
-                BrokerDecision::Denied { .. }
-            ),
-            "expected Denied after revoke"
-        );
-    }
+    use uuid::Uuid;
 
     /// Verifies that audit entries written on grant/denial produce a valid
     /// hash chain, and that grants vs denials are correctly counted.

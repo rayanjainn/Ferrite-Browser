@@ -14,20 +14,39 @@ on:
       - '.devcontainer/**'
       - '.github/workflows/ci.yml'
 
-defaults:
-  run:
-    working-directory: Browser
-
 jobs:
+  # ─────────────────────────────────────────────────────────────
+  # Job 1: Build, lint, test — matrix across Linux, Windows, macOS
+  # ─────────────────────────────────────────────────────────────
   ci:
-    name: Build, Lint & Test
-    runs-on: ubuntu-22.04
+    name: Build, Lint & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false   # all three platforms run even if one fails
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+            binary_suffix: ""
+          - os: windows-latest
+            platform: windows
+            binary_suffix: ".exe"
+          - os: macos-latest
+            platform: macos
+            binary_suffix: ""
+
+    defaults:
+      run:
+        working-directory: Browser
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      # ── Linux system dependencies ─────────────────────────────
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends \
             pkg-config cmake clang lld llvm python3 \
@@ -40,6 +59,25 @@ jobs:
             sqlite3 libsqlite3-dev
         working-directory: .
 
+      # ── macOS system dependencies ─────────────────────────────
+      - name: Install system dependencies (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          brew update
+          brew install cmake pkg-config openssl gstreamer sqlite
+        working-directory: .
+
+      # ── Windows system dependencies ───────────────────────────
+      # MSVC and Windows SDK are pre-installed on windows-latest.
+      # SQLite and cmake are added via Chocolatey.
+      - name: Install system dependencies (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          choco install -y cmake sqlite
+        working-directory: .
+
+      # ── Rust toolchain (all platforms) ───────────────────────
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -50,21 +88,167 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: Browser
+          key: ${{ matrix.platform }}
 
       - name: Fetch dependencies
         run: cargo fetch
 
+      # ── Lint (Linux only — output is platform-independent) ────
       - name: Check formatting
+        if: matrix.platform == 'linux'
         run: cargo fmt --check
 
       - name: Clippy (zero warnings)
         run: cargo clippy --workspace -- -D warnings
 
+      # ── Tests ─────────────────────────────────────────────────
       - name: Run tests
         run: cargo test --workspace
 
+      # ── Wasm extension (Linux only) ───────────────────────────
       - name: Build hello-ext Wasm
+        if: matrix.platform == 'linux'
         run: |
           cd ../extensions/hello-ext
           cargo build --target wasm32-unknown-unknown --release
         working-directory: Browser
+
+      # ── Release binary ────────────────────────────────────────
+      - name: Build release binary
+        run: cargo build --release -p ferrite-shell
+
+      # ── Derive binary label from commit message ───────────────
+      # Convention: include [T<task>.<block>] anywhere in the commit.
+      # Examples:  [T7.3]   [T9.1]   [T14.2]
+      # Fallback: first 7 chars of the commit SHA.
+      - name: Derive binary label
+        id: label
+        shell: bash
+        run: |
+          MSG="${{ github.event.head_commit.message }}"
+          if [[ "$MSG" =~ \[T([0-9]+\.[0-9]+)\] ]]; then
+            LABEL="${BASH_REMATCH[1]}"
+          else
+            SHA="${{ github.sha }}"
+            LABEL="${SHA:0:7}"
+          fi
+          echo "binary_label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "Resolved binary label: $LABEL"
+
+      # ── Stage binary with label ───────────────────────────────
+      - name: Stage executable
+        shell: bash
+        run: |
+          LABEL="${{ steps.label.outputs.binary_label }}"
+          PLATFORM="${{ matrix.platform }}"
+          EXT="${{ matrix.binary_suffix }}"
+          mkdir -p staged
+          cp "target/release/ferrite-shell${EXT}" "staged/ferrite-${LABEL}-${PLATFORM}${EXT}"
+          echo "Staged: staged/ferrite-${LABEL}-${PLATFORM}${EXT}"
+
+      # ── Upload artifact (every run, all platforms) ────────────
+      # Artifacts are accessible from the Actions tab for 90 days.
+      # They are available for both PRs and main pushes.
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferrite-${{ steps.label.outputs.binary_label }}-${{ matrix.platform }}
+          path: Browser/staged/
+          retention-days: 90
+
+  # ─────────────────────────────────────────────────────────────
+  # Job 2: Collect all three platform binaries and commit them
+  # into Executables/<label>/ in the repository.
+  # Runs only on pushes to main — never on PRs.
+  #
+  # Folder structure produced:
+  #   Executables/
+  #     7.1/
+  #       ferrite-7.1-linux
+  #       ferrite-7.1-windows.exe
+  #       ferrite-7.1-macos
+  #     9.2/
+  #       ferrite-9.2-linux
+  #       ferrite-9.2-windows.exe
+  #       ferrite-9.2-macos
+  # ─────────────────────────────────────────────────────────────
+  store-executables:
+    name: Store executables in repo
+    runs-on: ubuntu-22.04
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      # Rederive the label — same logic as the ci job above
+      - name: Derive binary label
+        id: label
+        shell: bash
+        run: |
+          MSG="${{ github.event.head_commit.message }}"
+          if [[ "$MSG" =~ \[T([0-9]+\.[0-9]+)\] ]]; then
+            LABEL="${BASH_REMATCH[1]}"
+          else
+            SHA="${{ github.sha }}"
+            LABEL="${SHA:0:7}"
+          fi
+          echo "binary_label=$LABEL" >> "$GITHUB_OUTPUT"
+
+      # ── Download all three platform artifacts ─────────────────
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ferrite-${{ steps.label.outputs.binary_label }}-linux
+          path: downloaded/linux
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ferrite-${{ steps.label.outputs.binary_label }}-windows
+          path: downloaded/windows
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ferrite-${{ steps.label.outputs.binary_label }}-macos
+          path: downloaded/macos
+
+      # ── Organise into Executables/<label>/ ───────────────────
+      - name: Organise into Executables folder
+        shell: bash
+        run: |
+          LABEL="${{ steps.label.outputs.binary_label }}"
+          mkdir -p "Executables/${LABEL}"
+
+          cp "downloaded/linux/ferrite-${LABEL}-linux"         "Executables/${LABEL}/ferrite-${LABEL}-linux"         2>/dev/null || true
+          cp "downloaded/windows/ferrite-${LABEL}-windows.exe" "Executables/${LABEL}/ferrite-${LABEL}-windows.exe"   2>/dev/null || true
+          cp "downloaded/macos/ferrite-${LABEL}-macos"         "Executables/${LABEL}/ferrite-${LABEL}-macos"         2>/dev/null || true
+
+          chmod +x "Executables/${LABEL}/ferrite-${LABEL}-linux" 2>/dev/null || true
+          chmod +x "Executables/${LABEL}/ferrite-${LABEL}-macos" 2>/dev/null || true
+
+          echo "Contents of Executables/${LABEL}/:"
+          ls -lh "Executables/${LABEL}/"
+
+      # ── Commit and push ───────────────────────────────────────
+      - name: Commit and push
+        shell: bash
+        run: |
+          LABEL="${{ steps.label.outputs.binary_label }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Executables/${LABEL}/"
+          if git diff --staged --quiet; then
+            echo "No new executables — this label already exists in the repo."
+          else
+            git commit -m "ci: store ferrite-${LABEL} executables (linux, windows, macos) [skip ci]"
+            git push
+          fi

@@ -20,9 +20,6 @@
 use std::collections::HashMap;
 
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
-use ferrite_capability_broker::{
-    BrokerDecision, CapabilityBroker, CapabilityType, Principal, PrincipalKind,
-};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{
@@ -93,7 +90,6 @@ pub struct FerriteBrowser {
     pub new_tab_search_input: String,
     pub js_input: String,
     pub js_output: Vec<(String, String)>,
-    pub js_broker: Option<(CapabilityBroker, uuid::Uuid)>,
     /// Most recent cursor position over the Servo content area (in content pixels).
     pub cursor_pos: (f32, f32),
     /// Y offset of the Servo content area inside the window (toolbar + tab bar heights).
@@ -102,19 +98,6 @@ pub struct FerriteBrowser {
 
 impl Default for FerriteBrowser {
     fn default() -> Self {
-        let mut broker = CapabilityBroker::new();
-        let token_id = broker.mint_token(
-            Principal {
-                id: uuid::Uuid::new_v4(),
-                kind: PrincipalKind::Agent,
-                label: "ferrite-ui-js-console".to_string(),
-            },
-            CapabilityType::JsExecute,
-            "*".to_string(),
-            vec![],
-            None,
-            3600,
-        );
         Self {
             tabs: vec!["New Tab".to_string()],
             active_tab: 0,
@@ -134,7 +117,6 @@ impl Default for FerriteBrowser {
             new_tab_search_input: String::new(),
             js_input: String::new(),
             js_output: Vec::new(),
-            js_broker: Some((broker, token_id)),
             cursor_pos: (0.0, 0.0),
             content_y_offset: TAB_BAR_HEIGHT + TOOLBAR_HEIGHT + 4.0,
         }
@@ -355,26 +337,13 @@ pub fn update(
             }
             state.js_input.clear();
 
-            let result = if let Some((broker, token_id)) = &state.js_broker {
-                match broker.check(*token_id, "*") {
-                    BrokerDecision::Granted { .. } => {
-                        if let Some(session) =
-                            state.servo_sessions.get_mut(&state.active_tab)
-                        {
-                            match session.execute_js(&script) {
-                                Ok(v) => v,
-                                Err(e) => format!("Error: {}", e),
-                            }
-                        } else {
-                            "Error: no active Servo session".to_string()
-                        }
-                    }
-                    BrokerDecision::Denied { .. } => {
-                        "BLOCKED: step-up consent required".to_string()
-                    }
+            let result = if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
+                match session.execute_js(&script) {
+                    Ok(v) => v,
+                    Err(e) => format!("Error: {}", e),
                 }
             } else {
-                "Error: JS broker not initialised".to_string()
+                "Error: no active Servo session".to_string()
             };
 
             let snippet = if script.len() > 60 {

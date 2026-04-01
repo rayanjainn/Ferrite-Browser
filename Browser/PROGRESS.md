@@ -53,6 +53,21 @@ Major Project/                  ← git repo root, reference docs, PDFs
 
 ## Change Log
 
+### 2026-04-01 — Remove ferrite-capability-broker, ferrite-policy, ferrite-sandbox from active compilation
+
+**Files:**
+- `Cargo.toml` — three crates already removed from workspace members (were: ferrite-capability-broker, ferrite-policy, ferrite-sandbox)
+- `crates/ferrite-shell/Cargo.toml` — removed the three dep lines
+- `crates/ferrite-shell/src/main.rs` — removed broker/policy imports; removed "sandbox" match arm; added simplified `run_smoke_test()` that only exercises the audit log; removed top-level unused imports
+- `crates/ferrite-servo/Cargo.toml` — removed ferrite-capability-broker dep
+- `crates/ferrite-servo/src/shell.rs` — removed CapabilityBroker, Principal, PrincipalKind, BrokerDecision imports; removed broker/token/principal fields from FerriteWebViewDelegate, AppHandler, ServoShell; simplified `load_web_resource` to log-and-allow without broker check; removed `network_token_id()` and `broker()` public methods; removed `revoke_blocks_subsequent_requests` test; kept `audit_log_records_grants_and_denials` test
+- `crates/ferrite-ui/Cargo.toml` — removed ferrite-capability-broker dep
+- `crates/ferrite-ui/src/lib.rs` — removed ferrite_capability_broker import; removed `js_broker` field; simplified `JsExecuteRequested` handler to call `execute_js` directly without broker check
+
+**Reason:** Extensions are not being built at this stage. The broker and policy engine exist solely to serve the extension sandbox. Removing them from active compilation keeps the workspace lean and CI green while extension work is deferred. Crates remain on disk untouched for future re-integration.
+
+**Build:** `cargo build --workspace` — zero errors, zero warnings.
+
 ### 2026-03-30 — Replace all emoji/unicode icons with plain ASCII
 
 **Files:** `crates/ferrite-ui/src/lib.rs`

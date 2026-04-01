@@ -1,12 +1,9 @@
 ﻿[workspace]
 members = [
   "crates/ferrite-shell",
-  "crates/ferrite-capability-broker",
   "crates/ferrite-audit-log",
-  "crates/ferrite-policy",
   "crates/ferrite-servo",
   "crates/ferrite-ui",
-  "crates/ferrite-sandbox",
 ]
 resolver = "2"
 
