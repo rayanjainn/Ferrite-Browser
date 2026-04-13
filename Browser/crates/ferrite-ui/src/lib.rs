@@ -26,6 +26,65 @@ use iced::{
     keyboard, time, Background, Border, Color, Element, Length, Size, Subscription, Task, Theme,
 };
 use iced_widget::image::{Handle as ImageHandle, Image as ServoImage};
+use tokio::sync::oneshot;
+use ferrite_agent::{AgentRuntime, AgentTask, AgentToolCall, AgentToolResult, BrowserTool, GeminiAgent};
+
+// ---------------------------------------------------------------------------
+// Tool-execution bridge types (agent ↔ Iced main thread)
+// ---------------------------------------------------------------------------
+
+/// A single tool call request from the agent runtime, plus a one-shot channel
+/// for the reply.  Wrapped in `Arc<Mutex<Option<...>>>` so this type is
+/// `Clone` (required by `FerriteBrowserMessage`).
+pub struct ToolRequest {
+    pub call: AgentToolCall,
+    reply: std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<AgentToolResult>>>>,
+}
+
+impl ToolRequest {
+    pub fn new(call: AgentToolCall, reply: oneshot::Sender<AgentToolResult>) -> Self {
+        Self {
+            call,
+            reply: std::sync::Arc::new(std::sync::Mutex::new(Some(reply))),
+        }
+    }
+
+    /// Take the one-shot sender.  Returns `None` if already consumed.
+    pub fn take_reply(&self) -> Option<oneshot::Sender<AgentToolResult>> {
+        self.reply.lock().unwrap().take()
+    }
+}
+
+impl Clone for ToolRequest {
+    fn clone(&self) -> Self {
+        Self { call: self.call.clone(), reply: self.reply.clone() }
+    }
+}
+
+impl std::fmt::Debug for ToolRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolRequest").field("call", &self.call).finish_non_exhaustive()
+    }
+}
+
+pub type ToolRequestSender   = tokio::sync::mpsc::UnboundedSender<ToolRequest>;
+pub type ToolRequestReceiver = tokio::sync::mpsc::UnboundedReceiver<ToolRequest>;
+
+/// Implements `ferrite_agent::ToolExecutor` by forwarding calls to the Iced
+/// main thread via the unbounded channel and awaiting a one-shot reply.
+pub struct BrowserToolExecutor {
+    pub tx: ToolRequestSender,
+}
+
+#[async_trait::async_trait]
+impl ferrite_agent::ToolExecutor for BrowserToolExecutor {
+    async fn execute(&self, call: &AgentToolCall) -> AgentToolResult {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let req = ToolRequest::new(call.clone(), reply_tx);
+        let _ = self.tx.send(req);
+        reply_rx.await.unwrap_or_else(|_| AgentToolResult::err(call.call_id, "channel closed"))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Platform detection — used for keyboard shortcut labels
@@ -94,10 +153,32 @@ pub struct FerriteBrowser {
     pub cursor_pos: (f32, f32),
     /// Y offset of the Servo content area inside the window (toolbar + tab bar heights).
     pub content_y_offset: f32,
+    // ── Agent bridge ──────────────────────────────────────────────────────────
+    /// Sender side cloned when spawning agent tasks; `None` only if channel closed.
+    pub tool_tx: Option<ToolRequestSender>,
+    /// Receiver side wrapped in `Arc<tokio::sync::Mutex<...>>` so the
+    /// `subscription::channel` `Fn` closure can clone it per invocation.
+    pub tool_rx: Option<std::sync::Arc<tokio::sync::Mutex<ToolRequestReceiver>>>,
+    /// Handle to a running agent tokio task, if any.
+    pub agent_handle: Option<tokio::task::JoinHandle<()>>,
+    // ── Agent sidebar UI ─────────────────────────────────────────────────────
+    pub show_agent_sidebar: bool,
+    pub agent_task_input: String,
+    /// One entry per tool call: "[navigate] https://..."
+    pub agent_tool_log: Vec<String>,
+    pub agent_response: Option<String>,
+    pub agent_is_running: bool,
+    /// Sender used by spawned agent task to emit progress messages.
+    pub agent_event_tx: Option<tokio::sync::mpsc::UnboundedSender<FerriteBrowserMessage>>,
+    /// Receiver drained by the agent_event_sub subscription.
+    pub agent_event_rx: Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FerriteBrowserMessage>>>>,
 }
 
 impl Default for FerriteBrowser {
     fn default() -> Self {
+        let (tool_tx, tool_rx) = tokio::sync::mpsc::unbounded_channel::<ToolRequest>();
+        let (agent_event_tx, agent_event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<FerriteBrowserMessage>();
         Self {
             tabs: vec!["New Tab".to_string()],
             active_tab: 0,
@@ -119,6 +200,16 @@ impl Default for FerriteBrowser {
             js_output: Vec::new(),
             cursor_pos: (0.0, 0.0),
             content_y_offset: TAB_BAR_HEIGHT + TOOLBAR_HEIGHT + 4.0,
+            tool_tx: Some(tool_tx),
+            tool_rx: Some(std::sync::Arc::new(tokio::sync::Mutex::new(tool_rx))),
+            agent_handle: None,
+            show_agent_sidebar: false,
+            agent_task_input: String::new(),
+            agent_tool_log: Vec::new(),
+            agent_response: None,
+            agent_is_running: false,
+            agent_event_tx: Some(agent_event_tx),
+            agent_event_rx: Some(std::sync::Arc::new(tokio::sync::Mutex::new(agent_event_rx))),
         }
     }
 }
@@ -162,6 +253,17 @@ pub enum FerriteBrowserMessage {
     /// Scroll wheel event.
     ServoScroll { delta_x: f32, delta_y: f32 },
     ContentAreaResized { height: f32 },
+    // ── Agent bridge ──────────────────────────────────────────────────────────
+    /// A tool call request has arrived from the agent runtime.
+    ToolRequestArrived(ToolRequest),
+    // ── Agent sidebar ─────────────────────────────────────────────────────────
+    ToggleAgentSidebar,
+    AgentTaskInputChanged(String),
+    AgentTaskSubmitted,
+    AgentToolLogged(String),
+    AgentCompleted(String),
+    AgentFailed(String),
+    StopAgent,
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +484,144 @@ pub fn update(
         }
         FerriteBrowserMessage::ContentAreaResized { height } => {
             state.content_y_offset = height;
+        }
+        // ── Agent sidebar ─────────────────────────────────────────────────────
+        FerriteBrowserMessage::ToggleAgentSidebar => {
+            state.show_agent_sidebar = !state.show_agent_sidebar;
+        }
+        FerriteBrowserMessage::AgentTaskInputChanged(s) => {
+            state.agent_task_input = s;
+        }
+        FerriteBrowserMessage::AgentTaskSubmitted => {
+            if state.agent_is_running {
+                return Task::none();
+            }
+            state.agent_tool_log.clear();
+            state.agent_response = None;
+            state.agent_is_running = true;
+
+            let prompt = state.agent_task_input.clone();
+            let context_url = state.tab_urls.get(state.active_tab).cloned();
+            let agent_task = AgentTask::new(prompt, context_url);
+
+            let executor = match state.tool_tx.clone() {
+                Some(tx) => BrowserToolExecutor { tx },
+                None => return Task::none(),
+            };
+            let event_tx = match state.agent_event_tx.clone() {
+                Some(tx) => tx,
+                None => return Task::none(),
+            };
+
+            let handle = tokio::task::spawn(async move {
+                if std::env::var("FERRITE_GEMINI_API_KEY").is_err() {
+                    let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(
+                        "FERRITE_GEMINI_API_KEY is not set".to_string(),
+                    ));
+                    return;
+                }
+                let agent = GeminiAgent::from_env();
+                let mut history = vec![];
+                loop {
+                    match agent.run_turn(&agent_task, &history, &executor).await {
+                        Ok(turn) => {
+                            for call in &turn.tool_calls {
+                                let label = match &call.tool {
+                                    BrowserTool::Navigate(url) =>
+                                        format!("[navigate] {}", url),
+                                    BrowserTool::ReadPage =>
+                                        "[dom.read] read page".to_string(),
+                                    BrowserTool::ClickElement(sel) =>
+                                        format!("[dom.write] click {}", sel),
+                                    BrowserTool::FillForm { selector, value } =>
+                                        format!("[form.fill] {}={}", selector, value),
+                                    BrowserTool::ExtractData(sel) =>
+                                        format!("[dom.read] extract {}", sel),
+                                    BrowserTool::ExecuteJs(code) =>
+                                        format!("[js.execute] {}", &code[..code.len().min(40)]),
+                                    BrowserTool::ReadClipboard =>
+                                        "[clipboard.read]".to_string(),
+                                    BrowserTool::WriteClipboard(s) =>
+                                        format!("[clipboard.write] {}", s),
+                                    BrowserTool::DownloadFile(url) =>
+                                        format!("[download.file] {}", url),
+                                };
+                                let _ = event_tx.send(FerriteBrowserMessage::AgentToolLogged(label));
+                            }
+                            let is_complete = turn.is_complete;
+                            let response = turn.final_response.clone().unwrap_or_default();
+                            history.push(turn);
+                            if is_complete {
+                                let _ = event_tx.send(FerriteBrowserMessage::AgentCompleted(response));
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(e.to_string()));
+                            break;
+                        }
+                    }
+                }
+            });
+            state.agent_handle = Some(handle);
+        }
+        FerriteBrowserMessage::AgentToolLogged(s) => {
+            state.agent_tool_log.push(s);
+        }
+        FerriteBrowserMessage::AgentCompleted(s) => {
+            state.agent_response = Some(s);
+            state.agent_is_running = false;
+        }
+        FerriteBrowserMessage::AgentFailed(s) => {
+            state.agent_response = Some(format!("[error] {}", s));
+            state.agent_is_running = false;
+        }
+        FerriteBrowserMessage::StopAgent => {
+            if let Some(handle) = state.agent_handle.take() {
+                handle.abort();
+            }
+            state.agent_is_running = false;
+        }
+        // ── Agent bridge ──────────────────────────────────────────────────────
+        FerriteBrowserMessage::ToolRequestArrived(req) => {
+            if let Some(reply_tx) = req.take_reply() {
+                let result = if let Some(session) =
+                    state.servo_sessions.get_mut(&state.active_tab)
+                {
+                    match &req.call.tool {
+                        BrowserTool::Navigate(url) => {
+                            session.navigate(url);
+                            AgentToolResult::ok(req.call.call_id, "")
+                        }
+                        BrowserTool::ReadPage => {
+                            // current_page_text not yet on session
+                            AgentToolResult::ok(req.call.call_id, "not yet implemented")
+                        }
+                        BrowserTool::ClickElement(_sel) => {
+                            AgentToolResult::ok(req.call.call_id, "")
+                        }
+                        BrowserTool::FillForm { .. } => {
+                            AgentToolResult::ok(req.call.call_id, "")
+                        }
+                        BrowserTool::ExtractData(_sel) => {
+                            AgentToolResult::ok(req.call.call_id, "not yet implemented")
+                        }
+                        BrowserTool::ExecuteJs(code) => {
+                            match session.execute_js(code) {
+                                Ok(r) => AgentToolResult::ok(req.call.call_id, r),
+                                Err(e) => AgentToolResult::err(req.call.call_id, e),
+                            }
+                        }
+                        BrowserTool::WriteClipboard(_) => {
+                            AgentToolResult::ok(req.call.call_id, "")
+                        }
+                        _ => AgentToolResult::ok(req.call.call_id, "not yet implemented"),
+                    }
+                } else {
+                    AgentToolResult::err(req.call.call_id, "no active session")
+                };
+                let _ = reply_tx.send(result);
+            }
         }
         FerriteBrowserMessage::ServoReady => {}
         FerriteBrowserMessage::ServoFrame => {
@@ -863,8 +1103,20 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     .style(if state.show_js_console { panel_btn_active } else { panel_btn_inactive })
     .on_press(FerriteBrowserMessage::ToggleJsConsole);
 
+    let agent_btn = button(
+        row![
+            text(if state.show_agent_sidebar { "v" } else { "+" }).size(10),
+            text(" Agent").size(12),
+        ]
+        .spacing(2)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([5, 10])
+    .style(if state.show_agent_sidebar { panel_btn_active } else { panel_btn_inactive })
+    .on_press(FerriteBrowserMessage::ToggleAgentSidebar);
+
     let toolbar = container(
-        row![back_btn, fwd_btn, reload_btn, addr_row, audit_btn, js_btn]
+        row![back_btn, fwd_btn, reload_btn, addr_row, audit_btn, js_btn, agent_btn]
             .spacing(4)
             .align_y(iced::Alignment::Center)
             .padding([0, PANEL_PADDING]),
@@ -1219,7 +1471,16 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         layout.push(p);
     }
 
-    layout.push(content);
+    // Wrap browser viewport + optional agent sidebar in a horizontal row.
+    let main_content: Element<FerriteBrowserMessage> = if state.show_agent_sidebar {
+        iced::widget::row![content, view_agent_sidebar(state)]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else {
+        content
+    };
+    layout.push(main_content);
 
     container(column(layout))
         .width(Length::Fill)
@@ -1302,7 +1563,6 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     } else {
                         iced::Shadow::default()
                     },
-                    ..button::Style::default()
                 }
             })
             .on_press(FerriteBrowserMessage::NavigateRequested(url))
@@ -1409,7 +1669,237 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         Subscription::none()
     };
 
-    Subscription::batch([keyboard_sub, servo_tick])
+    // Drain agent progress messages (AgentToolLogged, AgentCompleted, AgentFailed).
+    struct AgentEventChannel;
+    let agent_event_sub: Subscription<FerriteBrowserMessage> =
+        if let Some(rx_arc) = &state.agent_event_rx {
+            let rx_arc = rx_arc.clone();
+            Subscription::run_with_id(
+                std::any::TypeId::of::<AgentEventChannel>(),
+                iced::stream::channel(64, move |mut sender| async move {
+                    use iced::futures::SinkExt;
+                    loop {
+                        let msg = rx_arc.lock().await.recv().await;
+                        match msg {
+                            Some(msg) => { let _ = sender.send(msg).await; }
+                            None => { std::future::pending::<()>().await; }
+                        }
+                    }
+                }),
+            )
+        } else {
+            Subscription::none()
+        };
+
+    // Drain tool call requests from the agent runtime and emit them as messages.
+    // iced 0.13 API: iced::stream::channel -> Stream, wrapped via Subscription::run_with_id.
+    let tool_sub: Subscription<FerriteBrowserMessage> = if let Some(rx_arc) = &state.tool_rx {
+        let rx_arc = rx_arc.clone();
+        Subscription::run_with_id(
+            std::any::TypeId::of::<ToolRequest>(),
+            iced::stream::channel(64, move |mut sender| async move {
+                use iced::futures::SinkExt;
+                loop {
+                    let req = rx_arc.lock().await.recv().await;
+                    match req {
+                        Some(req) => {
+                            let _ = sender
+                                .send(FerriteBrowserMessage::ToolRequestArrived(req))
+                                .await;
+                        }
+                        None => {
+                            // channel closed — park forever
+                            std::future::pending::<()>().await;
+                        }
+                    }
+                }
+            }),
+        )
+    } else {
+        Subscription::none()
+    };
+
+    Subscription::batch([keyboard_sub, servo_tick, tool_sub, agent_event_sub])
+}
+
+// ---------------------------------------------------------------------------
+// Agent sidebar view
+// ---------------------------------------------------------------------------
+
+fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
+    // Header: "Agent" label + optional Stop button.
+    let mut header_items: Vec<Element<FerriteBrowserMessage>> = vec![
+        text("Agent").size(16).color(C_TEXT).width(Length::Fill).into(),
+    ];
+    if state.agent_is_running {
+        header_items.push(
+            button(text("Stop").size(12))
+                .padding([3, 8])
+                .style(|_: &Theme, _| button::Style {
+                    background: Some(Background::Color(C_DANGER)),
+                    text_color: Color::WHITE,
+                    border: Border {
+                        radius: iced::border::Radius::new(BORDER_RADIUS),
+                        ..Border::default()
+                    },
+                    ..button::Style::default()
+                })
+                .on_press(FerriteBrowserMessage::StopAgent)
+                .into(),
+        );
+    }
+    let header = container(
+        row(header_items)
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .padding([8, 12]),
+    )
+    .width(Length::Fill)
+    .style(|_: &Theme| container::Style {
+        background: Some(Background::Color(C_RAISED)),
+        ..container::Style::default()
+    });
+
+    let sep = || {
+        container(text(""))
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(separator_style)
+    };
+
+    // Task input — disabled (greyed container) when running.
+    let task_input: Element<FerriteBrowserMessage> = if state.agent_is_running {
+        container(text(state.agent_task_input.as_str()).size(13).color(C_TEXT_DIM))
+            .width(Length::Fill)
+            .padding([7, 10])
+            .style(|_: &Theme| container::Style {
+                background: Some(Background::Color(Color { a: 0.6, ..C_INPUT })),
+                border: Border {
+                    radius: iced::border::Radius::new(6.0),
+                    width: 1.0,
+                    color: C_DIVIDER,
+                },
+                ..container::Style::default()
+            })
+            .into()
+    } else {
+        text_input("Enter a task...", &state.agent_task_input)
+            .width(Length::Fill)
+            .padding([7, 10])
+            .size(13)
+            .style(|_: &Theme, status| {
+                let focused = matches!(status, text_input::Status::Focused);
+                text_input::Style {
+                    background: Background::Color(C_INPUT),
+                    border: Border {
+                        radius: iced::border::Radius::new(6.0),
+                        width: if focused { 1.5 } else { 1.0 },
+                        color: if focused { C_ACCENT } else { C_DIVIDER },
+                    },
+                    icon: C_TEXT_DIM,
+                    placeholder: C_TEXT_DIM,
+                    value: C_TEXT,
+                    selection: Color { a: 0.30, ..C_ACCENT },
+                }
+            })
+            .on_input(FerriteBrowserMessage::AgentTaskInputChanged)
+            .on_submit(FerriteBrowserMessage::AgentTaskSubmitted)
+            .into()
+    };
+
+    let run_disabled = state.agent_is_running || state.agent_task_input.trim().is_empty();
+    let run_btn = button(text("Run Task").size(13))
+        .padding([7, 0])
+        .width(Length::Fill)
+        .style(if run_disabled { panel_btn_inactive } else { accent_btn_style })
+        .on_press_maybe((!run_disabled).then_some(FerriteBrowserMessage::AgentTaskSubmitted));
+
+    // Tool call log — scrollable.
+    let dots = match ((state.progress_offset * 3.0) as usize) % 4 {
+        0 => "",
+        1 => ".",
+        2 => "..",
+        _ => "...",
+    };
+    let log_items: Vec<Element<FerriteBrowserMessage>> =
+        if state.agent_tool_log.is_empty() && !state.agent_is_running {
+            vec![text("No active session.").size(12).color(C_TEXT_DIM).into()]
+        } else {
+            let mut items: Vec<Element<_>> = state
+                .agent_tool_log
+                .iter()
+                .map(|entry| {
+                    container(
+                        row![
+                            text("->").size(12).color(C_ACCENT),
+                            text(entry.as_str()).size(12).color(C_TEXT_DIM),
+                        ]
+                        .spacing(4),
+                    )
+                    .padding([2, 0])
+                    .width(Length::Fill)
+                    .into()
+                })
+                .collect();
+            if state.agent_is_running {
+                items.push(
+                    text(format!("Working{}", dots))
+                        .size(12)
+                        .color(C_TEXT_DIM)
+                        .into(),
+                );
+            }
+            items
+        };
+
+    let log_scroll = scrollable(
+        column(log_items)
+            .spacing(2)
+            .width(Length::Fill)
+            .padding([4, 8]),
+    )
+    .height(Length::Fill);
+
+    // Assemble column.
+    let mut col_items: Vec<Element<FerriteBrowserMessage>> = vec![
+        header.into(),
+        sep().into(),
+        container(column![task_input, run_btn].spacing(6).padding([8, 12]))
+            .width(Length::Fill)
+            .into(),
+        sep().into(),
+        log_scroll.into(),
+    ];
+
+    if let Some(response) = &state.agent_response {
+        col_items.push(sep().into());
+        col_items.push(
+            container(
+                column![
+                    text("Answer").size(13).color(C_TEXT_DIM),
+                    text(response.as_str()).size(13).color(C_TEXT),
+                ]
+                .spacing(4)
+                .padding([8, 12]),
+            )
+            .width(Length::Fill)
+            .into(),
+        );
+    }
+
+    container(column(col_items).width(Length::Fill))
+        .width(Length::Fixed(320.0))
+        .height(Length::Fill)
+        .style(|_: &Theme| container::Style {
+            background: Some(Background::Color(C_SURFACE)),
+            border: Border {
+                color: C_DIVIDER,
+                width: 1.0,
+                radius: iced::border::Radius::new(0.0),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 // ---------------------------------------------------------------------------

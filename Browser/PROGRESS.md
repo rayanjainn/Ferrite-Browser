@@ -48,10 +48,72 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | Platform-aware keyboard shortcuts (macOS ⌘, Windows/Linux Ctrl) | ✅ Done |
 | Smart URL resolver (no redundant https://, search fallback) | ✅ Done |
 | Realistic home page with 6 quick-access tiles + shortcut reference | ✅ Done |
+| `ferrite-agent` — Task 9 Block 1: types, traits, rate limiter | ✅ Done |
+| `ferrite-agent::gemini` — Task 10 Block 1: GeminiAgent with function calling | ✅ Done |
+| `ferrite-ui` — Task 11 Block 1: tool executor bridge (agent ↔ Iced channel) | ✅ Done |
+| `ferrite-ui` — Task 11 Block 2: agent sidebar panel in Iced UI | ✅ Done |
 
 ---
 
 ## Change Log
+
+### 2026-04-13 — Task 11 Block 2: agent sidebar panel in Iced UI
+
+**Files:** `crates/ferrite-ui/src/lib.rs`
+
+- Added 5 sidebar UI state fields (`show_agent_sidebar`, `agent_task_input`, `agent_tool_log`, `agent_response`, `agent_is_running`) + `agent_event_tx/rx` channel pair to `FerriteBrowser`
+- Added 7 messages: `ToggleAgentSidebar`, `AgentTaskInputChanged`, `AgentTaskSubmitted`, `AgentToolLogged`, `AgentCompleted`, `AgentFailed`, `StopAgent`
+- `AgentTaskSubmitted` handler: guards API key before spawning, creates `AgentTask`, clones `BrowserToolExecutor`, spawns tokio task that loops `run_turn` → sends `AgentToolLogged` per call → sends `AgentCompleted`/`AgentFailed`; stores `JoinHandle`
+- `StopAgent`: aborts the handle, clears running flag
+- Added `agent_event_sub` subscription (same `iced::stream::channel` + `Subscription::run_with_id` pattern as `tool_sub`, using `AgentEventChannel` marker type for dedup ID)
+- Added "Agent" toggle button in toolbar (same active/inactive style as Audit/JS)
+- Changed content layout to `row![browser_viewport, view_agent_sidebar(state)]` when sidebar is open
+- Added `view_agent_sidebar()` function: 320px fixed-width sidebar with header (Stop button when running), task input (greyed container when running), Run Task button (disabled when running/empty), scrollable tool log ("Working..." animated dots), response box
+
+**Exit condition:** `cargo build -p ferrite-ui` — zero errors.
+
+### 2026-04-13 — Task 11 Block 1: tool executor bridge (agent ↔ Iced channel)
+
+**Files:**
+- `crates/ferrite-ui/Cargo.toml` — added `ferrite-agent`, `tokio`, `async-trait`
+- `crates/ferrite-ui/src/lib.rs`:
+  - Added `ToolRequest` struct (reply wrapped in `Arc<Mutex<Option<oneshot::Sender<...>>>>` for `Clone`/`Debug`)
+  - Added `ToolRequestSender` / `ToolRequestReceiver` type aliases
+  - Added `BrowserToolExecutor` implementing `ferrite_agent::ToolExecutor` via `oneshot` + mpsc channel
+  - Added `tool_tx`, `tool_rx` (as `Arc<tokio::sync::Mutex<...>>` for `Fn` closure compatibility), `agent_handle` to `FerriteBrowser` state; unbounded channel initialized in `Default`
+  - Added `FerriteBrowserMessage::ToolRequestArrived(ToolRequest)`
+  - Added `ToolRequestArrived` arm in `update()` — dispatches to servo session methods; stubs "not yet implemented" for missing session APIs (`ReadPage`, `ExtractData`, `ClickElement`, `FillForm`)
+  - Added `tool_sub` in `subscription()` using `iced::stream::channel` (iced 0.13 API) + `Subscription::run_with_id` for deduplication; merged into `Subscription::batch`
+
+**API note:** iced 0.13 does not have `iced::subscription::channel` (spec wording); correct API is `iced::stream::channel(size, async_fn)` → stream, wrapped by `Subscription::run_with_id(id, stream)`.
+
+**Exit condition met:** `cargo build -p ferrite-ui` — zero errors.
+
+### 2026-04-13 — Task 10 Block 1: GeminiAgent with function calling
+
+**Files:**
+- `crates/ferrite-agent/Cargo.toml` — added `reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }`
+- `crates/ferrite-agent/src/gemini.rs` — new file: `GeminiAgent` implementing `AgentRuntime`; `build_tool_manifest()` (9 function declarations); `parse_function_call()` mapping Gemini fn names → `BrowserTool`; `format_tool_results()` building `functionResponse` parts; full agentic loop (rate limit → POST → timeout → 429/error handling → fn-call dispatch → append to contents → repeat up to MAX_TURNS_PER_TASK)
+- `crates/ferrite-agent/src/lib.rs` — added `pub mod gemini; pub use gemini::GeminiAgent;`
+- `crates/ferrite-shell/Cargo.toml` — added `ferrite-agent`, `tokio`, `async-trait` deps
+- `crates/ferrite-shell/src/main.rs` — added `agent-smoke` arm calling `GeminiAgent::from_env()` with `StubExecutor` (returns `"stub result for <tool_id>"`); skips gracefully when env var absent
+
+**Exit condition met:** `cargo test -p ferrite-agent` — 4/4 pass. `cargo build -p ferrite-shell` — zero errors.
+
+**Constants:** `GEMINI_API_BASE`, `DEFAULT_MODEL = "gemini-2.0-flash"`, `MAX_TURNS_PER_TASK = 10`, `TURN_TIMEOUT_SECS = 30`.
+
+### 2026-04-13 — Task 9 Block 1: ferrite-agent crate
+
+**Files:**
+- `Cargo.toml` — added `crates/ferrite-agent` to workspace members
+- `crates/ferrite-agent/Cargo.toml` — new crate with serde, serde_json, uuid (v4+serde), thiserror, async-trait, tokio deps
+- `crates/ferrite-agent/src/lib.rs` — defined all public types: `BrowserTool` (9 variants with stable `tool_id()` strings), `AgentTask`, `AgentToolCall`, `AgentToolResult`, `AgentTurn`, `AgentError`, `AgentRuntime` trait, `ToolExecutor` trait, `RateLimiter` (token-bucket, 2 req/s default)
+
+**Exit condition met:** `cargo test -p ferrite-agent` — all 4 unit tests pass.
+
+**Note:** `uuid` required the `serde` feature (not just `v4`) for Serialize/Deserialize impls on `Uuid`.
+
+
 
 ### 2026-04-01 — Remove ferrite-capability-broker, ferrite-policy, ferrite-sandbox from active compilation
 

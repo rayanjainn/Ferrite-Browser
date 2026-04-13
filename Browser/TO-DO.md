@@ -1065,8 +1065,8 @@ In crates/ferrite-ui/src/lib.rs:
 ```
 Exit condition: `cargo run -p ferrite-shell ui --features ferrite-servo/servo`. Navigate to example.com. Open the JS Console panel. Type `document.title` and press Enter — the page title appears in the output. Type `1 + 1` — output shows "2". Type a syntax error — output shows the error in red. The audit log shows JsExecute entries when refreshed.
 
-## Task 9: Agent Protocol Types (`ferrite-agent` crate)
-### Block 1: Crate scaffold, `BrowserTool`, `AgentRuntime` trait, and `RateLimiter`
+## Task 9: Agent Protocol Types (`ferrite-agent` crate)  |  ✅
+### Block 1: Crate scaffold, `BrowserTool`, `AgentRuntime` trait, and `RateLimiter`  |  ✅
 What it does: Creates the `ferrite-agent` crate and defines every type the agent system depends on. `BrowserTool` is the exhaustive set of browser actions. `AgentRuntime` is the trait both the Gemini connector and the IPI dry-run executor implement. `RateLimiter` is a token-bucket guard (2 req/s, burst 5) shared by all LLM backends to prevent runaway API use during testing. Nothing connects to a real LLM yet — only types and traits.
 
 Prompt for Claude Code:
@@ -1328,8 +1328,8 @@ mod tests {
 ```
 Exit condition: `cargo test -p ferrite-agent` — all four unit tests pass. `BrowserTool::tool_id()` strings match the IPI ToolId strings exactly (they will be compared directly in Task 10).
 
-## Task 10: Gemini LLM Backend (`ferrite-agent::gemini`)
-### Block 1: `GeminiAgent` implementing `AgentRuntime` with function calling
+## Task 10: Gemini LLM Backend (`ferrite-agent::gemini`)  |  ✅
+### Block 1: `GeminiAgent` implementing `AgentRuntime` with function calling  |  ✅
 What it does: Implements `AgentRuntime` against the Gemini API using Gemini's native function-calling protocol. The agent sends the task and available tools to Gemini, receives function call responses, executes them via `ToolExecutor`, feeds results back, and loops until Gemini produces a final text response or the turn limit (10) is hit. The rate limiter (2 req/s, burst 5) gates every API call. API key is read from `FERRITE_GEMINI_API_KEY` env var.
 
 Prompt for Claude Code:
@@ -1423,8 +1423,8 @@ In ferrite-shell/src/main.rs add CLI arg "agent-smoke":
 ```
 Exit condition: `cargo test -p ferrite-agent` passes. `FERRITE_GEMINI_API_KEY=<key> cargo run -p ferrite-shell -- agent-smoke` prints a non-empty final_response from Gemini and the tool call count. CI skips the smoke test when the env var is absent.
 
-## Task 11: Tool Execution Bridge + Agent Sidebar UI
-### Block 1: Tool executor bridge (agent ↔ Iced main thread channel)
+## Task 11: Tool Execution Bridge + Agent Sidebar UI  |  ✅
+### Block 1: Tool executor bridge (agent ↔ Iced main thread channel)  |  ✅ Done
 What it does: Implements `ToolExecutor` for the real browser. The agent runtime runs in a spawned tokio task; tool call requests cross an `mpsc` channel to the Iced main thread where they execute against the live Servo session; results return over a `oneshot` channel. This wiring is what makes the agent actually drive the browser.
 
 Prompt for Claude Code:
@@ -1493,7 +1493,7 @@ In crates/ferrite-ui/src/lib.rs implement the tool execution bridge:
 ```
 Exit condition: `cargo build -p ferrite-ui` compiles with zero errors. The channel types, ToolRequestArrived handler, and BrowserToolExecutor are in place. No agent sessions run yet.
 
-### Block 2: Agent sidebar panel in Iced UI
+### Block 2: Agent sidebar panel in Iced UI  |  ✅ Done
 What it does: Adds a 320px collapsible sidebar on the right side of the browser window. The user types a task and presses Enter. The sidebar shows the live tool call log as the agent executes and the final answer when it finishes. A toolbar button opens and closes it. This is the primary user interface for the agent.
 
 Prompt for Claude Code:

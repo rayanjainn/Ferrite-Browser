@@ -7,6 +7,7 @@ fn main() {
         "ui" => ferrite_ui::launch().expect("Ferrite UI exited with error"),
         "window" => ServoShell::new().run(),
         "jstest" => run_js_compat_test(),
+        "agent-smoke" => run_agent_smoke(),
         _ => run_smoke_test(),
     }
 }
@@ -101,6 +102,49 @@ fn run_js_compat_test() {
         Ok(_) => println!("[jstest] Results saved to {}", csv_path.display()),
         Err(e) => eprintln!("[jstest] Warning: could not write CSV: {}", e),
     }
+}
+
+fn run_agent_smoke() {
+    use ferrite_agent::{AgentTask, AgentToolCall, AgentToolResult, GeminiAgent, AgentRuntime, ToolExecutor};
+
+    if std::env::var("FERRITE_GEMINI_API_KEY").is_err() {
+        eprintln!("[agent-smoke] FERRITE_GEMINI_API_KEY is not set — skipping");
+        std::process::exit(0);
+    }
+
+    struct StubExecutor;
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for StubExecutor {
+        async fn execute(&self, call: &AgentToolCall) -> AgentToolResult {
+            let data = format!("stub result for {}", call.tool.tool_id());
+            AgentToolResult::ok(call.call_id, data)
+        }
+    }
+
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    rt.block_on(async {
+        let agent = GeminiAgent::from_env();
+        let task = AgentTask::new(
+            "What is the title of the page at https://example.com?",
+            Some("https://example.com".to_string()),
+        );
+        let executor = StubExecutor;
+
+        match agent.run_turn(&task, &[], &executor).await {
+            Ok(turn) => {
+                println!(
+                    "[agent-smoke] final_response: {}",
+                    turn.final_response.as_deref().unwrap_or("<none>")
+                );
+                println!("[agent-smoke] tool calls made: {}", turn.tool_calls.len());
+            }
+            Err(e) => {
+                eprintln!("[agent-smoke] error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    });
 }
 
 fn run_smoke_test() {

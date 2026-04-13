@@ -4,6 +4,7 @@ members = [
   "crates/ferrite-audit-log",
   "crates/ferrite-servo",
   "crates/ferrite-ui",
+  "crates/ferrite-agent",
 ]
 resolver = "2"
 
