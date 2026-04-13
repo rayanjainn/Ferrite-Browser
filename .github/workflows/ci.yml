@@ -16,7 +16,7 @@ on:
 
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # Job 1: Build, lint, test — matrix across Linux, Windows, macOS
+  # Job 1: Build, lint, test — matrix across Windows & macOS
   # ─────────────────────────────────────────────────────────────
   ci:
     name: Build, Lint & Test (${{ matrix.os }})
@@ -40,22 +40,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      # ── Linux system dependencies ─────────────────────────────
-      - name: Install system dependencies (Linux)
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
-            pkg-config cmake clang lld llvm python3 \
-            libssl-dev libdbus-1-dev libfreetype6-dev libfontconfig1-dev \
-            libglib2.0-dev \
-            libunwind-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            libgstreamer-plugins-bad1.0-dev \
-            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libx11-dev \
-            sqlite3 libsqlite3-dev
-        working-directory: .
 
       # ── macOS system dependencies ─────────────────────────────
       - name: Install system dependencies (macOS)
@@ -155,18 +139,16 @@ jobs:
           retention-days: 90
 
   # ─────────────────────────────────────────────────────────────
-  # Job 2: Collect all three platform binaries and commit them
+  # Job 2: Collect the 2 platform's binaries and commit them
   # into Executables/<label>/ in the repository.
   # Runs only on pushes to main — never on PRs.
   #
   # Folder structure produced:
   #   Executables/
   #     7.1/
-  #       ferrite-7.1-linux
   #       ferrite-7.1-windows.exe
   #       ferrite-7.1-macos
   #     9.2/
-  #       ferrite-9.2-linux
   #       ferrite-9.2-windows.exe
   #       ferrite-9.2-macos
   # ─────────────────────────────────────────────────────────────
@@ -200,12 +182,8 @@ jobs:
           fi
           echo "binary_label=$LABEL" >> "$GITHUB_OUTPUT"
 
-      # ── Download all three platform artifacts ─────────────────
-      - name: Download Linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ferrite-${{ steps.label.outputs.binary_label }}-linux
-          path: downloaded/linux
+      # ── Download both platform artifacts ─────────────────
+
 
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
@@ -226,11 +204,9 @@ jobs:
           LABEL="${{ steps.label.outputs.binary_label }}"
           mkdir -p "Executables/${LABEL}"
 
-          cp "downloaded/linux/ferrite-${LABEL}-linux"         "Executables/${LABEL}/ferrite-${LABEL}-linux"         2>/dev/null || true
           cp "downloaded/windows/ferrite-${LABEL}-windows.exe" "Executables/${LABEL}/ferrite-${LABEL}-windows.exe"   2>/dev/null || true
           cp "downloaded/macos/ferrite-${LABEL}-macos"         "Executables/${LABEL}/ferrite-${LABEL}-macos"         2>/dev/null || true
 
-          chmod +x "Executables/${LABEL}/ferrite-${LABEL}-linux" 2>/dev/null || true
           chmod +x "Executables/${LABEL}/ferrite-${LABEL}-macos" 2>/dev/null || true
 
           echo "Contents of Executables/${LABEL}/:"
@@ -247,6 +223,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No new executables — this label already exists in the repo."
           else
-            git commit -m "ci: store ferrite-${LABEL} executables (linux, windows, macos) [skip ci]"
+            git commit -m "ci: store ferrite-${LABEL} executables (windows, macos) [skip ci]"
             git push
           fi
