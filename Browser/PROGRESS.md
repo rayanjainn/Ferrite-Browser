@@ -57,6 +57,12 @@ Major Project/                  ← git repo root, reference docs, PDFs
 
 ## Change Log
 
+### 2026-04-13 — CI and Clippy fixes
+
+**Files:**
+- `.github/workflows/ci.yml` — removed `ubuntu-22.04` entry from the `matrix.include` list; matrix now covers only `windows-latest` and `macos-latest`
+- `crates/ferrite-shell/src/main.rs` — fixed `print_literal` Clippy hard error: moved `"Errors"` from positional argument into the format string literal directly (`"{:<42} {:<12} {:<40} Errors"`)
+
 ### 2026-04-13 — Task 11 Block 2: agent sidebar panel in Iced UI
 
 **Files:** `crates/ferrite-ui/src/lib.rs`

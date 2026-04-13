@@ -26,9 +26,6 @@ jobs:
       fail-fast: false   # all three platforms run even if one fails
       matrix:
         include:
-          - os: ubuntu-22.04
-            platform: linux
-            binary_suffix: ""
           - os: windows-latest
             platform: windows
             binary_suffix: ".exe"

@@ -47,8 +47,8 @@ fn run_js_compat_test() {
     // ── Print results table ────────────────────────────────────────────────
     println!();
     println!(
-        "{:<42} {:<12} {:<40} {}",
-        "URL", "JS Executed", "Title", "Errors"
+        "{:<42} {:<12} {:<40} Errors",
+        "URL", "JS Executed", "Title"
     );
     println!("{}", "-".repeat(110));
     for r in &results {
