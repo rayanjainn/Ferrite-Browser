@@ -57,6 +57,14 @@ Major Project/                  ← git repo root, reference docs, PDFs
 
 ## Change Log
 
+### 2026-04-13 — ferrite-shell: double-click launches UI instead of smoke test
+
+**Files:** `crates/ferrite-shell/src/main.rs`
+
+- Changed default match arm in `main()` from `_ => run_smoke_test()` to `"smoke" => run_smoke_test()` + `_ => ferrite_ui::launch().expect(...)`.
+- Running the executable with no arguments (e.g. double-clicking the `.exe`) now opens the Ferrite UI.
+- Smoke test remains accessible via `ferrite-shell smoke` from the command line.
+
 ### 2026-04-13 — CI and Clippy fixes
 
 **Files:**

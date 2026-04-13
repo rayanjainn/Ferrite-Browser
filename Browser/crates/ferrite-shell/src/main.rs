@@ -8,7 +8,8 @@ fn main() {
         "window" => ServoShell::new().run(),
         "jstest" => run_js_compat_test(),
         "agent-smoke" => run_agent_smoke(),
-        _ => run_smoke_test(),
+        "smoke" => run_smoke_test(),
+        _ => ferrite_ui::launch().expect("Ferrite UI exited with error"),
     }
 }
 
