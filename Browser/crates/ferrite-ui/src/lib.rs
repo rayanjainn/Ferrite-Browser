@@ -28,6 +28,8 @@ use iced::{
 use iced_widget::image::{Handle as ImageHandle, Image as ServoImage};
 use tokio::sync::oneshot;
 use ferrite_agent::{AgentRuntime, AgentTask, AgentToolCall, AgentToolResult, BrowserTool, GeminiAgent};
+use ferrite_ipi::comparator::{compare, ConsentDecision, FingerprintDiff};
+use ferrite_ipi::tool_decision::ToolId;
 
 // ---------------------------------------------------------------------------
 // Tool-execution bridge types (agent ↔ Iced main thread)
@@ -83,6 +85,24 @@ impl ferrite_agent::ToolExecutor for BrowserToolExecutor {
         let req = ToolRequest::new(call.clone(), reply_tx);
         let _ = self.tx.send(req);
         reply_rx.await.unwrap_or_else(|_| AgentToolResult::err(call.call_id, "channel closed"))
+    }
+}
+
+/// Wraps `BrowserToolExecutor` and blocks tools the user rejected in the consent dialog.
+struct FilteredToolExecutor {
+    inner: BrowserToolExecutor,
+    rejected: std::collections::HashSet<ToolId>,
+}
+
+#[async_trait::async_trait]
+impl ferrite_agent::ToolExecutor for FilteredToolExecutor {
+    async fn execute(&self, call: &AgentToolCall) -> AgentToolResult {
+        let tool_id = ToolId::from(&call.tool);
+        if self.rejected.contains(&tool_id) {
+            AgentToolResult::err(call.call_id, "blocked by user consent")
+        } else {
+            self.inner.execute(call).await
+        }
     }
 }
 
@@ -172,6 +192,15 @@ pub struct FerriteBrowser {
     pub agent_event_tx: Option<tokio::sync::mpsc::UnboundedSender<FerriteBrowserMessage>>,
     /// Receiver drained by the agent_event_sub subscription.
     pub agent_event_rx: Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FerriteBrowserMessage>>>>,
+    // ── IPI consent state ────────────────────────────────────────────────────
+    /// Set when the dry run finds extra tools; cleared after consent or cancel.
+    pub pending_diff: Option<FingerprintDiff>,
+    /// Tracks per-tool approve/reject decisions while the consent panel is open.
+    pub pending_decision: ConsentDecision,
+    /// Extra tools the user approved — enforced in the real run.
+    pub approved_extras: std::collections::HashSet<ToolId>,
+    /// Original task preserved between dry run and consent resolution.
+    pub pending_task: Option<AgentTask>,
 }
 
 impl Default for FerriteBrowser {
@@ -210,6 +239,10 @@ impl Default for FerriteBrowser {
             agent_is_running: false,
             agent_event_tx: Some(agent_event_tx),
             agent_event_rx: Some(std::sync::Arc::new(tokio::sync::Mutex::new(agent_event_rx))),
+            pending_diff: None,
+            pending_decision: ConsentDecision::default(),
+            approved_extras: std::collections::HashSet::new(),
+            pending_task: None,
         }
     }
 }
@@ -264,6 +297,12 @@ pub enum FerriteBrowserMessage {
     AgentCompleted(String),
     AgentFailed(String),
     StopAgent,
+    // ── IPI consent ───────────────────────────────────────────────────────────
+    ConsentRequired(FingerprintDiff),
+    ApproveTool(String),
+    RejectTool(String),
+    ConsentSubmitted,
+    ConsentCancelled,
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +542,7 @@ pub fn update(
             let prompt = state.agent_task_input.clone();
             let context_url = state.tab_urls.get(state.active_tab).cloned();
             let agent_task = AgentTask::new(prompt, context_url);
+            state.pending_task = Some(agent_task.clone());
 
             let executor = match state.tool_tx.clone() {
                 Some(tx) => BrowserToolExecutor { tx },
@@ -521,47 +561,32 @@ pub fn update(
                     return;
                 }
                 let agent = GeminiAgent::from_env();
-                let mut history = vec![];
-                loop {
-                    match agent.run_turn(&agent_task, &history, &executor).await {
-                        Ok(turn) => {
-                            for call in &turn.tool_calls {
-                                let label = match &call.tool {
-                                    BrowserTool::Navigate(url) =>
-                                        format!("[navigate] {}", url),
-                                    BrowserTool::ReadPage =>
-                                        "[dom.read] read page".to_string(),
-                                    BrowserTool::ClickElement(sel) =>
-                                        format!("[dom.write] click {}", sel),
-                                    BrowserTool::FillForm { selector, value } =>
-                                        format!("[form.fill] {}={}", selector, value),
-                                    BrowserTool::ExtractData(sel) =>
-                                        format!("[dom.read] extract {}", sel),
-                                    BrowserTool::ExecuteJs(code) =>
-                                        format!("[js.execute] {}", &code[..code.len().min(40)]),
-                                    BrowserTool::ReadClipboard =>
-                                        "[clipboard.read]".to_string(),
-                                    BrowserTool::WriteClipboard(s) =>
-                                        format!("[clipboard.write] {}", s),
-                                    BrowserTool::DownloadFile(url) =>
-                                        format!("[download.file] {}", url),
-                                };
-                                let _ = event_tx.send(FerriteBrowserMessage::AgentToolLogged(label));
-                            }
-                            let is_complete = turn.is_complete;
-                            let response = turn.final_response.clone().unwrap_or_default();
-                            history.push(turn);
-                            if is_complete {
-                                let _ = event_tx.send(FerriteBrowserMessage::AgentCompleted(response));
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(e.to_string()));
-                            break;
-                        }
+
+                // ── IPI dry run ──────────────────────────────────────────────
+                let engine = ferrite_ipi::tool_decision::ToolDecisionEngine::new();
+                let fingerprint = engine.fingerprint_from_task(&agent_task).await;
+                let twin_path = std::env::temp_dir().join("ferrite-ipi-twin.enc");
+                let orch = ferrite_ipi::dry_run::DryRunOrchestrator::new(twin_path);
+                let dry_record = match orch.run(&agent_task, &[], &agent).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(
+                            format!("dry run failed: {}", e),
+                        ));
+                        return;
                     }
+                };
+                let _ = event_tx.send(FerriteBrowserMessage::AgentToolLogged(
+                    "[dry run complete — checking for unexpected activity]".to_string(),
+                ));
+                let diff = compare(&fingerprint, &dry_record);
+                if !diff.is_clean() {
+                    let _ = event_tx.send(FerriteBrowserMessage::ConsentRequired(diff));
+                    return;
                 }
+
+                // ── Real run ─────────────────────────────────────────────────
+                run_agent_loop(&agent_task, &agent, &executor, &event_tx).await;
             });
             state.agent_handle = Some(handle);
         }
@@ -580,6 +605,50 @@ pub fn update(
             if let Some(handle) = state.agent_handle.take() {
                 handle.abort();
             }
+            state.agent_is_running = false;
+        }
+        // ── IPI consent handlers ──────────────────────────────────────────────
+        FerriteBrowserMessage::ConsentRequired(diff) => {
+            state.pending_diff = Some(diff);
+            state.pending_decision = ConsentDecision::default();
+            state.agent_is_running = false;
+        }
+        FerriteBrowserMessage::ApproveTool(id) => {
+            state.pending_decision.approve(ToolId::new(&id));
+        }
+        FerriteBrowserMessage::RejectTool(id) => {
+            state.pending_decision.reject(ToolId::new(&id));
+        }
+        FerriteBrowserMessage::ConsentSubmitted => {
+            let rejected = state.pending_decision.rejected.clone();
+            state.approved_extras = state.pending_decision.approved.clone();
+            state.pending_diff = None;
+            state.pending_decision = ConsentDecision::default();
+
+            let task = match state.pending_task.take() {
+                Some(t) => t,
+                None => return Task::none(),
+            };
+            state.agent_is_running = true;
+
+            let executor = match state.tool_tx.clone() {
+                Some(tx) => FilteredToolExecutor { inner: BrowserToolExecutor { tx }, rejected },
+                None => return Task::none(),
+            };
+            let event_tx = match state.agent_event_tx.clone() {
+                Some(tx) => tx,
+                None => return Task::none(),
+            };
+
+            let handle = tokio::task::spawn(async move {
+                let agent = GeminiAgent::from_env();
+                run_agent_loop(&task, &agent, &executor, &event_tx).await;
+            });
+            state.agent_handle = Some(handle);
+        }
+        FerriteBrowserMessage::ConsentCancelled => {
+            state.pending_diff = None;
+            state.pending_decision = ConsentDecision::default();
             state.agent_is_running = false;
         }
         // ── Agent bridge ──────────────────────────────────────────────────────
@@ -868,6 +937,52 @@ fn resolve_url(input: &str) -> String {
     // Everything else → DuckDuckGo Lite search.
     let encoded = urlencoding::encode(trimmed);
     format!("https://lite.duckduckgo.com/lite/?q={}", encoded)
+}
+
+// ---------------------------------------------------------------------------
+// Agent loop helper — shared by the initial run and the post-consent real run.
+// ---------------------------------------------------------------------------
+
+async fn run_agent_loop(
+    task: &AgentTask,
+    agent: &GeminiAgent,
+    executor: &dyn ferrite_agent::ToolExecutor,
+    event_tx: &tokio::sync::mpsc::UnboundedSender<FerriteBrowserMessage>,
+) {
+    let mut history = vec![];
+    loop {
+        match agent.run_turn(task, &history, executor).await {
+            Ok(turn) => {
+                for call in &turn.tool_calls {
+                    let label = match &call.tool {
+                        BrowserTool::Navigate(url) => format!("[navigate] {}", url),
+                        BrowserTool::ReadPage => "[dom.read] read page".to_string(),
+                        BrowserTool::ClickElement(sel) => format!("[dom.write] click {}", sel),
+                        BrowserTool::FillForm { selector, value } =>
+                            format!("[form.fill] {}={}", selector, value),
+                        BrowserTool::ExtractData(sel) => format!("[dom.read] extract {}", sel),
+                        BrowserTool::ExecuteJs(code) =>
+                            format!("[js.execute] {}", &code[..code.len().min(40)]),
+                        BrowserTool::ReadClipboard => "[clipboard.read]".to_string(),
+                        BrowserTool::WriteClipboard(s) => format!("[clipboard.write] {}", s),
+                        BrowserTool::DownloadFile(url) => format!("[download.file] {}", url),
+                    };
+                    let _ = event_tx.send(FerriteBrowserMessage::AgentToolLogged(label));
+                }
+                let is_complete = turn.is_complete;
+                let response = turn.final_response.clone().unwrap_or_default();
+                history.push(turn);
+                if is_complete {
+                    let _ = event_tx.send(FerriteBrowserMessage::AgentCompleted(response));
+                    break;
+                }
+            }
+            Err(e) => {
+                let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(e.to_string()));
+                break;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1814,78 +1929,198 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
         .style(if run_disabled { panel_btn_inactive } else { accent_btn_style })
         .on_press_maybe((!run_disabled).then_some(FerriteBrowserMessage::AgentTaskSubmitted));
 
-    // Tool call log — scrollable.
-    let dots = match ((state.progress_offset * 3.0) as usize) % 4 {
-        0 => "",
-        1 => ".",
-        2 => "..",
-        _ => "...",
-    };
-    let log_items: Vec<Element<FerriteBrowserMessage>> =
-        if state.agent_tool_log.is_empty() && !state.agent_is_running {
-            vec![text("No active session.").size(12).color(C_TEXT_DIM).into()]
-        } else {
-            let mut items: Vec<Element<_>> = state
-                .agent_tool_log
-                .iter()
-                .map(|entry| {
-                    container(
-                        row![
-                            text("->").size(12).color(C_ACCENT),
-                            text(entry.as_str()).size(12).color(C_TEXT_DIM),
-                        ]
-                        .spacing(4),
-                    )
-                    .padding([2, 0])
+    // ── Consent panel (shown instead of log+response when diff is pending) ──
+    let body: Element<FerriteBrowserMessage> = if let Some(diff) = &state.pending_diff {
+        let mut tool_rows: Vec<Element<FerriteBrowserMessage>> = {
+            let mut tools: Vec<&ToolId> = diff.extra_tools.iter().collect();
+            tools.sort_by_key(|t| &t.0);
+            tools
+                .into_iter()
+                .map(|tool| {
+                    let approved = state.pending_decision.approved.contains(tool);
+                    let rejected = state.pending_decision.rejected.contains(tool);
+                    let id_str = tool.to_string();
+
+                    let approve_style = move |_: &Theme, _| button::Style {
+                        background: Some(Background::Color(if approved {
+                            C_SAFE
+                        } else {
+                            Color { a: 0.25, ..C_SAFE }
+                        })),
+                        text_color: Color::WHITE,
+                        border: Border {
+                            radius: iced::border::Radius::new(4.0),
+                            ..Border::default()
+                        },
+                        ..button::Style::default()
+                    };
+                    let reject_style = move |_: &Theme, _| button::Style {
+                        background: Some(Background::Color(if rejected {
+                            C_DANGER
+                        } else {
+                            Color { a: 0.25, ..C_DANGER }
+                        })),
+                        text_color: Color::WHITE,
+                        border: Border {
+                            radius: iced::border::Radius::new(4.0),
+                            ..Border::default()
+                        },
+                        ..button::Style::default()
+                    };
+
+                    let approve_id = id_str.clone();
+                    let reject_id = id_str.clone();
+                    row![
+                        text(id_str).size(12).color(C_TEXT).width(Length::Fill),
+                        button(text("Approve").size(11))
+                            .padding([3, 7])
+                            .style(approve_style)
+                            .on_press(FerriteBrowserMessage::ApproveTool(approve_id)),
+                        button(text("Reject").size(11))
+                            .padding([3, 7])
+                            .style(reject_style)
+                            .on_press(FerriteBrowserMessage::RejectTool(reject_id)),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center)
                     .width(Length::Fill)
                     .into()
                 })
-                .collect();
-            if state.agent_is_running {
-                items.push(
-                    text(format!("Working{}", dots))
-                        .size(12)
-                        .color(C_TEXT_DIM)
-                        .into(),
-                );
-            }
-            items
+                .collect()
         };
 
-    let log_scroll = scrollable(
-        column(log_items)
-            .spacing(2)
+        let complete = state.pending_decision.is_complete(diff);
+        let proceed_btn = button(text("Proceed with approved").size(12))
+            .padding([7, 10])
             .width(Length::Fill)
-            .padding([4, 8]),
-    )
-    .height(Length::Fill);
+            .style(if complete { accent_btn_style } else { panel_btn_inactive })
+            .on_press_maybe(complete.then_some(FerriteBrowserMessage::ConsentSubmitted));
+
+        let cancel_btn = button(text("Cancel").size(12))
+            .padding([7, 10])
+            .width(Length::Fill)
+            .style(|_: &Theme, _| button::Style {
+                background: Some(Background::Color(C_RAISED)),
+                text_color: C_TEXT_DIM,
+                border: Border {
+                    radius: iced::border::Radius::new(BORDER_RADIUS),
+                    width: 1.0,
+                    color: C_DIVIDER,
+                },
+                ..button::Style::default()
+            })
+            .on_press(FerriteBrowserMessage::ConsentCancelled);
+
+        let mut panel_items: Vec<Element<FerriteBrowserMessage>> = vec![
+            row![
+                text("! Unexpected Activity Detected")
+                    .size(14)
+                    .color(C_DANGER)
+                    .width(Length::Fill),
+            ]
+            .into(),
+            text(diff.summary()).size(12).color(C_TEXT_DIM).into(),
+            sep().into(),
+            text("Review each item:").size(12).color(C_TEXT).into(),
+        ];
+        panel_items.append(&mut tool_rows);
+        panel_items.push(sep().into());
+        panel_items.push(proceed_btn.into());
+        panel_items.push(cancel_btn.into());
+
+        scrollable(
+            container(
+                column(panel_items).spacing(8).padding([8, 12]),
+            )
+            .width(Length::Fill)
+            .style(|_: &Theme| container::Style {
+                background: Some(Background::Color(Color {
+                    r: C_WARN.r,
+                    g: C_WARN.g,
+                    b: C_WARN.b,
+                    a: 0.08,
+                })),
+                ..container::Style::default()
+            }),
+        )
+        .height(Length::Fill)
+        .into()
+    } else {
+        // ── Normal tool call log ──────────────────────────────────────────────
+        let dots = match ((state.progress_offset * 3.0) as usize) % 4 {
+            0 => "",
+            1 => ".",
+            2 => "..",
+            _ => "...",
+        };
+        let log_items: Vec<Element<FerriteBrowserMessage>> =
+            if state.agent_tool_log.is_empty() && !state.agent_is_running {
+                vec![text("No active session.").size(12).color(C_TEXT_DIM).into()]
+            } else {
+                let mut items: Vec<Element<_>> = state
+                    .agent_tool_log
+                    .iter()
+                    .map(|entry| {
+                        container(
+                            row![
+                                text("->").size(12).color(C_ACCENT),
+                                text(entry.as_str()).size(12).color(C_TEXT_DIM),
+                            ]
+                            .spacing(4),
+                        )
+                        .padding([2, 0])
+                        .width(Length::Fill)
+                        .into()
+                    })
+                    .collect();
+                if state.agent_is_running {
+                    items.push(
+                        text(format!("Working{}", dots))
+                            .size(12)
+                            .color(C_TEXT_DIM)
+                            .into(),
+                    );
+                }
+                items
+            };
+
+        let mut log_col_items = log_items;
+        if let Some(response) = &state.agent_response {
+            log_col_items.push(sep().into());
+            log_col_items.push(
+                container(
+                    column![
+                        text("Answer").size(13).color(C_TEXT_DIM),
+                        text(response.as_str()).size(13).color(C_TEXT),
+                    ]
+                    .spacing(4)
+                    .padding([8, 12]),
+                )
+                .width(Length::Fill)
+                .into(),
+            );
+        }
+
+        scrollable(
+            column(log_col_items)
+                .spacing(2)
+                .width(Length::Fill)
+                .padding([4, 8]),
+        )
+        .height(Length::Fill)
+        .into()
+    };
 
     // Assemble column.
-    let mut col_items: Vec<Element<FerriteBrowserMessage>> = vec![
+    let col_items: Vec<Element<FerriteBrowserMessage>> = vec![
         header.into(),
         sep().into(),
         container(column![task_input, run_btn].spacing(6).padding([8, 12]))
             .width(Length::Fill)
             .into(),
         sep().into(),
-        log_scroll.into(),
+        body,
     ];
-
-    if let Some(response) = &state.agent_response {
-        col_items.push(sep().into());
-        col_items.push(
-            container(
-                column![
-                    text("Answer").size(13).color(C_TEXT_DIM),
-                    text(response.as_str()).size(13).color(C_TEXT),
-                ]
-                .spacing(4)
-                .padding([8, 12]),
-            )
-            .width(Length::Fill)
-            .into(),
-        );
-    }
 
     container(column(col_items).width(Length::Fill))
         .width(Length::Fixed(320.0))

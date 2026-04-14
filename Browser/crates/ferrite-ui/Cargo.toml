@@ -9,6 +9,7 @@ iced_widget = { version = "0.13", features = ["image"] }
 ferrite-audit-log = { path = "../ferrite-audit-log" }
 ferrite-servo = { path = "../ferrite-servo" }
 ferrite-agent = { path = "../ferrite-agent" }
+ferrite-ipi = { path = "../ferrite-ipi" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }

@@ -61,10 +61,33 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | `ferrite-ipi` — Task 15 Block 1: network containment (`ContainmentState` + Option C interceptor + Option B namespace) | ✅ Done |
 | `ferrite-ipi` — Task 16 Block 1: `DryRunRecord` + `RecordingExecutor` + `DryRunOrchestrator::run()` | ✅ Done |
 | `ferrite-ipi` — Task 17 Block 1: `FingerprintDiff`, `compare()`, `ConsentDecision`, `IpiEvent` | ✅ Done |
+| `ferrite-ui` — Task 17 Block 2: IPI consent panel in agent sidebar + dry run wired to `AgentTaskSubmitted` | ✅ Done |
 
 ---
 
 ## Change Log
+
+### 2026-04-14 — Task 17 Block 2: IPI consent panel + dry run wired to agent sidebar
+
+**Files:**
+- `crates/ferrite-ui/Cargo.toml` — added `ferrite-ipi = { path = "../ferrite-ipi" }`
+- `crates/ferrite-ui/src/lib.rs` — multiple additions
+
+**State additions:** `pending_diff: Option<FingerprintDiff>`, `pending_decision: ConsentDecision`, `approved_extras: HashSet<ToolId>`, `pending_task: Option<AgentTask>`
+
+**New message variants:** `ConsentRequired(FingerprintDiff)`, `ApproveTool(String)`, `RejectTool(String)`, `ConsentSubmitted`, `ConsentCancelled`
+
+**`FilteredToolExecutor`** — wraps `BrowserToolExecutor`; blocks any tool whose `ToolId` is in the `rejected` set with `AgentToolResult::err("blocked by user consent")`
+
+**`AgentTaskSubmitted` modified** — runs IPI dry run before real agent run: creates `ToolDecisionEngine`, calls `fingerprint_from_task`, then `DryRunOrchestrator::run`; sends `AgentToolLogged("[dry run complete…]")` on completion; if `diff.is_clean()` proceeds directly to real run, otherwise sends `ConsentRequired(diff)` and exits the task
+
+**`run_agent_loop` helper** — extracted the turn loop so it can be reused from both the direct path and `ConsentSubmitted`
+
+**`ConsentSubmitted` handler** — clones rejected set, sets `approved_extras`, spawns new task with `FilteredToolExecutor` wrapping the real executor
+
+**Consent panel in `view_agent_sidebar()`** — amber-tinted scrollable panel (C_WARN, 0.08α) with: danger-red header, `diff.summary()`, alphabetically-sorted tool rows with Approve (green, highlighted when approved) / Reject (red, highlighted when rejected) buttons, "Proceed with approved" (disabled until `is_complete(diff)`), and Cancel button; replaces tool log + response when `pending_diff.is_some()`
+
+`cargo build -p ferrite-ui` — clean, no warnings
 
 ### 2026-04-14 — Task 17 Block 1: `FingerprintDiff`, `compare()`, `ConsentDecision`, `IpiEvent`
 
