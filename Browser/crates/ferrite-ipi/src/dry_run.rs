@@ -106,7 +106,7 @@ impl DryRunOrchestrator {
         let twin = self.twin_manager.load_or_generate();
 
         // Activate both containment layers
-        activate_full(&self.containment).map_err(|e| e)?;
+        activate_full(&self.containment)?;
 
         let executor = RecordingExecutor {
             record: record.clone(),
