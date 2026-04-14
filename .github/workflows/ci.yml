@@ -97,7 +97,7 @@ jobs:
 
       # ── Release binary ────────────────────────────────────────
       - name: Build release binary
-        run: cargo build --release -p ferrite-shell
+        run: cargo build --release -p ferrite-shell --features ferrite-servo/servo
 
       # ── Derive binary label from commit message ───────────────
       # Convention: include [T<task>.<block>] anywhere in the commit.
