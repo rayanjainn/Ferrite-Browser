@@ -75,9 +75,6 @@ jobs:
       - name: Fetch dependencies
         run: cargo fetch
 
-      - name: Pin sea-query-rusqlite
-        run: cargo update sea-query-rusqlite --precise 0.8.0-rc.16
-
       # ── Lint (Linux only — output is platform-independent) ────
       - name: Check formatting
         if: matrix.platform == 'linux'
