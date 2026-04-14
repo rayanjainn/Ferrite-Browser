@@ -327,3 +327,10 @@ If extension calls a host function for a capability not declared in its manifest
 - **<1ms broker latency** — median capability check overhead
 - **20+ adversarial scenarios** tested (month 5)
 - **≥10% bandwidth savings** on tracker-heavy sites via adblock-rust
+
+## Dependency Rules
+
+- Do NOT add new crates that transitively depend on sea-query, sea-orm, sqlx, or diesel. Ferrite uses rusqlite directly for all storage. If a crate requires an ORM or query-builder, find an alternative or implement the query manually with rusqlite.
+- Before adding any new [dependencies] entry to any Cargo.toml, check `cargo tree` to verify it does not introduce a version conflict with existing workspace dependencies: rusqlite, tokio, serde, iced, servo.
+- Prefer crates already in the workspace dependency graph. Do not add a second crate that solves a problem already solved by an existing dependency.
+- All new dependencies must be pinned to an exact version with `=` in the workspace root Cargo.toml to prevent silent upgrades from breaking the build.

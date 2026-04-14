@@ -52,10 +52,61 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | `ferrite-agent::gemini` — Task 10 Block 1: GeminiAgent with function calling | ✅ Done |
 | `ferrite-ui` — Task 11 Block 1: tool executor bridge (agent ↔ Iced channel) | ✅ Done |
 | `ferrite-ui` — Task 11 Block 2: agent sidebar panel in Iced UI | ✅ Done |
+| `ferrite-ipi` — Task 12 Block 1: crate skeleton + `ToolId` + `ToolFingerprint` | ✅ Done |
+| `ferrite-ipi` — Task 12 Block 2: `rule_based_must_use` keyword matcher | ✅ Done |
+| `ferrite-ipi` — Task 12 Block 3: `LlmMayUsePredictor` Gemini-backed may-use predictor | ✅ Done |
+| `ferrite-ipi` — Task 12 Block 4: `ToolDecisionEngine` composing both layers | ✅ Done |
 
 ---
 
 ## Change Log
+
+### 2026-04-14 — Task 12 Block 4: `ToolDecisionEngine` — composing both layers
+
+**Files:** `crates/ferrite-ipi/src/tool_decision/mod.rs`
+
+- Added `ToolDecisionEngine` struct wrapping `Option<LlmMayUsePredictor>`
+- `new()` calls `LlmMayUsePredictor::from_env()` — no key → LLM layer silently disabled
+- `generate_fingerprint(prompt, task_id)` → runs rule-based must-use, then LLM may-use (if predictor present), then filters may-use to keep sets strictly disjoint
+- `fingerprint_from_task(task)` → convenience wrapper for `AgentTask`
+- `Default` impl delegates to `new()`
+- 3 new async tests in `engine_tests` (all pass without API key): `engine_no_api_key_uses_rules_only`, `engine_open_ended_prompt_produces_empty_fingerprint`, `must_use_and_may_use_are_disjoint`
+- 10/10 tests pass
+
+### 2026-04-14 — Task 12 Block 3: `LlmMayUsePredictor` Gemini-backed may-use predictor
+
+**Files:**
+- `crates/ferrite-ipi/Cargo.toml` — added `reqwest` (0.12, json + rustls-tls), `tokio` (full), `serde_json`
+- `crates/ferrite-ipi/src/tool_decision/mod.rs` — added `LlmMayUsePredictor` struct with `from_env()` (reads `FERRITE_GEMINI_API_KEY`, returns `None` if absent) and `predict()` (async, temperature 0, 15s timeout, filters response against allowed tool list, returns empty set on any error)
+
+Key design decisions:
+- `from_env()` returns `Option<Self>` — callers must handle missing key gracefully (empty `may_use`)
+- Reuses `RateLimiter::default_testing()` from `ferrite-agent` (2 req/s, burst 5)
+- Response filtered against `available` allowlist — model cannot inject arbitrary tool IDs
+- All network/parse errors silently return empty set (fail-safe)
+
+### 2026-04-14 — Task 12 Block 2: `rule_based_must_use` keyword matcher
+
+**Files:** `crates/ferrite-ipi/src/tool_decision/mod.rs`
+
+- Added `rule_based_must_use(prompt: &str) -> HashSet<ToolId>`: case-insensitive keyword scan covering email, calendar, navigation, form, read/extract, download, JavaScript, and report/summarise intent clusters
+- Returns empty set for unrecognised prompts (safe default for open-ended tasks)
+- 4 new tests in `rule_tests` module: `email_prompt_gives_email_read`, `navigate_prompt_gives_navigate`, `open_ended_returns_empty`, `no_false_positives_on_unrelated_prompt`
+- All 7 tests pass (4 new + 3 from Block 1)
+
+### 2026-04-14 — Task 12 Block 1: `ferrite-ipi` crate skeleton + `ToolId` + `ToolFingerprint`
+
+**Files:**
+- `Cargo.toml` — added `crates/ferrite-ipi` to workspace `members`
+- `crates/ferrite-ipi/Cargo.toml` — new crate; deps: `ferrite-agent`, `uuid` (v4), `serde` (derive), `thiserror`
+- `crates/ferrite-ipi/src/lib.rs` — declares 7 public modules: `tool_decision`, `sanitizer`, `twin`, `containment`, `dry_run`, `comparator`, `dataset`
+- `crates/ferrite-ipi/src/tool_decision/mod.rs` — implements `ToolId` (newtype over `String`, `From<&BrowserTool>` impl) and `ToolFingerprint` (`must_use`/`may_use` `HashSet<ToolId>`, `empty`, `is_empty`, `contains`, `merge`)
+- `crates/ferrite-ipi/src/{sanitizer,twin,containment,dry_run,comparator,dataset}.rs` — empty stubs with comments
+
+All 3 unit tests pass (`cargo test -p ferrite-ipi`):
+- `tool_id_from_browser_tool_matches`
+- `fingerprint_contains_checks_both_sets`
+- `fingerprint_merge_accumulates`
 
 ### 2026-04-13 — ferrite-shell: double-click launches UI instead of smoke test
 
