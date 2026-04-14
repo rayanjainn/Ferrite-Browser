@@ -44,3 +44,6 @@ Thumbs.db
 # ── Claude / AI tool artifacts ───────────────────────────────
 .claude/
 Resources/ferrite_viva_prep_guide.html
+Executables/
+Browser/staged/
+Browser/target/

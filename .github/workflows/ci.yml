@@ -23,7 +23,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     strategy:
-      fail-fast: false   # all three platforms run even if one fails
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -41,7 +41,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── macOS system dependencies ─────────────────────────────
       - name: Install system dependencies (macOS)
         if: matrix.platform == 'macos'
         run: |
@@ -49,9 +48,6 @@ jobs:
           brew install cmake pkg-config openssl gstreamer sqlite
         working-directory: .
 
-      # ── Windows system dependencies ───────────────────────────
-      # MSVC and Windows SDK are pre-installed on windows-latest.
-      # SQLite and cmake are added via Chocolatey.
       - name: Install system dependencies (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -59,7 +55,6 @@ jobs:
           choco install -y cmake sqlite
         working-directory: .
 
-      # ── Rust toolchain (all platforms) ───────────────────────
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -75,7 +70,6 @@ jobs:
       - name: Fetch dependencies
         run: cargo fetch
 
-      # ── Lint (Linux only — output is platform-independent) ────
       - name: Check formatting
         if: matrix.platform == 'linux'
         run: cargo fmt --check
@@ -83,11 +77,9 @@ jobs:
       - name: Clippy (zero warnings)
         run: cargo clippy --workspace -- -D warnings
 
-      # ── Tests ─────────────────────────────────────────────────
       - name: Run tests
         run: cargo test --workspace
 
-      # ── Wasm extension (Linux only) ───────────────────────────
       - name: Build hello-ext Wasm
         if: matrix.platform == 'linux'
         run: |
@@ -95,7 +87,6 @@ jobs:
           cargo build --target wasm32-unknown-unknown --release
         working-directory: Browser
 
-      # ── Release binary ────────────────────────────────────────
       - name: Build release binary
         run: cargo build --release -p ferrite-shell --features ferrite-servo/servo
 
@@ -117,7 +108,6 @@ jobs:
           echo "binary_label=$LABEL" >> "$GITHUB_OUTPUT"
           echo "Resolved binary label: $LABEL"
 
-      # ── Stage binary with label ───────────────────────────────
       - name: Stage executable
         shell: bash
         run: |
@@ -128,9 +118,6 @@ jobs:
           cp "target/release/ferrite-shell${EXT}" "staged/ferrite-${LABEL}-${PLATFORM}${EXT}"
           echo "Staged: staged/ferrite-${LABEL}-${PLATFORM}${EXT}"
 
-      # ── Upload artifact (every run, all platforms) ────────────
-      # Artifacts are accessible from the Actions tab for 90 days.
-      # They are available for both PRs and main pushes.
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4
         with:
@@ -139,21 +126,16 @@ jobs:
           retention-days: 90
 
   # ─────────────────────────────────────────────────────────────
-  # Job 2: Collect the 2 platform's binaries and commit them
-  # into Executables/<label>/ in the repository.
+  # Job 2: Publish a rolling "latest" GitHub Release.
   # Runs only on pushes to main — never on PRs.
   #
-  # Folder structure produced:
-  #   Executables/
-  #     7.1/
-  #       ferrite-7.1-windows.exe
-  #       ferrite-7.1-macos
-  #     9.2/
-  #       ferrite-9.2-windows.exe
-  #       ferrite-9.2-macos
+  # Every push replaces the previous "latest" release's assets.
+  # The release tag stays "latest"; only the binaries inside
+  # it change. Full history is preserved via the commit SHA
+  # baked into each filename.
   # ─────────────────────────────────────────────────────────────
-  store-executables:
-    name: Store executables in repo
+  release:
+    name: Publish rolling release
     runs-on: ubuntu-22.04
     needs: ci
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -164,9 +146,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
 
       # Rederive the label — same logic as the ci job above
       - name: Derive binary label
@@ -182,9 +161,6 @@ jobs:
           fi
           echo "binary_label=$LABEL" >> "$GITHUB_OUTPUT"
 
-      # ── Download both platform artifacts ─────────────────
-
-
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
@@ -197,40 +173,60 @@ jobs:
           name: ferrite-${{ steps.label.outputs.binary_label }}-macos
           path: downloaded/macos
 
-      # ── Organise into Executables/<label>/ ───────────────────
-      - name: Organise into Executables folder
+      # ── Build release body with metadata ─────────────────────
+      - name: Build release notes
+        id: notes
         shell: bash
         run: |
           LABEL="${{ steps.label.outputs.binary_label }}"
-          mkdir -p "Executables/${LABEL}"
+          SHA="${{ github.sha }}"
+          SHORT="${SHA:0:7}"
+          DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+          MSG="${{ github.event.head_commit.message }}"
 
-          cp "downloaded/windows/ferrite-${LABEL}-windows.exe" "Executables/${LABEL}/ferrite-${LABEL}-windows.exe"   2>/dev/null || true
-          cp "downloaded/macos/ferrite-${LABEL}-macos"         "Executables/${LABEL}/ferrite-${LABEL}-macos"         2>/dev/null || true
+          cat <<EOF > release_notes.md
+          ## ferrite-browser · latest
 
-          chmod +x "Executables/${LABEL}/ferrite-${LABEL}-macos" 2>/dev/null || true
+          > This release is **overwritten on every push to main.**
+          > It always contains the most recent passing build.
 
-          echo "Contents of Executables/${LABEL}/:"
-          ls -lh "Executables/${LABEL}/"
+          | Field   | Value |
+          |---------|-------|
+          | Label   | \`$LABEL\` |
+          | Commit  | [\`$SHORT\`](https://github.com/${{ github.repository }}/commit/$SHA) |
+          | Date    | $DATE |
+          | Message | $MSG |
 
-      # ── Setup Git LFS ─────────────────────────────────────────
-      - name: Setup Git LFS
-        run: |
-          git lfs install
-          git lfs track "Executables/**/*.exe"
-          git lfs track "Executables/**/*-macos"
-          git lfs track "Executables/**/*-linux"
+          ### Downloads
+          | Platform | File |
+          |----------|------|
+          | Windows  | \`ferrite-${LABEL}-windows.exe\` |
+          | macOS    | \`ferrite-${LABEL}-macos\` |
+          EOF
 
-      # ── Commit and push ───────────────────────────────────────
-      - name: Commit and push
+          echo "Generated release notes"
+
+      # ── Delete old "latest" tag so we can recreate it ────────
+      # softprops/action-gh-release can't update a lightweight tag
+      # already pointing to a different commit — easier to nuke it.
+      - name: Delete existing "latest" tag (if any)
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LABEL="${{ steps.label.outputs.binary_label }}"
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "Executables/${LABEL}/"
-          if git diff --staged --quiet; then
-            echo "No new executables — this label already exists in the repo."
-          else
-            git commit -m "ci: store ferrite-${LABEL} executables (windows, macos) [skip ci]"
-            git push
-          fi
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+
+      # ── Create fresh "latest" release with both binaries ─────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "ferrite-browser · latest build"
+          body_path: release_notes.md
+          prerelease: true          # marks it as "Pre-release" — not a stable tag
+          make_latest: true
+          files: |
+            downloaded/windows/ferrite-${{ steps.label.outputs.binary_label }}-windows.exe
+            downloaded/macos/ferrite-${{ steps.label.outputs.binary_label }}-macos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
