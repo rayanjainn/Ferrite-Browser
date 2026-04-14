@@ -334,3 +334,17 @@ If extension calls a host function for a capability not declared in its manifest
 - Before adding any new [dependencies] entry to any Cargo.toml, check `cargo tree` to verify it does not introduce a version conflict with existing workspace dependencies: rusqlite, tokio, serde, iced, servo.
 - Prefer crates already in the workspace dependency graph. Do not add a second crate that solves a problem already solved by an existing dependency.
 - All new dependencies must be pinned to an exact version with `=` in the workspace root Cargo.toml to prevent silent upgrades from breaking the build.
+- Before adding any dependency to any crates/*/Cargo.toml, check the existing versions already used in the workspace:
+
+  rusqlite = "0.37"   (features = ["bundled"])
+  tokio = "1"
+  serde = "1"
+  uuid = "1"
+  reqwest = "0.12"
+  thiserror = "1"
+  iced = "0.13"
+
+Rules:
+- Always use the exact same version string already present in the workspace for any of the above crates. Never add a second version.
+- Do NOT add sea-query, sea-orm, sqlx, or diesel. All database access uses rusqlite directly.
+- Run `cargo tree --duplicates` mentally before adding any new crate. If a crate would introduce a duplicate version of an existing workspace dependency, find an alternative approach instead.

@@ -56,10 +56,23 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | `ferrite-ipi` — Task 12 Block 2: `rule_based_must_use` keyword matcher | ✅ Done |
 | `ferrite-ipi` — Task 12 Block 3: `LlmMayUsePredictor` Gemini-backed may-use predictor | ✅ Done |
 | `ferrite-ipi` — Task 12 Block 4: `ToolDecisionEngine` composing both layers | ✅ Done |
+| `ferrite-ipi` — Task 13 Block 1: HTML/JS sanitizer (`sanitizer` module) | ✅ Done |
 
 ---
 
 ## Change Log
+
+### 2026-04-14 — Task 13 Block 1: HTML/JS sanitizer
+
+**Files:**
+- `crates/ferrite-ipi/Cargo.toml` — added `ammonia` (3), `regex` (1), `sha2` (0.10), `hex` (0.4)
+- `crates/ferrite-ipi/src/sanitizer.rs` — full implementation
+
+- `SanitizedPage` struct: `clean_html`, `extracted_scripts`, `raw_html_hash`
+- `sanitize_html(raw_html)` — extracts `<script>` content with regex before stripping, computes SHA-256 of raw HTML, then runs ammonia with strict tag/attribute allowlist (strips scripts, style, iframe, object, embed and all event handlers; allows only https/http URL schemes)
+- `detect_js_injection_patterns(js)` — scans extracted JS for 8 patterns: instruction override, system prompt reference, data exfiltration language, fetch(), WebSocket, document.cookie, localStorage/sessionStorage, sendBeacon
+- `sha256_hex(data)` — pure-Rust SHA-256 via `sha2` crate, hex-encoded
+- 5/5 new sanitizer tests pass; 15/15 total `ferrite-ipi` tests pass
 
 ### 2026-04-14 — Task 12 Block 4: `ToolDecisionEngine` — composing both layers
 
