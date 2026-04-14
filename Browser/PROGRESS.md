@@ -57,10 +57,65 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | `ferrite-ipi` — Task 12 Block 3: `LlmMayUsePredictor` Gemini-backed may-use predictor | ✅ Done |
 | `ferrite-ipi` — Task 12 Block 4: `ToolDecisionEngine` composing both layers | ✅ Done |
 | `ferrite-ipi` — Task 13 Block 1: HTML/JS sanitizer (`sanitizer` module) | ✅ Done |
+| `ferrite-ipi` — Task 14 Block 1: `SyntheticTwin` + AES-256-GCM encryption + TTL rotation | ✅ Done |
+| `ferrite-ipi` — Task 15 Block 1: network containment (`ContainmentState` + Option C interceptor + Option B namespace) | ✅ Done |
+| `ferrite-ipi` — Task 16 Block 1: `DryRunRecord` + `RecordingExecutor` + `DryRunOrchestrator::run()` | ✅ Done |
+| `ferrite-ipi` — Task 17 Block 1: `FingerprintDiff`, `compare()`, `ConsentDecision`, `IpiEvent` | ✅ Done |
 
 ---
 
 ## Change Log
+
+### 2026-04-14 — Task 17 Block 1: `FingerprintDiff`, `compare()`, `ConsentDecision`, `IpiEvent`
+
+**Files:**
+- `crates/ferrite-ipi/src/comparator.rs` — full implementation (no new deps needed)
+
+- `FingerprintDiff` — holds `extra_tools` and `extra_origins` as `HashSet`; `is_clean()` checks both empty; `summary()` builds a human-readable consent-dialog string
+- `compare(expected, actual)` — iterates `actual.tools_called`, keeps tools not in `expected.contains()`; origins only flagged when `network.fetch` is absent from the expected fingerprint
+- `ConsentDecision` — `approve`/`reject` maintain two disjoint sets; `is_complete(diff)` checks every extra tool has a decision
+- `IpiEvent` + `IpiLabel` — serialisable event type for the dataset pipeline
+- 6/6 new comparator tests pass; 30/30 total `ferrite-ipi` tests pass
+
+### 2026-04-14 — Task 16 Block 1: `DryRunRecord` + `RecordingExecutor` + `DryRunOrchestrator::run()`
+
+**Files:**
+- `crates/ferrite-ipi/Cargo.toml` — added `async-trait = "0.1"`
+- `crates/ferrite-ipi/src/dry_run.rs` — full implementation
+
+- `DryRunRecord` — accumulates `tools_called` (HashSet<ToolId>), `origins_touched`, `data_fields_accessed`, `network_attempts`, and `completed` flag; `record_network_attempt` extracts and stores the origin via `url::Url::parse`
+- `RecordingExecutor` (private) — implements `ToolExecutor`; records every tool call by `ToolId`; records navigate URLs as network attempts; returns synthetic twin data for `ReadPage` and `ExtractData`; never touches Servo
+- `DryRunOrchestrator::run<R: AgentRuntime>` — calls `activate_full` (Option C + B), wraps agent turn in `tokio::time::timeout(30s)`, always calls `deactivate`, harvests any containment-intercepted URLs into the record, sets `completed = true` on success, returns partial record on timeout
+- Test `/tmp/` paths replaced with `std::env::temp_dir()` for Windows compatibility
+- 2/2 new dry_run tests pass; 24/24 total `ferrite-ipi` tests pass
+
+### 2026-04-14 — Task 15 Block 1: network containment — Option C interceptor + Option B namespace
+
+**Files:**
+- `crates/ferrite-ipi/Cargo.toml` — added `url = "2"`; linux-only `nix = "0.28"` (features: net, user)
+- `crates/ferrite-ipi/src/containment.rs` — full implementation
+
+- `ContainmentState` / `SharedContainmentState` (`Arc<Mutex<ContainmentState>>`) — holds `active` flag and `intercepted_urls` log
+- `activate` / `deactivate` — flip the flag and clear/preserve the URL log
+- `intercept_request(state, url, twin)` — returns `None` when inactive; when active, appends the URL and returns a JSON fake response carrying the synthetic twin name
+- `intercepted_urls(state)` — snapshot of caught URLs
+- `create_network_namespace()` — on Linux calls `nix::sched::unshare(CLONE_NEWNET)`; on all other platforms returns `Ok(())` immediately (no-op)
+- `activate_full(state)` — runs Option C then Option B
+- 3/3 new containment tests pass; 22/22 total `ferrite-ipi` tests pass
+
+### 2026-04-14 — Task 14 Block 1: `SyntheticTwin` — AES-256-GCM encryption + TTL rotation
+
+**Files:**
+- `crates/ferrite-ipi/Cargo.toml` — added `aes-gcm` (0.10), `rand` (0.8), `chrono` (0.4, serde feature)
+- `crates/ferrite-ipi/src/twin.rs` — full implementation
+
+- `SyntheticTwin` struct — serializable, holds name/email/password/phone/credit_card/ssn/address/created_at
+- `SyntheticTwin::generate()` — random 4-digit ID produces plausible but entirely fictitious values; all data points to `ferrite-test.invalid` or obviously fake numbers
+- `SyntheticTwin::is_expired(ttl_hours)` — compares age via `chrono::Utc::now()`
+- `encrypt_twin` / `decrypt_twin` — AES-256-GCM with fixed dev key; 12-byte random nonce prepended to ciphertext; JSON serialisation via `serde_json`
+- `TwinManager::new(path)` / `load_or_generate()` — reads+decrypts from disk if present and unexpired; otherwise generates fresh twin, encrypts, writes to disk
+- Test `/tmp/` path replaced with `std::env::temp_dir()` for Windows compatibility
+- 4/4 new twin tests pass; 19/19 total `ferrite-ipi` tests pass
 
 ### 2026-04-14 — Task 13 Block 1: HTML/JS sanitizer
 
