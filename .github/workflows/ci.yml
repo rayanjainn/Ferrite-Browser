@@ -212,6 +212,14 @@ jobs:
           echo "Contents of Executables/${LABEL}/:"
           ls -lh "Executables/${LABEL}/"
 
+      # ── Setup Git LFS ─────────────────────────────────────────
+      - name: Setup Git LFS
+        run: |
+          git lfs install
+          git lfs track "Executables/**/*.exe"
+          git lfs track "Executables/**/*-macos"
+          git lfs track "Executables/**/*-linux"
+
       # ── Commit and push ───────────────────────────────────────
       - name: Commit and push
         shell: bash

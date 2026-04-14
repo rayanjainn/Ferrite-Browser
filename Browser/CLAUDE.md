@@ -348,3 +348,15 @@ Rules:
 - Always use the exact same version string already present in the workspace for any of the above crates. Never add a second version.
 - Do NOT add sea-query, sea-orm, sqlx, or diesel. All database access uses rusqlite directly.
 - Run `cargo tree --duplicates` mentally before adding any new crate. If a crate would introduce a duplicate version of an existing workspace dependency, find an alternative approach instead.
+
+## Known Dependabot Alerts (Inherited from Servo v0.0.5)
+
+The following alerts exist in the committed Cargo.lock and are not actionable
+until the next Servo version bump. They are all transitive deps of Servo, not
+direct Ferrite dependencies:
+
+- ml-dsa: timing side-channel, UseHint off-by-two, repeated hint indices (Moderate)
+- lru: IterMut Stacked Borrows unsoundness (Low)  
+- rand: unsound with custom logger (Low)
+
+Review on next Servo upgrade. Do not attempt to patch these individually.
