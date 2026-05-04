@@ -62,10 +62,18 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | `ferrite-ipi` — Task 16 Block 1: `DryRunRecord` + `RecordingExecutor` + `DryRunOrchestrator::run()` | ✅ Done |
 | `ferrite-ipi` — Task 17 Block 1: `FingerprintDiff`, `compare()`, `ConsentDecision`, `IpiEvent` | ✅ Done |
 | `ferrite-ui` — Task 17 Block 2: IPI consent panel in agent sidebar + dry run wired to `AgentTaskSubmitted` | ✅ Done |
+| `ferrite-agent::gemini` — `read_api_key()` free fn + `GeminiAgent::from_key()` constructor | ✅ Done |
+| `ferrite-ui` — `AgentTaskSubmitted` uses `read_api_key()` + `from_key()` instead of raw env check | ✅ Done |
 
 ---
 
 ## Change Log
+
+### 2026-05-04 — `read_api_key()` + `GeminiAgent::from_key()` + ferrite-ui wired up
+
+**Files:**
+- `crates/ferrite-agent/src/gemini.rs` — added `pub fn read_api_key() -> Result<String, String>` above `impl GeminiAgent`; tries env var first, then `gemini_key.txt` next to exe, then returns a descriptive error with both options; added `pub fn from_key(api_key: impl Into<String>) -> Self`; `from_env()` now delegates to both
+- `crates/ferrite-ui/src/lib.rs` — `AgentTaskSubmitted` handler replaced raw `std::env::var` check + `GeminiAgent::from_env()` with `ferrite_agent::gemini::read_api_key()` match + `GeminiAgent::from_key(api_key)`; user now sees the full "create gemini_key.txt or set env var" message instead of a terse "not set" error
 
 ### 2026-04-14 — Task 17 Block 2: IPI consent panel + dry run wired to agent sidebar
 

@@ -554,13 +554,14 @@ pub fn update(
             };
 
             let handle = tokio::task::spawn(async move {
-                if std::env::var("FERRITE_GEMINI_API_KEY").is_err() {
-                    let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(
-                        "FERRITE_GEMINI_API_KEY is not set".to_string(),
-                    ));
-                    return;
-                }
-                let agent = GeminiAgent::from_env();
+                let api_key = match ferrite_agent::gemini::read_api_key() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(e));
+                        return;
+                    }
+                };
+                let agent = GeminiAgent::from_key(api_key);
 
                 // ── IPI dry run ──────────────────────────────────────────────
                 let engine = ferrite_ipi::tool_decision::ToolDecisionEngine::new();

@@ -3,3 +3,4 @@ target/
 *.pdf
 *.pptx
 *.html
+gemini_key.txt

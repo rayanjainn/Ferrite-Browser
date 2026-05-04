@@ -15,17 +15,57 @@ pub struct GeminiAgent {
     rate_limiter: RateLimiter,
 }
 
+pub fn read_api_key() -> Result<String, String> {
+    if let Ok(key) = std::env::var("FERRITE_GEMINI_API_KEY") {
+        let trimmed = key.trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+
+    let key_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("gemini_key.txt")));
+
+    if let Some(ref path) = key_path {
+        if path.exists() {
+            let contents = std::fs::read_to_string(path)
+                .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+            let trimmed = contents.trim().to_string();
+            return if trimmed.is_empty() {
+                Err("gemini_key.txt exists but is empty — paste your key inside it".to_string())
+            } else {
+                Ok(trimmed)
+            };
+        }
+    }
+
+    let path_display = key_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    Err(format!(
+        "Gemini API key not found.\n  Checked path: {path}\n\
+         Option A: create gemini_key.txt at {path} with your key inside.\n\
+         Option B: set the FERRITE_GEMINI_API_KEY environment variable.",
+        path = path_display
+    ))
+}
+
 impl GeminiAgent {
-    /// Reads `FERRITE_GEMINI_API_KEY` from the environment. Panics if unset.
-    pub fn from_env() -> Self {
-        let api_key = std::env::var("FERRITE_GEMINI_API_KEY")
-            .expect("FERRITE_GEMINI_API_KEY must be set");
+    pub fn from_key(api_key: impl Into<String>) -> Self {
         Self {
-            api_key,
+            api_key: api_key.into(),
             model: DEFAULT_MODEL.to_string(),
             client: reqwest::Client::new(),
             rate_limiter: RateLimiter::default_testing(),
         }
+    }
+
+    pub fn from_env() -> Self {
+        let api_key = read_api_key()
+            .expect("Gemini API key not found — see error above");
+        Self::from_key(api_key)
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {

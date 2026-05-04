@@ -47,3 +47,6 @@ Resources/ferrite_viva_prep_guide.html
 Executables/
 Browser/staged/
 Browser/target/
+
+# ── API keys (never commit) ──────────────────────────────────
+gemini_key.txt
