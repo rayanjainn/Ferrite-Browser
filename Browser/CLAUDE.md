@@ -1,362 +1,268 @@
-# Ferrite Browser
+# Ferrite Browser — Claude Code Context
 
-> Capability-Governed Agentic Browsing with Verifiable Audit Trails
-
-A developer-focused Rust browser built on Servo with security-first architecture. The first browser designed to treat AI agents as first-class principals — with formal capability-based access control and tamper-evident audit logs.
-
----
+> IPI-defended, audit-logged agentic browser in Rust, built on Servo.
+> This file is the authoritative coding-rules reference. When it conflicts with
+> older comments or docs, this file wins. Update it when architecture changes.
 
 ## MANDATORY: Progress Tracking
 
-**Every time you make any change to this codebase — no exceptions — you must update `PROGRESS.md`.**
+Every change to this codebase requires a corresponding update to `PROGRESS.md`
+(workspace root). No exceptions — new features, dependency changes, bug fixes,
+files created/moved/deleted, milestones reached. Add a dated entry under the
+Change Log describing exactly what changed, and update the Milestone Status
+table. Err toward more detail; future sessions depend on this file.
 
-This applies to:
-- Any new feature, struct, function, or module implemented
-- Any dependency added to any `Cargo.toml`
-- Any bug fixed
-- Any file created, moved, or deleted
-- Any milestone reached (e.g., `cargo build` passes, smoke test passes, CI green)
+## What Ferrite Is
 
-### How to update PROGRESS.md
-1. Open `PROGRESS.md` at the workspace root (`Browser/PROGRESS.md`)
-2. Add a new dated entry under **Change Log** describing exactly what changed
-3. Update the **Milestone Status** table (tick off completed items, add new ones if needed)
-4. Update the **What To Do Next** section to reflect what remains
-5. Save the file as part of the same logical change — do not make code changes without updating PROGRESS.md
+A developer-focused Rust browser that treats AI agents as first-class principals
+governed by an architectural (not model-level) defense against Indirect Prompt
+Injection (IPI). The IPI defense system (`ferrite-ipi`) is the primary system and
+contribution; the hash-chained audit log and capability-lineage thinking are
+supporting pillars, not the headline.
 
-If you are unsure what to write, err on the side of more detail. Future sessions depend on this file to understand exact state.
+The strategic principle behind every design decision: solve security
+architecturally, not by competing on model training. Prefer enforcement that
+works regardless of what the underlying LLM does.
 
----
+## Active Workspace (ground truth)
 
-## Core Principle
+Seven crates. This is the complete, current set — verified against the workspace
+manifest. Do not reference or import any crate not in this list.
 
-**The Capability Broker is the single privileged boundary.** All untrusted code (extensions, agents, web content) accesses sensitive operations ONLY through unforgeable capability tokens minted by the broker after policy evaluation. No ambient authority exists anywhere in the system.
+| Crate | Role |
+|-------|------|
+| `ferrite-shell` | Top-level binary; CLI arg dispatch; smoke tests |
+| `ferrite-servo` | Servo rendering integration (`HeadlessServoSession`) |
+| `ferrite-ui` | Iced dark-mode UI; collapsible agent sidebar (320px, right) |
+| `ferrite-audit-log` | `PersistentAuditLog`: SHA-256 hash chain + SQLite (rusqlite) |
+| `ferrite-agent` | `BrowserToolExecutor`, `GeminiAgent`, `AgentRuntime` trait, rate limiter |
+| `ferrite-ipi` | Seven-component IPI defense system (see below) |
+| `ferrite-eval` | Evaluation harness (Servo-free; depends only on `ferrite-ipi` + `ferrite-agent`). Locally buildable by design — relieves the CI-only build bottleneck. |
 
-## Current Phase: Months 1–2 (Foundation)
+> `ferrite-eval` is the evaluation harness home (EVALUATION_PLAN §8). It is Servo-free
+> so it builds and runs without the heavy Servo toolchain. If a future evaluation case
+> genuinely needs a real page fetch, that goes behind an optional Servo-backed executor
+> feature flag — the default eval path stays Servo-free.
 
-### Month 1 Deliverables
-- `ferrite-types` crate with all shared types (CapabilityToken, AuditEvent, CapabilityRequest, PolicyResult, etc.)
-- Servo v0.0.5 embedding shell — basic window rendering a web page via Iced
-- `ferrite-broker` standalone library with Regorus policy engine integration
-- `ferrite-audit` with hash-chain append-only log + SQLite index
-- `ferrite-policy` with Regorus integration and risk classifier
-- CI/CD pipeline (GitHub Actions) — green on all crates
-- Docker devcontainer with all Servo build dependencies
-- Iced UI shell (basic window with tab bar, address bar)
+## Deferred Components (dormant, NOT deleted)
 
-### Month 1 Milestone
-Servo renders a page. Broker passes unit tests. CI green.
+The following were removed from the active workspace but remain on disk and may
+be re-integrated in a later stage. Do NOT add them back to the workspace, import
+them, reference them in new code, or propose architecture that depends on them —
+unless explicitly instructed. Treat them as out of scope for current work:
 
-### Month 2 Deliverables
-- Broker ↔ Servo integration (request interception via async channels)
-- `ferrite-sandbox` — Extism setup with host functions for Wave 1 capabilities
-- Audit log viewer panel in Iced
-- Extension loads in sandbox, calls `host_dom_read`, receives DOM data
+- Capability broker (`ferrite-capability-broker`)
+- Policy engine / Regorus (`ferrite-policy`)
+- Wasm/Extism extension sandbox (`ferrite-sandbox`)
+- CEF / Track B engine harness
+- adblock-rust content blocking
+- Accessibility (AX) tree extraction
 
-### Month 2 Milestone
-Extension loads in sandbox. Broker integrated with Servo. Demo: extension calls host_dom_read and receives DOM data.
+If a task seems to need one of these, stop and flag it rather than reviving the crate.
 
-## Cargo Workspace Layout
+## ferrite-ipi: Seven-Component Architecture
 
-```
-ferrite/
-├── Cargo.toml                    (workspace root)
-├── crates/
-│   ├── ferrite-shell/            (main binary, Iced UI, Servo/CEF integration)
-│   ├── ferrite-broker/           (capability broker, token system, policy engine)
-│   ├── ferrite-audit/            (audit log writer, hash chain, Merkle tree, SQLite)
-│   ├── ferrite-policy/           (Regorus integration, risk classifier, Rego policy loading)
-│   ├── ferrite-sandbox/          (Extism/Wasmtime host, extension loading, capability injection)
-│   ├── ferrite-agent/            (JSON-RPC/WS server, command routing, consent callbacks)
-│   ├── ferrite-network/          (hyper + rustls + quinn + adblock-rust integration)
-│   ├── ferrite-a11y/             (AX tree extraction and serialization)
-│   ├── ferrite-types/            (shared types: CapabilityToken, AuditEvent, PolicyResult, etc.)
-│   ├── ferrite-engine-trait/     (engine abstraction trait: navigate, get_dom, execute_action)
-│   ├── ferrite-servo/            (Servo WebViewDelegate implementation)
-│   ├── ferrite-cef/              (CEF cef-rs implementation — Track B)
-│   └── ferrite-tools/            (CLI extension analyzer + standalone audit inspector)
-├── policies/                     (default Rego policy files)
-├── extensions/                   (example Wasm extensions for demos)
-├── tests/                        (integration tests, adversarial test corpus)
-├── Dockerfile                    (devcontainer with all Servo deps)
-└── docs/                         (architecture docs, API docs, paper drafts)
-```
+1. Hybrid tool-decision engine — rule-based must-use + LLM may-use (temperature 0); the two sets are kept strictly disjoint
+2. HTML/JS sanitizer
+3. Synthetic data twin — AES-256-GCM, TTL rotation
+4. Dual-layer network containment — Tokio/hyper interceptor (all platforms) + Linux network namespace (Linux-only, via `nix`)
+5. Dry-run `RecordingExecutor`
+6. Fingerprint comparator + Iced consent UI
+7. IPI adversarial dataset pipeline
 
-### Crate Dependency Rules
-- `ferrite-types` depends on nothing — it is the shared vocabulary for all crates
-- All other crates depend on `ferrite-types`
-- `ferrite-broker` depends on `ferrite-policy` and `ferrite-audit`
-- `ferrite-shell` depends on everything (it is the main binary)
-- Keep dependencies minimal and unidirectional — no circular deps
+Module layout is flat files under `crates/ferrite-ipi/src/` (e.g. `comparator.rs`,
+`dataset.rs`) — NOT `module/mod.rs` subdirectories, EXCEPT `tool_decision/` which is
+already a directory module (`tool_decision/mod.rs`). Match the existing layout when
+editing; do not create a subdirectory for a module that already exists as a flat file,
+and do not flatten one that already exists as a directory.
 
-## Architecture
+Behavioral notes that are easy to get wrong:
+- Open-ended / vague prompts correctly produce empty fingerprints. This is intended, not a bug.
+- Fingerprints accumulate across turns within a session.
+- The system assumes reasonably specific user prompts.
+- The LLM may-use predictor returns an empty set on any error (fail-safe), and
+  filters responses against an allowlist so the model cannot inject arbitrary tool IDs.
 
-### Trust Boundaries
+## Tool Vocabulary and Capability Model (AUTHORITATIVE — source of truth)
 
-**Trusted Zone** (runs in browser process, high privilege):
-- UI Shell (Iced) — renders consent dialogs, DevTools panels, tab bar, address bar
-- Capability Broker — mints tokens, validates tokens, evaluates policies
-- Audit System — writes and verifies the append-only log
-- Policy Engine (Regorus) — evaluates Rego policies
-- Risk Classifier — categorizes actions by risk level
+> This section is the canonical tool vocabulary. The rule engine (`rule_based_must_use`),
+> the LLM predictor allowlist, the comparator, and the dataset schema MUST obey it. It
+> resolves the historical vocabulary mismatch (fingerprints emitted semantic tool IDs that
+> no `BrowserTool` could produce). Full rationale: `FINALIZED_DECISIONS.md` Decisions 1–6.
 
-**Untrusted Zone** (assumed hostile):
-- Servo engine — renders web content
-- Extension sandbox (Extism/Wasmtime) — runs Wasm extensions
-- Agent runtime — executes LLM-driven commands
-- Network stack — fetches content from the internet
-- CEF harness (Track B) — same trust level as Servo
+### The eight primitives (the ONLY real tool IDs)
 
-### Crossing Rules
-- Untrusted → Trusted: only via capability requests (structured messages over async channels)
-- Trusted → Untrusted: only via capability tokens (opaque, unforgeable, scoped)
-- The broker NEVER passes raw privileged handles across the boundary
-- The UI process NEVER renders untrusted content in consent dialogs (text is sanitized)
+`BrowserTool`'s nine variants collapse to eight distinct primitive IDs. These are the only
+strings the dry-run can ever record, and therefore the only strings the comparator compares:
 
-### Communication Patterns
-- **Internal (within-process):** Tokio async channels
-  - `tokio::sync::mpsc` for request/response (capability requests → broker → responses)
-  - `tokio::sync::broadcast` for event fanout (audit events → all interested panels)
-  - All channels are bounded (backpressure if broker is overwhelmed → untrusted components slow down, never the broker)
-- **External (agent protocol):** WebSocket + JSON-RPC 2.0
-  - Agent connects to `ws://localhost:9222/agent`
-  - Standard JSON-RPC 2.0 with method names like `navigate`, `dom.read`, `dom.write`, `network.fetch`
-  - Connection authenticated via one-time token displayed in UI
-- **DevTools (standard):** Firefox Remote Debugging Protocol via Servo's built-in support
+| `BrowserTool` variant | primitive id |
+|---|---|
+| `Navigate(String)` | `navigate` |
+| `ReadPage` / `ExtractData(String)` | `dom.read` |
+| `ClickElement(String)` | `dom.write` |
+| `FillForm { selector, value }` | `form.fill` |
+| `ReadClipboard` | `clipboard.read` |
+| `WriteClipboard(String)` | `clipboard.write` |
+| `ExecuteJs(String)` | `js.execute` |
+| `DownloadFile(String)` | `download.file` |
 
-## Capability Token Format
+Any tool ID outside these eight is a PHANTOM and must never appear in a fingerprint.
+**Cut entirely** (no primitive realizes them): `email.read/send/draft`, `calendar.read/write`,
+`form.submit`, `report.write`, `contacts.read`, `storage.read/write`, `network.fetch`,
+`screenshot`. (`form.submit` does not exist — `FillForm` → `form.fill` only; model a submit as
+an `interact` action. `report.write` is the agent producing output, not a browser action.
+`network.fetch` is not a tool — network reachability is the *origin* dimension, checked via
+origin scope, never via a tool's presence.)
 
-```rust
-CapabilityToken {
-    token_id:       Uuid,           // UUID v7 (time-sortable)
-    principal_id:   String,         // "ext:<id>@<version>" | "agent:<id>" | "user:<session-id>"
-    cap_type:       CapabilityType, // enum: DomRead, DomWrite, NetworkFetch, StorageRead, StorageWrite, ...
-    scope: Scope {
-        top_level_site: Origin,     // e.g., "https://example.com"
-        frame_origin:   Origin,     // for iframe-aware scoping
-        tab_id:         u64,
-    },
-    constraints: Constraints {
-        methods:          Option<Vec<String>>,   // for network: ["GET", "POST"]
-        url_allowlist:    Option<Vec<Pattern>>,   // glob patterns for URLs
-        element_selector: Option<String>,         // CSS selector for DOM ops
-        rate_limit_rps:   Option<u32>,            // max requests per second
-        max_bytes_per_hour: Option<u64>,          // bandwidth cap
-        data_classes:     Option<Vec<String>>,    // ["public"] — not ["pii", "credentials"]
-    },
-    risk_level:     RiskLevel,      // Low | Medium | High
-    expires_at:     DateTime<Utc>,  // absolute expiry
-    audit_policy:   AuditPolicy,    // LogAll | LogDenials | LogNone
-    nonce:          [u8; 32],       // cryptographic random, prevents replay
-    issued_at:      DateTime<Utc>,
-    chain_hash:     String,         // SHA-256 hash linking to previous audit entry
-    signature:      [u8; 64],       // Ed25519 signature by broker's signing key
-}
-```
+### Six action classes (group primitives by security character)
 
-### Token Properties
-- **Unforgeable:** Signed by broker's Ed25519 key (generated per-session, in-memory only)
-- **Scoped:** A token for `dom.read` on `https://example.com` in tab 3 cannot be used on a different origin or tab
-- **Time-bounded:** TTL depends on risk level — low=5min, medium=1min, high=single-use
-- **Non-transferable:** `principal_id` checked on every use
-- **Auditable:** `chain_hash` links to the audit log entry recording creation
+| Action class | primitives | character |
+|---|---|---|
+| `read` | `dom.read` | observe page content (passive) |
+| `interact` | `dom.write`, `form.fill` | modify page / enter data (active, on-page) |
+| `navigate` | `navigate` | move to an origin (origin-changing) |
+| `download` | `download.file` | pull a resource (origin-touching) |
+| `clipboard` | `clipboard.read`, `clipboard.write` | local side channel (no origin) |
+| `execute` | `js.execute` | arbitrary code — **UNSCOPABLE** |
 
-## Capability Types
+### Capabilities = (action class × origin scope)
 
-### Wave 1 (Months 2–3)
-| Type | What It Gates | Risk Default | Constraints |
-|------|---------------|--------------|-------------|
-| `dom.read` | Reading DOM elements, text content, attributes | Low | origin, tab, optional selector |
-| `dom.write` | Clicking, typing, modifying elements | Medium-High | origin, tab, selector, element type |
-| `network.fetch` | HTTP requests from extension/agent | Medium | methods, url_allowlist, rate_limit, max_bytes |
-| `storage.read` | Reading cookies, localStorage, sessionStorage | Medium | origin, storage type |
-| `storage.write` | Writing to cookies, localStorage, sessionStorage | Medium | origin, storage type, max bytes |
+A capability is an action class paired with an origin scope. The semantic *name* is a human
+label for consent UI and fingerprints; it carries no hidden tool. There is NO `email.read`
+capability — "email" is a property of the origin scope, authored per task, not a fake tool.
 
-### Wave 2 (Months 4–5)
-| Type | What It Gates | Risk Default | Constraints |
-|------|---------------|--------------|-------------|
-| `clipboard.read` | Reading system clipboard | High | always step-up consent |
-| `clipboard.write` | Writing to system clipboard | Medium | data size limit |
-| `notify.show` | Displaying desktop notification | Low | rate limit (max 3/minute) |
-| `download.initiate` | Saving file to disk | High for executables, Medium otherwise | file type, destination, size limit |
+| Capability (label) | action classes | origin scope |
+|---|---|---|
+| `web.read` | read, navigate | task-declared origin(s) |
+| `web.interact` | interact, navigate | task-declared origin(s) |
+| `web.download` | download, navigate | task-declared origin(s) |
+| `scoped.read` | read, navigate | a NARROW declared origin class (the "email.read"-style tight capability) |
+| `clipboard.read` | clipboard | none (local) |
+| `clipboard.write` | clipboard | none (local) |
 
-## Policy Engine
+### The `unscopable` rule (js.execute)
 
-### Regorus Integration
-- Policies loaded from `.rego` files in `policies/` directory at broker startup
-- Hot-reload: when a policy file changes, broker reloads and re-evaluates existing tokens
-- Policy evaluation failure (parse error, timeout, missing data) → result is DENY
+`execute` (sole member `js.execute`) is **unscopable**: it can impersonate any other primitive
+invisibly, past the `ToolExecutor` boundary. It is NEVER part of any capability's expected
+realization. The comparator applies a GENERAL rule — *any actual primitive whose action class
+is unscopable is unconditionally an `extra_primitive`* — so `js.execute` is always a deviation
+and always consent-gated. Encode this as an `unscopable` property of the action class, not as a
+`js.execute` magic-string special-case.
 
-### Policy Hierarchy
-```
-policies/
-├── default.rego              # Base rules (deny-by-default, risk classification)
-├── extensions/
-│   ├── base.rego             # Default extension rules
-│   └── <ext-id>.rego         # Per-extension overrides
-├── agents/
-│   ├── base.rego             # Default agent rules
-│   └── <agent-id>.rego       # Per-agent overrides
-└── user-overrides.rego       # User customizations (loaded last, highest priority)
-```
+### Comparator: lower-then-compare with per-origin attribution
 
-## Risk Classification
-- **Low:** Read-only actions on trusted origins → auto-approve
-- **Medium:** Write actions on trusted origins, read on untrusted → log and allow
-- **High:** Anything involving credentials, payment, PII, downloads of executables, or clipboard access → step-up consent required
+The fingerprint is semantic capabilities; the dry-run records primitives + origins. The
+comparator **lowers** capabilities to expected (primitives + origin scopes), then compares
+against actual. Deviation is **per-origin attributed**:
+1. group actual actions by origin;
+2. for each origin cluster, find expected capabilities whose scope admits that origin;
+3. attribute to the MOST SPECIFIC admitting capability (specificity precedence:
+   `exact` > `domain_suffix` > `task_open`);
+4. an origin admitted by no capability → `out_of_scope_origins`;
+5. a primitive outside its attributed capability's action classes → `extra_primitives`.
 
-## Audit System
+This requires the dry-run record to bind each primitive to the origin it acted on: replace the
+lossy `tools_called: HashSet<ToolId>` with an ordered event log `Vec<{ tool, origin }>`, with a
+`current_origin` tracked in `RecordingExecutor` (updated on each `Navigate`, seeded from
+`AgentTask.context_url`). Concurrency is fine — recording is serialized through the record mutex.
 
-### Storage: Dual Mode
-- **Append-only file** — hash chain, source of truth (months 1–4)
-- **SQLite database** — indexed queries for DevTools panels
-- Upgrading to **Merkle tree** at month 5 (using `rs_merkle`)
+### Closed tag vocabularies (for the dataset / corpus authoring)
 
-### Invariant
-The audit system NEVER drops events. If disk is full, the broker pauses operations rather than losing audit data.
+**Attack technique** (multi-valued, ≥1 per attack case; orthogonal to carrier_vector):
+- rhetorical: `instruction_override`, `context_manipulation`, `social_engineering`, `goal_hijack`
+- concealment: `obfuscation`, `payload_splitting`, `plain`
 
-## Module Invariants
+**carrier_vector** (exactly one per case; partition must match the `carrier` field):
+- `WebContent` (T1a): `hidden_element`, `offscreen_text`, `html_comment`, `alt_text`,
+  `meta_content`, `css_pseudo`, `visible_text`
+- `ToolOutput` (T1b): `tool_json_field`, `tool_text_blob`, `tool_error_message`, `tool_metadata`
 
-| Module | Key Invariant |
-|--------|---------------|
-| Broker | NEVER crashes. All errors → default-deny outcome. |
-| Audit | NEVER drops events. Disk full → broker pauses. |
-| Servo | Never directly accesses broker internal state. All interactions via broker interface. |
-| Sandbox | Extension cannot discover capabilities it hasn't been granted. Ungranted host functions not linked. |
-| Agent Runtime | Never holds tokens longer than needed. Tokens are single-use or time-bounded. |
-| UI Shell | NEVER renders untrusted content in consent dialogs. Text is sanitized. |
+**attack_category** (objective-primary; `in_scope` true for 1–4, false for 5):
+`data_exfiltration`, `unauthorized_action`, `agent_redirection`, `scope_escalation`,
+`within_fingerprint_abuse`.
 
-## Technology Stack
+### API key loading (shared loader — REQUIRED)
 
-### Core Dependencies (Pinned Versions)
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| servo | v0.0.5 (pinned) | Browser engine |
-| iced | 0.13+ | UI framework |
-| wasmtime | 42+ | Wasm runtime (via Extism) |
-| extism | 1.x | Plugin framework |
-| regorus | latest | Rego policy engine (pure Rust) |
-| tokio | 1.x | Async runtime |
-| hyper | 1.x | HTTP client/server |
-| rustls | 0.23 | TLS |
-| quinn | 0.11 | QUIC transport |
-| rusqlite | 0.38 | SQLite bindings (use bundled feature) |
-| rs_merkle | latest (fork) | Merkle tree proofs |
-| adblock-rust | latest | Content blocking |
-| tracing | 0.1 | Structured logging |
-| keyring | 3.6 | OS credential storage |
+The Gemini API key is loaded at RUNTIME, not build time, to avoid committing it to a public
+repo. There must be ONE shared loader used by BOTH `gemini.rs` and `tool_decision`:
+**env var (`FERRITE_GEMINI_API_KEY`) first, then `gemini_key.txt` next to the executable as
+fallback.** Do not let the two components diverge (historically `tool_decision` read env-only
+and silently ran keyless — degrading the may-use layer and confounding M3). During an
+EVALUATION run, emit a non-fatal WARNING (warn, never fail — rules-only is legitimate) if the
+predictor initializes keyless, so degraded-predictor numbers are never silently recorded.
 
-## Coding Conventions
+## ferrite-ipi: Planned Near-Term Work (not yet implemented — see TO-DO.md + EVALUATION_PLAN)
 
-### Rust Style
-- Rust edition 2021
-- Run `cargo fmt` before every commit — use default rustfmt settings
-- Run `cargo clippy -- -D warnings` — zero warnings policy
-- All public APIs must have doc comments
-- Use `thiserror` for library error types, `anyhow` only in the shell binary
-- Prefer `tracing` over `println!` for all logging
-- All async code uses Tokio runtime
+Ordered; earlier gates later. Full design in `FINALIZED_DECISIONS.md` and `EVALUATION_PLAN.md`.
 
-### Error Handling
-- The broker must NEVER panic. Use `Result<T, BrokerError>` everywhere.
-- Policy evaluation errors → DENY (fail-closed)
-- Audit write errors → broker pauses operations (never drop events)
-- Network errors → propagate to caller with context
-- Extension errors → sandbox handles gracefully, logs to audit
+1. **Pre-Task-19 vocab-fix block** (upstream of the schema): rewrite `rule_based_must_use` and
+   the predictor allowlist to emit ONLY the capability vocabulary above (cut all phantoms); add
+   origin-binding to the dry-run record (ordered event log); rewrite `compare()` to
+   lower-then-compare with per-origin attribution + the unscopable rule; unify key loading
+   (shared loader above). Contained to `tool_decision`, `dry_run.rs`, `comparator.rs`. The
+   existing `comparator.rs` tests encode the old single-vocabulary model and will be rewritten.
+2. **Defense mode toggle (Task 18)** — `DefenseMode { On, SanitizerOnly, Off }`. `Off` bypasses
+   the entire predict→dry-run→compare→consent loop; `SanitizerOnly` runs the sanitizer but
+   bypasses the loop; `On` is the unchanged default. Switchable via setter + `FERRITE_DEFENSE`
+   env var. For §4 baseline + optional ablation.
+3. **Component 7 `dataset.rs` (Task 19)** — implement to the finalized two-layer schema in
+   `EVALUATION_PLAN.md` §7. Flat `src/dataset.rs` (not a mod dir). Supersedes the thin
+   `IpiEvent`/`IpiLabel` currently in `comparator.rs`. rusqlite 0.37; temp paths via
+   `std::env::temp_dir()`.
+4. **Sanitizer T1b extension (Task 20)** — extend `sanitizer.rs` to scan tool-output text, not
+   just HTML/JS. Extend existing pattern logic; do not create a parallel module.
+5. **Evaluation harness (Task 21)** in `ferrite-eval`; **AgentDojo Slack adapter (Task 22)**.
 
-### Security Rules
-- No `unsafe` code outside of FFI boundaries (Servo/CEF integration)
-- All token validation uses constant-time comparison
-- Secrets (signing keys) are zeroized on drop (use `zeroize` crate)
-- No ambient authority — every privileged operation requires a valid token
+## Environment
 
-### Testing
-- Unit tests in each crate (`#[cfg(test)]` modules)
-- Integration tests in `tests/` directory
-- Property-based tests for token validation (use `proptest`)
-- Adversarial test corpus (month 5) for prompt injection scenarios
-
-## Dev Environment
-
-- **IDE:** Google Antigravity (installed, VS Code fork, Windows)
-- **Terminal:** PowerShell (Windows native, no WSL2)
-- **CI:** GitHub Actions
-- **License:** Dual MIT/Apache-2.0
-
-## Critical Path
-
-```
-ferrite-types → ferrite-broker → Servo integration → end-to-end capability loop
-→ agent runtime → agent governance demo → adversarial evaluation → paper
-```
-
-If ANY item on this path slips, the project timeline slips. Protect this path above all else.
-
-## Data Flow: Agent Action (End-to-End)
-
-1. User types instruction in trusted Iced UI
-2. Agent Runtime receives instruction via trusted channel (not web content)
-3. Agent Runtime sends instruction to LLM (Claude/GPT-4 via HTTP)
-4. LLM returns action plan
-5. For EACH action in the plan:
-   - a. Agent Runtime constructs a `CapabilityRequest`
-   - b. Request sent to Broker via async channel
-   - c. Broker evaluates: principal registered? valid token? policy allows? risk level?
-   - d. If step-up consent needed → Broker sends ConsentRequest to UI Shell → Iced renders dialog in TRUSTED UI
-   - e. Broker mints `CapabilityToken` (if approved) or `CapabilityDenial`
-   - f. Audit System records the event with hash chain
-   - g. If granted: token returned → Agent Runtime passes to engine → engine verifies with Broker → executes
-   - h. If denied: denial returned → Agent Runtime reports to LLM → LLM adjusts plan
-6. After all actions: audit log contains complete, verifiable record with cryptographic integrity chain
-
-## Data Flow: Extension Action
-
-1. Extension (Wasm module) calls host function (e.g., `host_dom_read`)
-2. Host function implementation extracts capability request from parameters
-3. Host function sends CapabilityRequest to Broker
-4. Broker evaluates against extension's policy (loaded from manifest)
-5. Broker mints token → Host function receives approval
-6. Host function executes DOM read via Servo API
-7. Result (sanitized DOM subtree) returned to extension
-8. Audit log records: principal, capability, scope, outcome, token
-
-If extension calls a host function for a capability not declared in its manifest → DENY, logged with reason "capability_not_in_manifest". The capability is fundamentally unavailable to it.
-
-## Quantitative Targets
-- **100% enforcement coverage** — no privileged action without valid token
-- **<1ms broker latency** — median capability check overhead
-- **20+ adversarial scenarios** tested (month 5)
-- **≥10% bandwidth savings** on tracker-heavy sites via adblock-rust
+- OS / shell: Windows, PowerShell. No WSL2.
+- Rust toolchain: stable MSVC.
+- IDE: Google Antigravity (VS Code fork).
+- Project path: `C:\Dev\Major Project\Browser\`.
+- CI: GitHub Actions, Windows + macOS matrix. Linux is intentionally NOT in CI.
+  Consequence: the Linux-only network-namespace code path (component 4) is not
+  compiled by CI. Account for this — do not assume CI covers it.
 
 ## Dependency Rules
 
-- Do NOT add new crates that transitively depend on sea-query, sea-orm, sqlx, or diesel. Ferrite uses rusqlite directly for all storage. If a crate requires an ORM or query-builder, find an alternative or implement the query manually with rusqlite.
-- Before adding any new [dependencies] entry to any Cargo.toml, check `cargo tree` to verify it does not introduce a version conflict with existing workspace dependencies: rusqlite, tokio, serde, iced, servo.
-- Prefer crates already in the workspace dependency graph. Do not add a second crate that solves a problem already solved by an existing dependency.
-- All new dependencies must be pinned to an exact version with `=` in the workspace root Cargo.toml to prevent silent upgrades from breaking the build.
-- Before adding any dependency to any crates/*/Cargo.toml, check the existing versions already used in the workspace:
+- rusqlite is `0.37` with `features = ["bundled"]`. This exact version, workspace-wide. Never add a second rusqlite version.
+- Do NOT add `sea-query`, `sea-orm`, `sqlx`, or `diesel`. All SQLite access uses rusqlite directly. (Committing `Cargo.lock`, with it removed from `.gitignore`, resolved a recurring CI E0004 from `sea-query-rusqlite` — do not reintroduce that family.)
+- Reuse versions already in the workspace; never introduce a duplicate version of an existing dependency: tokio "1", serde "1", uuid "1", reqwest "0.12", thiserror "1", iced "0.13".
+- Before adding any dependency, mentally run `cargo tree --duplicates`. If it would duplicate an existing workspace dep, find another approach.
+- Inherited Dependabot alerts transitive from Servo v0.0.5 are non-actionable until the next Servo bump. Do not attempt to patch them individually.
 
-  rusqlite = "0.37"   (features = ["bundled"])
-  tokio = "1"
-  serde = "1"
-  uuid = "1"
-  reqwest = "0.12"
-  thiserror = "1"
-  iced = "0.13"
+## Hard Verification Rule
 
-Rules:
-- Always use the exact same version string already present in the workspace for any of the above crates. Never add a second version.
-- Do NOT add sea-query, sea-orm, sqlx, or diesel. All database access uses rusqlite directly.
-- Run `cargo tree --duplicates` mentally before adding any new crate. If a crate would introduce a duplicate version of an existing workspace dependency, find an alternative approach instead.
+Never propose a `Cargo.toml` edit, dependency change, or architecture claim
+without first confirming the relevant crate/version/file actually exists in the
+workspace as described. Stale assumptions have repeatedly caused breakage
+(fabricated crates, wrong rusqlite version, nonexistent dependencies). If you
+cannot verify, say so and ask — do not guess.
 
-## Known Dependabot Alerts (Inherited from Servo v0.0.5)
+## Working Style
 
-The following alerts exist in the committed Cargo.lock and are not actionable
-until the next Servo version bump. They are all transitive deps of Servo, not
-direct Ferrite dependencies:
+- Plan before building. Confirm understanding, then implement.
+- Divide large tasks into independently executable blocks, each with a clear exit condition.
+- Expect and welcome correction; verify against local state rather than memory.
 
-- ml-dsa: timing side-channel, UseHint off-by-two, repeated hint indices (Moderate)
-- lru: IterMut Stacked Borrows unsoundness (Low)  
-- rand: unsound with custom logger (Low)
+## Coding Conventions
 
-Review on next Servo upgrade. Do not attempt to patch these individually.
+- Rust edition: per-crate as set in each Cargo.toml (mixed 2021/2024 currently exists; do not change a crate's edition without flagging it).
+- `cargo fmt` before every commit; default rustfmt settings.
+- `cargo clippy -- -D warnings` — zero-warnings policy.
+- `thiserror` for library error types; `anyhow` only in the shell binary.
+- Prefer `tracing` over `println!` for logging in library code.
+- All async uses Tokio.
+- No `unsafe` outside FFI boundaries (Servo integration).
+- Test temp paths: use `std::env::temp_dir()`, never hardcoded `/tmp/` (Windows has no `/tmp`).
+
+## Key Files
+
+- `Browser/Cargo.toml` — workspace manifest (source of truth for active crates)
+- `Browser/PROGRESS.md` — dated change log + milestone status
+- `Browser/TO-DO.md` — task/block breakdown with exit conditions
+- `Browser/CLAUDE.md` — this file
+- `EVALUATION_PLAN.md` (repo root) — evaluation methodology; authoritative for the
+  `dataset.rs` schema and planned eval-related code. Living/volatile document.
+- `FINALIZED_DECISIONS.md` (repo root) — the resolved design decisions (vocabulary model,
+  schema contract, comparator rule) this CLAUDE.md vocabulary section summarizes.

@@ -4,7 +4,7 @@ use crate::{
 };
 
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-const DEFAULT_MODEL: &str = "gemini-2.0-flash";
+const DEFAULT_MODEL: &str = "gemini-2.5-flash";
 const MAX_TURNS_PER_TASK: usize = 10;
 const TURN_TIMEOUT_SECS: u64 = 30;
 

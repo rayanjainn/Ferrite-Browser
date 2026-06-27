@@ -10,19 +10,34 @@
 ## Project Structure
 
 ```
-Major Project/                  ← git repo root, reference docs, PDFs
-├── PROJECT_REFERENCE.md        ← full architecture + 8-month plan reference
-├── CLAUDE.md (in Browser/)     ← Claude Code context file
+Major Project/                  ← git repo root, reference docs
 └── Browser/                    ← Cargo workspace root, all Rust code
-    ├── Cargo.toml              ← workspace manifest
-    ├── CLAUDE.md               ← Claude Code CLI context file
+    ├── Cargo.toml              ← workspace manifest (source of truth for active crates)
+    ├── CLAUDE.md               ← Claude Code coding-rules context file
     ├── PROGRESS.md             ← this file
     └── crates/
-        ├── ferrite-shell/              ← binary: browser shell + smoke tests
-        ├── ferrite-capability-broker/  ← lib: token minting, broker logic
-        ├── ferrite-audit-log/          ← lib: hash-chained log + SQLite
-        └── ferrite-policy/             ← lib: Rego policy engine (stub)
+        ├── ferrite-shell/      ← binary: browser shell, CLI dispatch, smoke tests
+        ├── ferrite-servo/      ← lib: Servo rendering integration (HeadlessServoSession)
+        ├── ferrite-ui/         ← lib: Iced dark-mode UI, agent sidebar
+        ├── ferrite-audit-log/  ← lib: SHA-256 hash-chained log + SQLite (rusqlite 0.37)
+        ├── ferrite-agent/      ← lib: BrowserToolExecutor, GeminiAgent, AgentRuntime, rate limiter
+        ├── ferrite-ipi/        ← lib: seven-component IPI defense system
+        └── ferrite-eval/       ← lib: evaluation harness (Servo-free; deps only ferrite-ipi + ferrite-agent)
 ```
+
+> **Active workspace = the seven crates above** (verified against `Cargo.toml`).
+> The capability broker, policy engine (Regorus), and Extism extension sandbox were
+> removed from the active workspace on 2026-04-01. They remain dormant on disk and may
+> be re-integrated in a later stage — they are **not** part of current scope. See the
+> 2026-04-01 Change Log entry for the removal details.
+
+---
+
+## Stage Overview
+
+- **Stage 1 — Browser infrastructure: ✅ Complete.** Servo embedding, Iced UI, persistent hash-chained audit log, and the `ferrite-agent` runtime (Gemini backend, tool executor bridge, rate limiter).
+- **Stage 2 — `ferrite-ipi` defense system: ⏳ In progress.** Six of the seven components are implemented and passing (30/30 tests); the dataset pipeline (`dataset.rs`) is still a stub. Note: the evaluation-design work (see `EVALUATION_PLAN.md`, `FINALIZED_DECISIONS.md`) revealed that a **vocab-fix block must precede the dataset** — the fingerprint vocabulary, the dry-run record, and the comparator are reworked first so the dataset schema is built on a sound base. Sequence is now: vocab-fix block → defense-mode toggle (Task 18) → dataset pipeline (Task 19). See "What To Do Next."
+- **Stage 2 evaluation harness — planned.** A seventh crate, `ferrite-eval`, will host the evaluation harness (Tasks 21–22). Servo-free by design.
 
 ---
 
@@ -31,19 +46,17 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | Milestone | Status |
 |-----------|--------|
 | Cargo workspace scaffolded | ✅ Done |
-| `ferrite-capability-broker` — types + broker | ✅ Done |
 | `ferrite-audit-log` — hash chain + SQLite | ✅ Done |
-| `ferrite-policy` — Regorus policy engine stub | ✅ Done |
 | `ferrite-shell` — integration smoke test | ✅ Done |
-| GitHub Actions CI pipeline | ✅ Done |
+| GitHub Actions CI pipeline (Windows + macOS) | ✅ Done |
 | `ferrite-servo` crate scaffolded | ✅ Done |
 | Servo embedding shell — WindowRenderingContext + WebView wired in | ✅ Done |
-| Iced UI shell (Month 1–2 R3 task) | ✅ Done |
-| Extism Extension Sandbox (`ferrite-sandbox`) | ✅ Done |
+| Iced UI shell | ✅ Done |
 | Audit Log Viewer panel in Iced UI | ✅ Done |
+| Capability broker / policy engine / Extism sandbox | ⏸ Deferred (dormant on disk, removed from workspace 2026-04-01) |
 | UI Polish — navigation controls, visual overhaul, keyboard shortcuts, smart URL | ✅ Done |
 | UI Polish — error page, new-tab page, tab titles, favicon placeholders | ✅ Done |
-| JS Console panel with broker-gated JsExecute capability | ✅ Done |
+| JS Console panel (`JsExecute` capability) | ✅ Done |
 | Full mouse/scroll/click interactivity forwarded to Servo WebView | ✅ Done |
 | Platform-aware keyboard shortcuts (macOS ⌘, Windows/Linux Ctrl) | ✅ Done |
 | Smart URL resolver (no redundant https://, search fallback) | ✅ Done |
@@ -62,12 +75,38 @@ Major Project/                  ← git repo root, reference docs, PDFs
 | `ferrite-ipi` — Task 16 Block 1: `DryRunRecord` + `RecordingExecutor` + `DryRunOrchestrator::run()` | ✅ Done |
 | `ferrite-ipi` — Task 17 Block 1: `FingerprintDiff`, `compare()`, `ConsentDecision`, `IpiEvent` | ✅ Done |
 | `ferrite-ui` — Task 17 Block 2: IPI consent panel in agent sidebar + dry run wired to `AgentTaskSubmitted` | ✅ Done |
+| Pre-Task-19 vocab-fix block: capability vocab + origin-bound dry-run + comparator rewrite + shared key-loader | ⬜ Not started |
+| `ferrite-ipi` — Task 18: defense-mode toggle (`DefenseMode { On, SanitizerOnly, Off }`) | ⬜ Not started |
+| `ferrite-ipi` — Task 19: dataset pipeline (`dataset.rs`) — schema per EVALUATION_PLAN §7 | ⬜ Not started (stub) |
+| `ferrite-ipi` — Task 20: sanitizer T1b extension | ⬜ Not started |
+| `ferrite-eval` — Task 21: evaluation harness | ⬜ Not started |
+| `ferrite-eval` — Task 22: AgentDojo Slack adapter | ⬜ Not started |
 | `ferrite-agent::gemini` — `read_api_key()` free fn + `GeminiAgent::from_key()` constructor | ✅ Done |
 | `ferrite-ui` — `AgentTaskSubmitted` uses `read_api_key()` + `from_key()` instead of raw env check | ✅ Done |
 
 ---
 
 ## Change Log
+
+### 2026-06-27 — Evaluation design frozen; vocabulary + schema decisions recorded
+
+No code changed. Recording that the evaluation-design phase is complete and its decisions
+are now in the canonical docs:
+- `EVALUATION_PLAN.md` — finalized §7 dataset schema (two-layer CaseDefinition + ExecutionRecord,
+  GroundTruth enum), scope-tightness stratification in §5/§9, resolved-decisions record in §10.
+- `CLAUDE.md` — new authoritative *Tool Vocabulary and Capability Model* section (eight primitives,
+  six action classes, capability model, phantom-cut list, technique + carrier_vector closed
+  vocabularies, the `unscopable` js.execute rule, shared key-loader requirement); workspace
+  corrected to seven crates (added `ferrite-eval`); ON/OFF toggle corrected to three-mode.
+- `FINALIZED_DECISIONS.md` (repo root) — new file; Decisions 1–6 with rationale (capability
+  mapping, technique vocab, js.execute encoding, origin-scope authoring, schema field contract,
+  carrier_vector + GroundTruth). Also logs the key-loading divergence finding.
+- `TO-DO.md` — renumbered: Task 18 = defense-mode toggle, Task 19 = dataset, Task 20 = sanitizer
+  T1b, Task 21 = eval harness, Task 22 = AgentDojo adapter; vocab-fix block precedes Task 19.
+
+Net effect on plan: a pre-Task-19 vocab-fix block (capability vocabulary + origin-bound dry-run
+record + lower-then-compare comparator + shared key-loader) is now the next implementation step,
+upstream of the dataset. No design decisions remain open.
 
 ### 2026-05-04 — `read_api_key()` + `GeminiAgent::from_key()` + ferrite-ui wired up
 
@@ -277,8 +316,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 
 **Note:** `uuid` required the `serde` feature (not just `v4`) for Serialize/Deserialize impls on `Uuid`.
 
-
-
 ### 2026-04-01 — Remove ferrite-capability-broker, ferrite-policy, ferrite-sandbox from active compilation
 
 **Files:**
@@ -312,8 +349,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
   - Ellipsis, em-dash: `...` / `-`
 - Build clean. No non-ASCII in non-comment rendered text.
 
----
-
 ### 2026-03-30 — Fix home page, click, scroll
 
 **Files:** `crates/ferrite-ui/src/lib.rs`
@@ -321,8 +356,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - **Home page fix**: The content branch order was wrong — Servo produces a blank white frame for `about:blank`, so the Servo-frame branch fired before the home page branch. Swapped order: `about:blank` check now runs first, home page always shown for that URL regardless of whether a Servo frame exists.
 - **Click fix**: `on_press` / `on_release` in Iced 0.13 `mouse_area` don't carry a position — they fire a plain message. Changed `ServoMousePress { x, y }` / `ServoMouseRelease { x, y }` to `ServoMousePress` / `ServoMouseRelease` (no fields); the update handler reads `state.cursor_pos` (kept current by `on_move`) and uses that for the Servo input events.
 - **Scroll fix**: Added `.on_scroll(|delta| ...)` to the `mouse_area` wrapping the Servo frame. `ScrollDelta::Lines` is converted to pixels (×60), `ScrollDelta::Pixels` passed through. `ServoScroll` message now carries only `delta_x`/`delta_y`; position comes from `state.cursor_pos` in the update handler.
-
----
 
 ### 2026-03-30 — Mouse/scroll interactivity, platform shortcuts, home page, smart URL
 
@@ -346,8 +379,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - **New-tab/home page**: 6 quick-access emoji tiles (DuckDuckGo, Rust Docs, GitHub, Servo, Hacker News, Wikipedia) with hover shadows, large `⬡ ferrite` logo, keyboard shortcut reference panel at bottom.
 - Tile row uses `.wrap()` so it reflows on narrow windows.
 - JS console, Audit panel, toolbar all updated to new palette (`C_ACCENT_BRIGHT`, `C_DANGER`).
-
----
 
 ### 2026-03-30 — Build fixes + UI overhaul + JS console
 
@@ -374,45 +405,7 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - `column(layout)` wrapped in `container` (Iced 0.13: column has no `.style()` method).
 - All warnings resolved: removed `#[allow(dead_code)]` by using the constants.
 
----
-
-### 2026-03-29 — TO-DO.md updated: all completed blocks marked ✅ Done
-
-**Files:** `TO-DO.md`
-
-- Marked all completed blocks across Task 1–8 with `| ✅ Done` status.
-- Newly marked: Task 2 Blocks 1–3, Task 3 Block 1, Task 7 Blocks 1–4, Task 8 Blocks 1–3.
-- Task 1 Blocks 1–6, Task 4 Block 1, Task 5 Blocks 1–2 were already marked.
-
----
-
-### 2026-03-29 — JS Console panel in Iced UI
-
-**Files:** `crates/ferrite-ui/src/lib.rs`, `crates/ferrite-ui/Cargo.toml`
-
-- Added `ferrite-capability-broker` and `uuid` as direct deps to `ferrite-ui/Cargo.toml`.
-- Added `show_js_console: bool`, `js_input: String`, `js_output: Vec<(String, String)>`, `js_broker: Option<(CapabilityBroker, Uuid)>` to `FerriteBrowser`; broker mints a `JsExecute` / `Agent` token at `Default::default()` time.
-- Added messages `ToggleJsConsole`, `JsInputChanged`, `JsExecuteRequested`, `JsConsoleClear`.
-- `ToggleJsConsole` / `ToggleAuditPanel` enforce mutual exclusion — opening one closes the other.
-- `JsExecuteRequested`: calls `broker.check(token, "*")` → if Granted calls `session.execute_js()`; if Denied appends `"BLOCKED: step-up consent required"`; always clears input and appends `(snippet, result)` to `js_output`.
-- `Ctrl+Enter` keyboard shortcut fires `JsExecuteRequested` via `handle_key_press`.
-- DevTools toolbar now shows both "Audit Log" and "JS Console" toggle buttons side-by-side.
-- JS console panel (250 px): header with "Clear" button, scrollable output (input in accent, result in primary/danger), input row with `">"` label + `text_input` + "Run" button.
-
-### 2026-03-29 — JS compat baseline probe + console error collection
-
-**Files:** `crates/ferrite-servo/src/session.rs`, `crates/ferrite-shell/src/main.rs`
-
-- Added `JSCompatResult` struct (public, at module root of `session.rs`) with fields `url`, `js_executed`, `console_errors`, `page_title`.
-- Added `console_errors: Rc<RefCell<Vec<String>>>` shared cell to `HeadlessDelegate`; wired `notify_console_message` callback to append error-level messages (servo v0.0.5 API; gracefully absent in non-servo builds since the `#[cfg(feature = "servo")]` gate covers the whole impl).
-- Added `shared_console_errors` field to `HeadlessServoSession`; constructor initialises it and passes a clone to the delegate.
-- Added `take_console_errors(&mut self) -> Vec<String>` — drains accumulated errors via `std::mem::take`.
-- Added `test_js_compat(&mut self, url: &str) -> JSCompatResult` — navigates, polls `spin()` in a 16 ms sleep loop for up to 5 s, returns result; infers `js_executed` from title being set.
-- Added stub implementations of both new methods to the non-servo `HeadlessServoSession`.
-- Added `jstest` subcommand to `ferrite-shell/src/main.rs`: probes `example.com`, `lite.duckduckgo.com`, `doc.rust-lang.org`; prints results table; saves `paper/data/js_compat_baseline.csv`.
-- `cargo check` passes with zero errors on both crates.
-
-### 2026-03-29 — UI visual redesign: theme-derived palette + updated layout constants
+### 2026-03-30 — UI visual redesign: theme-derived palette + updated layout constants
 
 **Files:** `crates/ferrite-ui/src/lib.rs`
 
@@ -445,8 +438,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - All style functions now use palette constants directly instead of `theme.extended_palette()` tokens
 - `cargo build --features ferrite-servo/servo -p ferrite-shell` — ✅
 
----
-
 ### 2026-03-26 — Fix tab isolation: wrong page shown after switching tabs
 
 **File:** `crates/ferrite-servo/src/session.rs`
@@ -454,8 +445,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - Root cause: GL context is a per-thread global. `spin_event_loop()` drives all WebViews and calls `make_current()` on each painter's rendering context as it renders. After the loop, the last context to render (tab 2) is left as "current". When tab 1's `spin()` then calls `read_to_image` (which uses `glReadPixels`), it reads from whichever surface was last made current — tab 2's — giving the wrong pixels.
 - Fix: call `self.rendering_context.make_current()` immediately before `read_to_image` in `spin()` to re-establish the correct GL context for this tab before the readback.
 - `cargo build --features ferrite-servo/servo -p ferrite-shell` — ✅ passes
-
----
 
 ### 2026-03-26 — Fix "Already initialized" panic when opening multiple tabs
 
@@ -465,8 +454,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - Fix: added a `thread_local! { static SERVO_ENGINE: RefCell<Option<Servo>> }` singleton and a `get_or_init_servo()` helper that builds the `Servo` engine on the first call and `.clone()`s the `Rc` wrapper on all subsequent calls. `ServoBuilder` is only invoked once per process.
 - `cargo build --features ferrite-servo/servo -p ferrite-shell` — ✅ passes
 
----
-
 ### 2026-03-25 — Fix go_back/go_forward/stop API mismatches in ferrite-servo
 
 **File:** `crates/ferrite-servo/src/session.rs`
@@ -475,8 +462,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - `go_forward()`: same fix — passed `1` as the `amount: usize` argument
 - `stop()`: `WebView::stop()` does not exist in this servo build; replaced with a `tracing::warn!` no-op and a TODO comment until servo exposes the method
 - `cargo check -p ferrite-servo` — ✅ passes
-
----
 
 ### 2026-03-25 — Visual redesign of Iced UI shell
 
@@ -493,8 +478,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - All button text sizes set to 14; toolbar element spacing 4 px; `PANEL_PADDING` (8) used consistently for horizontal padding in all toolbar rows and audit panel cells
 - Fixed `scrollable::Scrollbar::new()` call (iced 0.13 takes no arguments)
 - `cargo check` ✅ · `cargo fmt` ✅
-
----
 
 ### 2026-03-25 — Navigation controls, load status tracking, and progress bar
 
@@ -540,8 +523,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - `cargo check -p ferrite-servo -p ferrite-ui` — ✅ passes (no feature flags needed)
 - `cargo fmt -p ferrite-servo -p ferrite-ui` — ✅ clean
 
----
-
 ### 2026-03-25 — Error page, new-tab page, tab titles, favicon placeholders
 
 **Files:** `crates/ferrite-servo/src/session.rs`, `crates/ferrite-ui/src/lib.rs`
@@ -574,8 +555,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - `cargo check -p ferrite-servo -p ferrite-ui` — ✅ passes
 - `cargo fmt -p ferrite-servo -p ferrite-ui` — ✅ clean
 
----
-
 ### 2026-03-25 — Keyboard shortcuts, smart URL resolution, address bar focus
 
 **Files:** `crates/ferrite-ui/src/lib.rs`, `crates/ferrite-ui/Cargo.toml`
@@ -606,8 +585,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - `cargo check -p ferrite-ui` — ✅ passes
 - `cargo fmt -p ferrite-ui` — ✅ clean
 
----
-
 ### 2026-03-25 — CI workflow updated
 
 **File:** `.github/workflows/ci.yml`
@@ -619,7 +596,7 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 - Added explicit `cargo fetch` step before lint/test
 - Added "Build hello-ext Wasm" step: builds `extensions/hello-ext` targeting `wasm32-unknown-unknown --release`
 
----
+> **Note (superseded 2026-04-13):** the Linux/ubuntu CI job and the hello-ext Wasm build step were later removed; CI now runs Windows + macOS only. Retained here for history.
 
 ### 2026-03-25 — Devcontainer configuration completed
 
@@ -627,8 +604,6 @@ All 3 unit tests pass (`cargo test -p ferrite-ipi`):
 
 - `devcontainer.json`: configures the dev container with name "Ferrite Browser Dev", build context at repo root, workspace mounted at `/workspace`, two named volumes for Cargo registry and build target caches, port 9222 forwarded (Ferrite Agent WebSocket), rust-analyzer/crates/even-better-toml/vscode-lldb extensions, clippy-on-save with `-D warnings`, `postCreateCommand` runs `cargo fetch` on container creation
 - `.dockerignore`: excludes `target/`, `.git/`, `*.pdf`, `*.pptx`, `*.html` from Docker build context to keep image builds fast
-
----
 
 ### 2026-03-25 — Devcontainer Dockerfile created
 
@@ -640,8 +615,6 @@ Created the devcontainer Dockerfile for Linux-based development (Ubuntu 22.04):
 - Pre-warms Cargo registry by copying workspace manifests + stub sources and running `cargo fetch` — this layer is cached unless dependencies change
 - Sets `WORKDIR /workspace` for actual development use
 
----
-
 ### 2026-03-25 — Task 1 Block 4: WebView creation wired in (navigate to real URL)
 
 **File:** `crates/ferrite-servo/src/shell.rs`
@@ -652,8 +625,6 @@ Activated the `WindowRenderingContext` + WebView construction that was previousl
 - `webview.resize(window.inner_size())` — sizes the render surface to fill the window
 - `self.webview = Some(webview)` — the `Option<servo::WebView>` field is now populated
 
-The `FerriteWebViewDelegate` already implemented `notify_load_status_changed` (logs load complete), `load_web_resource` (broker check + audit log), and the `about_to_wait` handler already called `servo.spin_event_loop()`. This block completes the Servo feature path.
-
 `cargo build -p ferrite-servo` (without `--features servo`) still compiles cleanly in 17s — the new code is gated behind `#[cfg(feature = "servo")]`.
 
 To test the full rendering path:
@@ -662,18 +633,12 @@ cargo run -p ferrite-shell --features ferrite-servo/servo window
 ```
 First build takes ~10-20 min (compiles Servo from source).
 
----
-
-### 2026-03-25 — README updated with current build and test steps
-
-- Updated `README.md` workspace layout to include `ferrite-ui` and `ferrite-sandbox` crates
-- Updated milestone status table to reflect all completed items (Iced UI shell, Servo embedding, Extism sandbox, audit log viewer panel)
-- Updated notable tests table to reflect actual passing tests (`audit_log_records_grants_and_denials`, `revoke_blocks_subsequent_requests`, `default_policy_allows_all`)
-- Added `ferrite-ui` and `ferrite-sandbox` to the individual crate build commands section
-
----
-
 ### 2026-03-24 — Workspace scaffolded + Broker + Audit Log implemented
+
+> **Historical note:** This entry and several below reference the capability broker, policy
+> engine, and Extism sandbox, which were removed from the active workspace on 2026-04-01
+> (see that entry). They remain on disk for possible future re-integration. The audit-log
+> work described here remains current. Entries are preserved verbatim for forensic history.
 
 **Environment**
 - IDE: Google Antigravity (installed, VS Code fork)
@@ -683,54 +648,14 @@ First build takes ~10-20 min (compiles Servo from source).
 
 **Workspace**
 - Initialized Cargo workspace at `Browser/` with `resolver = "2"`
-- Four crates created under `Browser/crates/`:
-  - `ferrite-shell` (binary)
-  - `ferrite-capability-broker` (lib)
-  - `ferrite-audit-log` (lib)
-  - `ferrite-policy` (lib)
+- Crates created under `Browser/crates/` (broker/policy since deferred)
 - `cargo build` passes cleanly
-
----
-
-### `ferrite-capability-broker` — COMPLETE
-
-**File:** `crates/ferrite-capability-broker/src/lib.rs`
-
-**Dependencies added:**
-```toml
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-uuid = { version = "1", features = ["v4", "v7", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-thiserror = "1"
-```
-
-**What was implemented:**
-- `CapabilityType` enum — 7 Wave 1 capability types: `DomRead`, `DomWrite`, `NetworkFetch`, `StorageRead`, `StorageWrite`, `CookieRead`, `CookieWrite`
-- `PrincipalKind` enum — `Extension`, `Agent`, `WebContent`
-- `Principal` struct — `id: Uuid`, `kind: PrincipalKind`, `label: String`
-- `CapabilityToken` struct — `token_id`, `principal`, `capability`, `origin_scope`, `url_allowlist`, `rate_limit`, `issued_at`, `expires_at`
-- `CapabilityToken::is_expired()` — compares `expires_at` against `Utc::now()`
-- `CapabilityToken::matches_origin()` — checks `origin_scope == "*"` or exact match
-- `DenialReason` enum — `PolicyRejected`, `TokenExpired`, `OriginMismatch`, `RateLimitExceeded`, `UnknownPrincipal`
-- `BrokerDecision` enum — `Granted { token }` or `Denied { reason }`
-- `CapabilityBroker` struct — `HashMap<Uuid, CapabilityToken>` storage
-- `CapabilityBroker::mint_token()` — creates token, stores it, returns `token_id`
-- `CapabilityBroker::check()` — validates expiry + origin, returns `BrokerDecision`
-- `CapabilityBroker::revoke()` — removes token from map
-
-**What is NOT yet implemented (deferred to Month 3):**
-- Policy engine integration inside `check()` (currently no Rego evaluation on grant)
-- Rate limit enforcement (field exists on token, not yet checked in `check()`)
-- IPC / async channels (all in-process for now)
-
----
 
 ### `ferrite-audit-log` — COMPLETE
 
 **File:** `crates/ferrite-audit-log/src/lib.rs`
 
-**Dependencies added:**
+**Dependencies (current):**
 ```toml
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -738,7 +663,7 @@ sha2 = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 thiserror = "1"
 ```
 
@@ -754,60 +679,6 @@ thiserror = "1"
 - `PersistentAuditLog::append()` — appends to in-memory log AND inserts row into SQLite atomically
 - `PersistentAuditLog::load()` — reads all rows ordered by sequence, reconstructs log, calls `verify_chain()`, errors if chain broken
 
-**What is NOT yet implemented (future months):**
-- Merkle tree upgrade (planned Month 5)
-- Proof generation / verification API
-- Connection to broker events (broker does not yet call audit log on grant/deny)
-
----
-
-### `ferrite-policy` — COMPLETE (2026-03-24)
-
-**File:** `crates/ferrite-policy/src/lib.rs`
-
-**Dependencies added:**
-```toml
-regorus = "0.2"
-serde_json = "1"
-thiserror = "1"
-```
-
-**What was implemented:**
-- `PolicyEngine` struct wrapping `regorus::Engine`
-- `PolicyEngine::new()` — creates engine, loads default Rego package `ferrite.capability` with `default allow = true`
-- `PolicyEngine::evaluate(&mut self, principal_kind, capability, origin) -> bool` — sets input JSON, evaluates `data.ferrite.capability.allow`, returns `true` on any error (fail-open)
-- `Default` impl for `PolicyEngine`
-- Unit test: `default_policy_allows_all` verifies extension and agent requests both return `true`
-
----
-
-### `ferrite-shell` — COMPLETE (2026-03-24)
-
-**File:** `crates/ferrite-shell/src/main.rs`
-
-**Dependencies added:**
-```toml
-ferrite-capability-broker = { path = "../ferrite-capability-broker" }
-ferrite-audit-log = { path = "../ferrite-audit-log" }
-ferrite-policy = { path = "../ferrite-policy" }
-uuid = { version = "1", features = ["v4"] }
-```
-
-**What was implemented:**
-- Integration smoke test wiring all three crates together
-- Creates `CapabilityBroker`, `PersistentAuditLog` (at temp dir), `PolicyEngine`
-- Mints Extension/NetworkFetch token scoped to `https://example.com` for 3600s
-- Asserts `policy.evaluate("extension", "network.fetch", "https://example.com") == true`
-- Asserts `broker.check(token_id, "https://example.com/path")` → `Granted`
-- Asserts `broker.check(token_id, "https://evil.com")` → `Denied(OriginMismatch)`
-- Appends `CapabilityGranted` event to `PersistentAuditLog`
-- Asserts `audit_log.log.verify_chain() == true`
-- Prints: `Month 1-2 smoke test: ALL CHECKS PASSED`
-
-**Verified:** `cargo run -p ferrite-shell` prints the success message cleanly.
-
----
-
 ### `ferrite-servo` — SCAFFOLDED (2026-03-24)
 
 **Files created:**
@@ -817,9 +688,7 @@ uuid = { version = "1", features = ["v4"] }
 
 **Root `Cargo.toml`** — added `"crates/ferrite-servo"` to workspace members.
 
-**Verified:** `cargo metadata --no-deps` lists all 5 workspace members correctly.
-
-**Not yet built:** Servo git dependency not yet resolved — see Known Issues below.
+**Verified:** `cargo metadata --no-deps` lists all workspace members correctly.
 
 ### `ServoShell` — winit shell + Servo integration skeleton (2026-03-24)
 
@@ -844,51 +713,9 @@ uuid = { version = "1", features = ["v4"] }
 
 **`ferrite-shell/src/main.rs`** — smoke test moved to `fn run_smoke_test()`:
 - First CLI arg `"window"` → `ServoShell::new().run()` (opens window)
-- Anything else → `run_smoke_test()` (original 10-step check)
-
-**Verified:**
-- `cargo build -p ferrite-shell` — clean build, 26s
-- `cargo run -p ferrite-shell` → `Month 1-2 smoke test: ALL CHECKS PASSED`
-- `cargo run -p ferrite-shell window` → opens 1280×800 winit window
-
----
+- Anything else → `run_smoke_test()`
 
 **Feature flag:** `ferrite-servo/Cargo.toml` has `[features] servo = []`. Servo code activates with `--features servo`. Build without the feature gives the bare winit shell.
-
-**Verified:**
-- `cargo build -p ferrite-shell` — clean, 3.87s
-- `cargo run -p ferrite-shell` → `Month 1-2 smoke test: ALL CHECKS PASSED`
-- `cargo run -p ferrite-shell window` → opens 1280×800 winit window
-
-### `ferrite-ui` — address bar (2026-03-25)
-
-**File:** `crates/ferrite-ui/src/lib.rs`
-
-**What changed:**
-- `FerriteBrowser`: added `address_bar_input: String` and `tab_urls: Vec<String>` (default `["about:blank"]`); `tab_urls` stays parallel to `tabs`
-- `FerriteBrowserMessage`: added `AddressBarChanged(String)` and `NavigateRequested(String)`
-- `update()`: `AddressBarChanged` sets `address_bar_input`; `NavigateRequested` commits to `tab_urls[active_tab]` + logs; `AddTab`/`CloseTab`/`SelectTab` now also keep `tab_urls` in sync and reflect the current tab's URL back into `address_bar_input` on every tab switch
-- `view()`: address bar row inserted between tab bar and content — `text_input("Enter URL...", &address_bar_input)` with `.on_input(AddressBarChanged)` and `.on_submit(NavigateRequested(...))`; below the input, `text("Current URL: {tab_urls[active_tab]}")` at size 12
-
-**Verified:** `cargo build -p ferrite-ui` — zero warnings
-
----
-
-### `ferrite-ui` — tab bar (2026-03-25)
-
-**File:** `crates/ferrite-ui/src/lib.rs`
-
-**What changed:**
-- `FerriteBrowser` state: added `tabs: Vec<String>` (initialised with `["New Tab"]`) and `active_tab: usize`; replaced `#[derive(Default)]` with explicit `impl Default`
-- `FerriteBrowserMessage`: added `AddTab`, `CloseTab(usize)`, `SelectTab(usize)`
-- `update()`: `AddTab` pushes "New Tab" + sets active; `CloseTab(i)` removes entry + clamps active (guarded: no-op when only one tab remains, close button disabled); `SelectTab(i)` sets active
-- `view()`: tab strip rendered as a horizontal `row` of (label button + × button) groups followed by a "+" button, wrapped in a `container` with `background.weak` fill; content area is a centered placeholder text showing "Tab N content"
-- Five styling functions using `theme.extended_palette()`: `tab_bar_style` (container, `background.weak`), `tab_inactive_style` (hover → `background.strong`), `tab_active_style` (`primary.strong` accent), `close_btn_style` (transparent, danger tint on hover), `add_tab_style` (transparent, `background.strong` on hover)
-- Close button uses `.on_press_maybe()` — `None` when tab count is 1, disabling it without removing it
-
-**Verified:** `cargo build -p ferrite-ui` — zero warnings, 4.2s
-
----
 
 ### `ferrite-ui` — Iced UI shell (2026-03-25)
 
@@ -903,260 +730,21 @@ uuid = { version = "1", features = ["v4"] }
 
 **Iced 0.13 API note:**
 Iced 0.13 replaced the `Application` trait with a functional builder pattern.
-`iced::application(title, update, view)` returns an `Application` builder; `.theme()`, `.window_size()`, `.centered()`, `.run()` are chained on it. There is no trait to implement — state, message, update fn, and view fn are free items wired together by the builder.
+`iced::application(title, update, view)` returns an `Application` builder; `.theme()`, `.window_size()`, `.centered()`, `.run()` are chained on it.
 
-**What was implemented:**
-- `FerriteBrowser` — state struct (`#[derive(Debug, Default)]`, currently empty)
-- `FerriteBrowserMessage` — message enum (currently empty; empty enum = exhaustive match with zero arms, so `update` is a no-op by construction)
-- `update(state, message) -> Task<FerriteBrowserMessage>` — no-op via `match message {}`
-- `view(state) -> Element<'_, FerriteBrowserMessage>` — returns `center(text("Ferrite Browser — loading..."))`
-- `pub fn launch() -> iced::Result` — calls `iced::application("Ferrite Browser", update, view).window_size(1280×800).centered().theme(|_| Theme::Dark).run()`
+**What was implemented (initial):**
+- `FerriteBrowser` — state struct
+- `FerriteBrowserMessage` — message enum
+- `update(state, message) -> Task<FerriteBrowserMessage>`
+- `view(state) -> Element<'_, FerriteBrowserMessage>`
+- `pub fn launch() -> iced::Result` — `iced::application("Ferrite Browser", update, view).window_size(1280×800).centered().theme(|_| Theme::Dark).run()`
 
-**Verified:**
-- `cargo build -p ferrite-ui` — zero warnings
-- `cargo build -p ferrite-shell` — zero warnings
-- `cargo run -p ferrite-shell ui` → opens 1280×800 dark-themed Iced window with centered placeholder text
+### `ferrite-ui` — tab bar + address bar (2026-03-25)
 
----
+**File:** `crates/ferrite-ui/src/lib.rs`
 
-### `ferrite-sandbox` — broker-gated host functions (2026-03-25)
-
-**Files changed:**
-- `crates/ferrite-sandbox/Cargo.toml` — added `ferrite-capability-broker`, `uuid`
-- `crates/ferrite-sandbox/src/lib.rs` — full rewrite with broker + host functions
-- `extensions/hello-ext/src/lib.rs` — added three test exports
-
-**What changed in `lib.rs`:**
-- `BrokerState` struct holds `CapabilityBroker` + three token UUIDs; wrapped in `UserData<BrokerState>` (`Arc<Mutex<T>>` under the hood)
-- Three tokens minted in `new()`: `DomRead`, `NetworkFetch`, `StorageRead`, all `origin="*"`, 3600s TTL, `PrincipalKind::Extension`
-- Three host functions defined with `extism::host_fn!` macro:
-  - `host_dom_read(selector: String) -> String` — broker check on `dom_read_token`; granted → stub DOM HTML; denied → error string
-  - `host_network_fetch(url: String) -> String` — broker check on `network_fetch_token` with actual URL; granted → stub body; denied → error string
-  - `host_storage_read(key: String) -> String` — broker check on `storage_read_token`; granted → stub value; denied → error string
-- `Function::new("host_*", [PTR], [PTR], broker_state.clone(), fn_ptr)` registers each — no explicit namespace so extism defaults to `"extism:host/user"` (matches PDK)
-- `Plugin::new(manifest, [f_dom_read, f_network_fetch, f_storage_read], false)`
-- `call_test(export)` helper for host-side invocation of the test exports
-- `with_broker(f)` accessor for token revocation from outside the sandbox
-
-**What changed in `hello-ext/src/lib.rs`:**
-- `#[host_fn("extism:host/user")] extern "ExtismHost"` block declares all three imports
-- `test_dom_read`, `test_network_fetch`, `test_storage_read` — each calls its host function with a fixed argument and returns the result
-
-**Extism host_fn! ABI note:**
-- String args use `PTR = ValType::I64` — a pointer into Extism shared memory
-- `host_fn!` macro auto-decodes via `plugin.memory_get_val(&inputs[n])` and encodes return via `plugin.memory_new(&output)` + `memory_to_val`
-
-**Wasm build still blocked** by Homebrew Rust lacking `wasm32-unknown-unknown` stdlib (requires rustup). All host-side code compiles and checks clean.
-
-**Verified:**
-- `cargo check -p ferrite-sandbox` — zero warnings
-- `cargo check -p ferrite-shell` — zero warnings
-
----
-
-### `ferrite-sandbox` — audit log integration + `run_demo()` (2026-03-25)
-
-**Files changed:**
-- `crates/ferrite-sandbox/Cargo.toml` — added `ferrite-audit-log = { path = "../ferrite-audit-log" }`
-- `crates/ferrite-sandbox/src/lib.rs` — `BrokerState` → `SandboxState`, added `PersistentAuditLog` + `run_demo()`
-- `crates/ferrite-shell/src/main.rs` — `"sandbox"` arm now calls `sandbox.run_demo()` instead of `ping()`
-
-**What changed:**
-- `BrokerState` renamed to `SandboxState`; `PersistentAuditLog` added as a field alongside `CapabilityBroker`; opened at `$TMPDIR/ferrite_sandbox.db`
-- `principal_id: Uuid` added to `SandboxState` so host functions can log which principal triggered each event
-- Each host function (`host_dom_read`, `host_network_fetch`, `host_storage_read`) now:
-  - Copies `principal_id` before the `append()` call (avoids borrow-checker split-borrow error)
-  - Appends `AuditEventKind::CapabilityGranted` or `CapabilityDenied` to `state.audit_log` after every broker decision
-- `run_demo(&mut self)` added to `ExtensionSandbox`:
-  1. Calls `test_dom_read` → prints granted response
-  2. Calls `test_network_fetch` → prints granted response
-  3. Calls `test_storage_read` → prints granted response
-  4. Revokes `dom_read_token` via `self.state.get()?.lock()`
-  5. Calls `test_dom_read` again → prints denied error string
-  6. Asserts `audit_log.log.verify_chain()` (panics on tampered chain)
-  7. Prints entry count summary line
-
-**Borrow fix:** `let principal_id = state.principal_id;` copied before `state.audit_log.append(...)` in all three host functions — needed because `append` takes `&mut self` on `audit_log`, creating a mutable borrow of `state`, which conflicts with the field read of `state.principal_id` in the same expression.
-
-**Verified:**
-- `cargo check -p ferrite-sandbox` — zero warnings
-- `cargo check -p ferrite-shell` — zero warnings
-
----
-
-### `ferrite-sandbox` + `hello-ext` — Extism sandbox scaffolding (2026-03-25)
-
-**Files created:**
-- `crates/ferrite-sandbox/Cargo.toml` — `extism = "1"`, `thiserror = "1"`, `log = "0.4"`
-- `crates/ferrite-sandbox/src/lib.rs`
-- `extensions/hello-ext/Cargo.toml` — `crate-type = ["cdylib"]`, `extism-pdk = "1"`, `[workspace]` to opt out of host workspace
-- `extensions/hello-ext/src/lib.rs`
-
-**Workspace + shell changes:**
-- `Browser/Cargo.toml` — added `"crates/ferrite-sandbox"` to workspace members
-- `crates/ferrite-shell/Cargo.toml` — added `ferrite-sandbox = { path = "../ferrite-sandbox" }`
-- `crates/ferrite-shell/src/main.rs` — added `"sandbox"` arm → `run_sandbox_smoke_test()` which loads `hello_ext.wasm` and calls `ping()`
-
-**Extism 1.x API (researched from extism-1.20.0 source):**
-- `Plugin::new(manifest, [], false)` — loads Wasm from a `Manifest`, no host functions, WASI off
-- `Manifest::new([Wasm::data(bytes)])` — constructs manifest from raw bytes
-- `plugin.function_exists(name)` — checks export exists with extism-compatible signature
-- `plugin.call::<(), String>(name, ())` — calls with no input, returns UTF-8 string output
-
-**SandboxError enum:** `LoadFailed(String)`, `CallFailed(String)`, `CapabilityDenied(String)`
-
-**ExtensionSandbox:**
-- `new(wasm_path)` — reads file, wraps in `Manifest`, instantiates `Plugin`
-- `ping()` — checks `function_exists("ping")`, calls it, returns `String`
-
-**hello-ext guest:**
-- `#[plugin_fn] pub fn ping(_: ()) -> FnResult<String>` returns `"pong"`
-- `#![no_main]` required by extism-pdk
-
-**Wasm build blocker:** The host machine uses Homebrew Rust which only ships the native target. The `wasm32-unknown-unknown` stdlib is not available without rustup. Build command once rustup is available:
-```
-cd extensions/hello-ext
-cargo build --target wasm32-unknown-unknown --release
-# Output: target/wasm32-unknown-unknown/release/hello_ext.wasm
-```
-
-**Verified:**
-- `cargo check -p ferrite-sandbox` — zero warnings
-- `cargo check -p ferrite-shell` — zero warnings
-
----
-
-### `ServoShell` — audit log integration + exit summary (2026-03-25)
-
-**File:** `crates/ferrite-servo/src/shell.rs`
-**File:** `crates/ferrite-servo/Cargo.toml`
-
-**Dependencies added:**
-```toml
-ferrite-audit-log = { path = "../ferrite-audit-log" }
-```
-
-**What changed:**
-- `PersistentAuditLog` added to `ServoShell` and `AppHandler` behind `Rc<RefCell<>>`, opened at `$TMPDIR/ferrite_servo.db` in `ServoShell::new()`
-- `FerriteWebViewDelegate` gains `principal_id: Uuid` and `audit_log: Rc<RefCell<PersistentAuditLog>>`
-- `load_web_resource` now appends `CapabilityGranted` or `CapabilityDenied` to the audit log on every broker decision
-- `AppHandler::print_exit_summary()` helper: calls `audit_log.log.verify_chain()`, prints verification result + entry count, then prints grant/denial counts computed from `entries`
-- `CloseRequested` and Escape both call `print_exit_summary()` before `event_loop.exit()`
-- WebViewBuilder comment updated to pass `principal_id` and `audit_log` into the delegate
-- New test `audit_log_records_grants_and_denials`: writes 2 grants + 1 denial, asserts chain valid, asserts counts correct
-
-**Verified:**
-- `cargo check -p ferrite-servo` — zero warnings
-- `cargo test -p ferrite-servo` — 2 tests, ok
-
----
-
-### `ServoShell` — broker integration + network interception (2026-03-25)
-
-**File:** `crates/ferrite-servo/src/shell.rs`
-**File:** `crates/ferrite-servo/Cargo.toml`
-
-**Dependencies added:**
-```toml
-ferrite-capability-broker = { path = "../ferrite-capability-broker" }
-uuid = { version = "1", features = ["v4"] }
-```
-
-**What changed:**
-- `CapabilityBroker` added to `ServoShell` behind `Rc<RefCell<>>` for shared interior-mutable access
-- On `ServoShell::new()`, a `NetworkFetch` token scoped to `"*"` (wildcard) with 3600s TTL is minted for the `"servo-engine"` principal — the default-allow grant
-- `ServoShell::broker()` and `ServoShell::network_token_id()` accessors added for external revoke/check
-- `AppHandler` gains `broker` and `network_token_id` fields (with `#[cfg_attr(not(feature="servo"), allow(dead_code))]` suppression)
-- `FerriteWebViewDelegate` now holds `broker: Rc<RefCell<CapabilityBroker>>` and `network_token_id: Uuid`
-- `load_web_resource` implemented on `FerriteWebViewDelegate` — the Servo v0.0.5 fetch interception hook:
-  - Fires for every outgoing request (navigation, sub-resource, XHR, fetch())
-  - Calls `broker.borrow().check(token_id, url)` → `Granted` drops load (proceeds) or `Denied` intercepts + cancels (blocks)
-  - On block: `println!("[ferrite] BLOCKED: {} reason: {:?}", url, reason)`
-- Unit test `revoke_blocks_subsequent_requests`: mints wildcard token → check returns Granted → revoke → check returns Denied
-
-**API finding documented in comments:**
-- Servo v0.0.5 exposes `WebViewDelegate::load_web_resource` as the sole fetch interception point
-- No lower-level `ResourceThread` hook is exposed — all interception goes through this delegate method
-
-**Verified:**
-- `cargo check -p ferrite-servo` — zero warnings
-- `cargo test -p ferrite-servo` — 1 test, ok
-
----
-
-### `ServoShell` — event loop improvements + load callback (2026-03-25)
-
-**File:** `crates/ferrite-servo/src/shell.rs`
-
-**What changed:**
-- Initial URL updated from `about:blank` → `https://example.com` in the WebViewBuilder comment block (authoritative when RenderingContext is wired in Block 4)
-- `notify_load_status_changed` added to `FerriteWebViewDelegate` — detects `LoadStatus::Complete` and prints `[ferrite] page load complete: <url>`
-- `WindowEvent::KeyboardInput` arm added to `window_event()` — Escape key (pressed, non-repeat) calls `event_loop.exit()`
-- `about_to_wait()` added to `AppHandler` — calls `servo.spin_event_loop()` on every winit event batch (equivalent to old `MainEventsCleared`), ensuring Servo makes progress even when no redraw is requested
-- New imports: `winit::event::ElementState`, `winit::keyboard::{Key, NamedKey}`
-
-**Verified:** `cargo check -p ferrite-servo` — clean, no warnings.
-
----
-
-### `ferrite-ui` — audit log viewer panel (2026-03-25)
-
-**Files changed:**
-- `crates/ferrite-ui/Cargo.toml` — added `ferrite-audit-log = { path = "../ferrite-audit-log" }`
-- `crates/ferrite-ui/src/lib.rs` — full audit panel implementation
-
-**What was added to state:**
-- `show_audit_panel: bool` (default `false`)
-- `audit_entries: Vec<AuditEntry>` (default empty)
-
-**New messages:**
-- `ToggleAuditPanel` — flips `show_audit_panel`
-- `RefreshAuditLog` — calls `PersistentAuditLog::load("$TMPDIR/ferrite_sandbox.db")`; on success sets `audit_entries = log.log.entries`; on any error (file not found, chain broken) sets `audit_entries = vec![]`
-
-**Toolbar row** added below the address bar:
-- "Audit Log" toggle button — active style (primary accent) when panel is open, inactive style otherwise
-- "Refresh" button — only rendered when panel is open
-
-**Audit panel** (250px fixed height, shown when `show_audit_panel` is true):
-- Header row with columns: Seq | Timestamp | Kind | Principal | Capability | URL
-- Scrollable data rows at size 12; empty state shows a hint message
-- Kind column coloured: GRANTED=green, DENIED=red, EXERCISED=blue, BLOCKED=orange
-- URLs truncated to 40 chars with "..." suffix
-- Principal IDs truncated to 8 chars (UUID prefix)
-- Panel sits between toolbar and content area — does not replace it
-
-**Verified:** `cargo build -p ferrite-ui` — zero warnings
-
----
-
-### `ferrite-servo/session.rs` — rustls CryptoProvider panic fixed (2026-03-25)
-
-**File changed:** `crates/ferrite-servo/src/session.rs`
-
-**Problem:** `thread 'ResourceManager' panicked: Could not automatically determine the process-level CryptoProvider` — rustls 0.23 requires `CryptoProvider::install_default()` to be called once before any TLS work. Servo's network thread hit this before our code could install it.
-
-**Fix:** Added `aws_lc_rs::default_provider().install_default()` at the top of `HeadlessServoSession::new()`. Returns `Err` silently if already installed (safe to call multiple times / from multiple tabs).
-
-**Verified:** `cargo build -p ferrite-shell --features ferrite-servo/servo` — clean build, 15s
-
----
-
-### `ferrite-servo/session.rs` — compile errors fixed (2026-03-25)
-
-**Files changed:**
-- `crates/ferrite-servo/src/session.rs` — fixed two `Display` format errors + removed unused import
-- `crates/ferrite-servo/Cargo.toml` — added `rustls = { version = "0.23", features = ["aws_lc_rs"] }` and `url = "2"`
-
-**Errors fixed:**
-- `surfman::error::Error` doesn't implement `std::fmt::Display` — changed `{}` → `{:?}` in `SoftwareRenderingContext::new` and `make_current` error format strings
-- Removed unused `use url::Url` import (Url only used via fully qualified `url::Url::parse(...)` calls)
-- `rustls::crypto::aws_lc_rs` unresolved — workspace resolver was picking the `ring` backend; forced `aws_lc_rs` via explicit dep with feature
-
-**Verified:**
-- `cargo check -p ferrite-servo --features servo` — zero errors, 3 warnings (pre-existing dead_code in shell.rs)
-- `cargo check -p ferrite-ui` — zero errors
-
----
+- Tab bar: `tabs: Vec<String>` + `active_tab: usize`; `AddTab` / `CloseTab(usize)` / `SelectTab(usize)`; close button disabled when only one tab remains
+- Address bar: `address_bar_input: String` + `tab_urls: Vec<String>` (parallel to `tabs`); `AddressBarChanged` / `NavigateRequested`; tab switches reflect the active tab's URL back into the address bar
 
 ### `ferrite-servo` + `ferrite-ui` — Task 5 Block 1: Servo embedded in Iced (2026-03-25)
 
@@ -1169,73 +757,98 @@ uuid = { version = "1", features = ["v4"] }
 **`HeadlessServoSession` (ferrite-servo/src/session.rs):**
 - Uses `SoftwareRenderingContext` (CPU rasteriser — no GPU/window handle required, no winit event loop)
 - The stub type (`#[cfg(not(feature = "servo"))]`) compiles without the feature and returns `Err` from `new()` so the UI degrades gracefully
-- `new(width, height)` — creates rendering context, broker + wildcard NetworkFetch token, audit log at `$TMPDIR/ferrite_servo_session.db`, Servo engine, WebView loaded to `about:blank`
+- `new(width, height)` — creates rendering context, audit log at `$TMPDIR/ferrite_servo_session.db`, Servo engine, WebView loaded to `about:blank`
 - `navigate(&str)` — calls `webview.load(parsed_url)`
 - `spin()` — calls `servo.spin_event_loop()` then `read_to_image(DeviceIntRect)` to capture RGBA frame
 - `get_frame() -> Option<(u32, u32, Vec<u8>)>` — returns latest frame pixels
 - `resize(w, h)` — resizes rendering context and WebView
-- `HeadlessDelegate` — implements `WebViewDelegate` with broker-gated `load_web_resource` + audit logging
 
 **Iced integration (ferrite-ui/src/lib.rs):**
 - `FerriteBrowser` gains `servo_shell: Option<HeadlessServoSession>` and `servo_frame: Option<(u32, u32, Vec<u8>)>`
-- `FerriteBrowserMessage` gains `ServoReady` and `ServoFrame`
-- `subscription(state)` — returns `time::every(16ms).map(|_| ServoFrame)` when session is active, else `Subscription::none()`
-- `update()` `ServoFrame` arm — calls `session.spin()`, stores `get_frame()` result in `state.servo_frame`
-- `update()` `NavigateRequested` arm — also calls `session.navigate(&url)`
-- `view()` content area — if `servo_frame` is `Some`, renders `ServoImage::new(ImageHandle::from_rgba(w, h, bytes))`; otherwise falls back to placeholder text
-- `launch()` uses `run_with()` to initialise `HeadlessServoSession::new(1280, 600)` on startup and emit `ServoReady`
-
-**Image widget path:** `iced_widget::image::{Handle, Image}` (feature-gated `"image"` in `iced_widget`) — `iced::widget` re-exports `Image` via glob but not `Handle`, so `iced_widget` is added as a direct dep with `features = ["image"]`.
-
-**Servo feature:** All `HeadlessServoSession` logic inside `#[cfg(feature = "servo")]` — requires `cargo build --features ferrite-servo/servo`. Without the feature the stub compiles and the UI runs without a live viewport.
-
-**Verified:**
-- `cargo check -p ferrite-servo` — zero errors (non-servo path)
-- `cargo check -p ferrite-ui` — zero errors
-- `cargo check -p ferrite-shell` — zero errors
-- `cargo fmt --check` — clean
-
----
+- `subscription(state)` — returns `time::every(16ms).map(|_| ServoFrame)` when session is active
+- `update()` `ServoFrame` arm — calls `session.spin()`, stores `get_frame()` result
+- `view()` content area — renders `ServoImage::new(ImageHandle::from_rgba(w, h, bytes))` when a frame exists
 
 ### `ferrite-ui` — Task 5 Block 2: per-tab Servo sessions (2026-03-25)
 
 **File changed:** `crates/ferrite-ui/src/lib.rs`
 
-**What changed:**
-- `servo_shell: Option<HeadlessServoSession>` + `servo_frame` replaced with `servo_sessions: HashMap<usize, HeadlessServoSession>` keyed by tab index
-- `AddTab` — calls `HeadlessServoSession::new(1280, 600)` and inserts at the new tab index
-- `CloseTab(i)` — removes `servo_sessions[i]`, then re-keys all entries with index > i down by 1 to stay aligned with the `tabs` Vec
-- `SelectTab(i)` — no extra work; `view()` reads from `servo_sessions[active_tab]` directly
-- `NavigateRequested(url)` — calls `servo_sessions[active_tab].navigate(&url)` if present
-- `ServoFrame` tick — spins **all** sessions (so background tabs stay alive / don't stall Servo's internal queues)
-- `view()` content area — reads `servo_sessions[active_tab].get_frame()` for display; placeholder shown when no frame available
-- `subscription()` — fires when `servo_sessions` is non-empty
-- `launch()` / `run_with()` — seeds tab 0 by inserting into `servo_sessions` instead of `servo_shell`
+- `servo_shell` replaced with `servo_sessions: HashMap<usize, HeadlessServoSession>` keyed by tab index
+- `AddTab` creates a new session; `CloseTab(i)` removes and re-keys; `ServoFrame` tick spins all sessions
+- `view()` reads from `servo_sessions[active_tab]`
 
-**Verified:**
-- `cargo check -p ferrite-ui` — zero errors
-- `cargo fmt --check` — clean
+### `ferrite-servo/session.rs` — rustls CryptoProvider panic fixed (2026-03-25)
+
+- **Problem:** `thread 'ResourceManager' panicked: Could not automatically determine the process-level CryptoProvider` — rustls 0.23 requires `CryptoProvider::install_default()` once before any TLS work
+- **Fix:** Added `aws_lc_rs::default_provider().install_default()` at the top of `HeadlessServoSession::new()`; returns `Err` silently if already installed
+- **Verified:** `cargo build -p ferrite-shell --features ferrite-servo/servo` — clean build, 15s
+
+### `ferrite-servo/session.rs` — compile errors fixed (2026-03-25)
+
+- `surfman::error::Error` doesn't implement `Display` — changed `{}` → `{:?}` in error format strings
+- Removed unused `use url::Url` import
+- Forced `aws_lc_rs` rustls backend via explicit dep with feature
+- **Verified:** `cargo check -p ferrite-servo --features servo` — zero errors
 
 ---
 
-## What To Do Next (pick up here after plan refreshes)
+## What To Do Next (pick up here)
 
-1. **Build hello-ext Wasm** — requires `rustup target add wasm32-unknown-unknown`. Once available:
+> Design is complete and frozen: `EVALUATION_PLAN.md` (evaluation-facing), `CLAUDE.md` →
+> *Tool Vocabulary and Capability Model* (vocabulary canon), and `FINALIZED_DECISIONS.md`
+> (rationale, Decisions 1–6) are the authoritative references. No design decisions remain.
+> The work below is implementation, in dependency order.
+
+1. **Execute the pre-Task-19 vocab-fix block** (upstream of the dataset; touches `tool_decision`,
+   `dry_run.rs`, `comparator.rs` only — no Servo). Per `CLAUDE.md` and `FINALIZED_DECISIONS.md`:
+   - rewrite `rule_based_must_use` + the predictor allowlist to emit ONLY the capability
+     vocabulary (six action classes; cut all phantom tool IDs — `email.*`, `calendar.*`,
+     `form.submit`, `report.write`, `contacts.*`, `storage.*`, `network.fetch`, `screenshot`);
+   - replace the lossy `DryRunRecord.tools_called: HashSet<ToolId>` with an ordered, origin-bound
+     event log (`Vec<{ tool, origin }>`); track `current_origin` in `RecordingExecutor`
+     (update on `Navigate`, seed from `AgentTask.context_url`);
+   - rewrite `compare()` as lower-then-compare with per-origin attribution + specificity
+     precedence (exact > domain_suffix > task_open) + the general `unscopable` rule
+     (`js.execute` always a deviation);
+   - unify key loading: ONE shared loader (env `FERRITE_GEMINI_API_KEY` first, then
+     `gemini_key.txt` next to the exe) used by BOTH `gemini.rs` and `tool_decision`; warn (not
+     fail) if the predictor initializes keyless during an eval run.
+   - The existing `comparator.rs` tests encode the old single-vocabulary model and will be
+     rewritten as part of this block (expected, not a regression).
+
+2. **Task 18 — defense-mode toggle.** `DefenseMode { On, SanitizerOnly, Off }`; switchable via
+   setter + `FERRITE_DEFENSE` env var. `Off` bypasses the whole predict→dry-run→compare→consent
+   loop; `SanitizerOnly` runs the sanitizer but bypasses the loop. For the §4 baseline + ablation.
+
+3. **Task 19 — dataset pipeline (`dataset.rs`).** Implement to the finalized two-layer schema in
+   `EVALUATION_PLAN.md` §7 (CaseDefinition + ExecutionRecord; the `GroundTruth` enum). Flat
+   `src/dataset.rs` (not `src/dataset/mod.rs`); `rusqlite` `0.37` bundled; test temp paths via
+   `std::env::temp_dir()`. Supersedes the thin `IpiEvent`/`IpiLabel` in `comparator.rs`.
+
+4. **Task 20 — sanitizer T1b extension**, then **Tasks 21–22** (`ferrite-eval` harness +
+   AgentDojo Slack adapter). Measurement-gated values (corpus N, AgentDojo Slack count,
+   category-5 Tier A/B) are settled by a pilot/spike during corpus construction, not now.
+
+5. **Re-verify the full workspace build/test matrix** (recorded from prior sessions, not
+   necessarily re-run today):
    ```
-   cd extensions/hello-ext
-   cargo build --target wasm32-unknown-unknown --release
+   cargo build --workspace
+   cargo test --workspace
+   cargo clippy --workspace -- -D warnings
    ```
-   Then `cargo run -p ferrite-shell sandbox` will execute the full `run_demo()` flow.
 
-2. **Test full servo feature build** — `cargo build -p ferrite-shell --features ferrite-servo/servo` should now compile end-to-end. Run the UI with `cargo run -p ferrite-shell ui` to verify the viewport renders Servo frames.
-
-3. **Block 4 RenderingContext (optional)** — wire `WindowRenderingContext::new(display_handle, window_handle, size)` into the winit `ServoShell` if GPU-accelerated rendering is needed. The headless path via `SoftwareRenderingContext` is fully operational.
+6. **Servo feature build check** — `cargo build -p ferrite-shell --features ferrite-servo/servo`
+   should compile end-to-end; `cargo run -p ferrite-shell ui` to confirm the viewport renders
+   Servo frames. First build compiles Servo from source (~10–20 min).
 
 ---
 
 ## Known Issues / Notes
 
 - `check.txt`, `check2.txt`, `check_output.txt` exist in `Browser/` root — scratch files from earlier testing. Consider deleting.
-- Rate limiting is tracked on `CapabilityToken` via `rate_limit: Option<u32>` but not enforced in `CapabilityBroker::check()` yet — intentional, enforcement comes in Month 3.
-- Servo dependency resolved: package is `libservo` (not `servo`). The servo repo root is a workspace-only manifest; the embedding library is at `components/servo/` with package name `libservo` and lib name `servo` (so Rust imports use `use servo::...`). Dep specified in `ferrite-servo/Cargo.toml` as `libservo = { git = "...", tag = "v0.0.5", optional = true }`, enabled via `--features servo`. Remaining work: wire `RenderingContext` for `WebViewBuilder` (Block 4).
-- `rusqlite` upgraded from `0.31` → `0.37` in `ferrite-audit-log` to resolve `libsqlite3-sys` link conflict with `libservo` (which requires `rusqlite ^0.37`).
+- **CI does not cover Linux.** The matrix is Windows + macOS only (Linux removed 2026-04-13). The Linux-only network-namespace path in `ferrite-ipi::containment` (component 4, via `nix`) is therefore never compiled by CI. Account for this when reasoning about test coverage, and note it as a limitation in any evaluation writeup.
+- Mixed editions across the workspace: `ferrite-audit-log` is `edition = "2024"`, `ferrite-ipi` is `edition = "2021"`. Not a bug, but standardise deliberately if desired rather than letting it drift.
+- Servo dependency: package is `libservo` (git, tag `v0.0.5`), lib name `servo` (so imports use `use servo::...`), specified as `optional = true` and enabled via `--features servo`.
+- `rusqlite` is `0.37` with `features = ["bundled"]` workspace-wide. It was bumped from an earlier `0.31` to resolve a `libsqlite3-sys` link conflict with `libservo` (which requires `rusqlite ^0.37`). Never reintroduce a second rusqlite version.
+- Inherited Dependabot alerts transitive from Servo v0.0.5 are non-actionable until the next Servo bump.
+- **Key-loading divergence (to fix in the vocab-fix block).** `gemini.rs` reads the Gemini key via env + `gemini_key.txt` (the intended runtime workaround, so the key is never committed). But `tool_decision::LlmMayUsePredictor::from_env()` reads `FERRITE_GEMINI_API_KEY` ONLY — no file fallback — so if the env var is unset but `gemini_key.txt` is present, the agent runs keyed while the predictor silently runs keyless (empty may-use, rules-only fingerprinting). This is a config confound that would worsen M3 for reasons unrelated to the defense. Fix = one shared loader (env first, then file) used by both; warn (not fail) on a keyless predictor during eval runs. See `FINALIZED_DECISIONS.md` consequence 5.

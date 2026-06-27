@@ -1,238 +1,297 @@
 # Ferrite Browser — Project Reference
 
-> A comprehensive reference document for the Ferrite Browser project.
-> This is a general-purpose reference — for the Claude Code CLI context file, see `CLAUDE.md`.
+> **Status of this document.** This is the human-facing reference for Ferrite: what it is,
+> why it exists, how it is built, and where the research is headed. It is the authoritative
+> *narrative* companion to the two operational files:
+> - `CLAUDE.md` — coding rules the Claude Code agent reads (source of truth for build/code).
+> - `PROGRESS.md` — dated change log + milestone status (source of truth for what is done).
+>
+> When this document and those two disagree on a build detail, **they win** — this file is
+> the explanation, they are the record. This file should be kept as accurate as they are:
+> a stale reference is a future context-poisoning vector, which is the exact failure this
+> document set was rewritten (2026-06) to prevent.
+>
+> **Academic goals in this document are provisional.** Research questions, target venues,
+> and contribution framing may change as the work matures. They are included to orient
+> collaborators and ground the paper, not as commitments.
 
 ---
 
-## 1. Project Overview
+## Companion Documents
 
-**Ferrite Browser** is a developer-focused, Rust-based web browser built on the Servo rendering engine. It is designed from the ground up to treat AI agents as first-class principals with formal capability-based access control and tamper-evident audit logs.
+This document is the **hub** — the stable, narrative "what Ferrite is" reference. The
+following companion files carry the operational detail. Start here, navigate out:
 
-The project is a major academic submission (2026) developed by a three-person team over an 8-month timeline (24 person-months).
+| Document | Location | Purpose | Stability |
+|----------|----------|---------|-----------|
+| **PROJECT_REFERENCE.md** | *(this file)* | Narrative hub: what Ferrite is, architecture, scope, research framing | Stable |
+| **EVALUATION_PLAN.md** | `./EVALUATION_PLAN.md` | How the IPI defense will be evaluated: corpora, metrics, baseline, credibility strategy | **Living / volatile** |
+| **CLAUDE.md** | `./Browser/CLAUDE.md` | Coding rules for the Claude Code agent (source of truth for build/code) | Stable |
+| **PROGRESS.md** | `./Browser/PROGRESS.md` | Dated change log + milestone status (source of truth for what is done) | Append-only record |
+| **TO-DO.md** | `./Browser/TO-DO.md` | Task/block breakdown with exit conditions | Evolves with work |
 
-### Target Personas
-- **"Agent Alex"** — AI/agent developers needing governance and auditability over LLM browser automation
-- **"Pentester Pete"** — security researchers needing deep extension inspection
-- **"Private Priya"** — privacy-conscious developers
+> **A note on stability.** Treat *Stable* documents as settled fact. Treat **EVALUATION_PLAN.md
+> as expected to churn** — corpus sizes, attack categories, and metric thresholds will change
+> as the work proceeds; do not read it as committed fact. This separation is deliberate: it
+> keeps volatile planning out of the stable reference, preventing the document-drift /
+> context-poisoning the 2026-06 rewrite was done to fix.
 
-### Core Differentiator
-Capability-based agent governance: every privileged browser action requires an unforgeable capability token evaluated against composable Rego policies, recorded in a tamper-evident audit log. No other browser — including Perplexity Comet, ChatGPT Atlas, Dia, Brave, Chrome, or Edge — implements this.
+## 1. What Ferrite Is
 
-### Three Core Deliverables
-1. **Working browser prototype** — capability-brokered agent governance on Servo (Track A) and CEF (Track B)
-2. **Two standalone developer tools** — Extension Security Analyzer (CLI) and Agent Action Inspector (UI)
-3. **Research paper** — first formal model for capability-based governance of LLM browsing agents (targeting NDSS 2027 or ACSAC 2026)
+Ferrite is a developer-focused, Rust-native browser built on the Servo engine that treats
+AI agents as **first-class principals** and defends them against **Indirect Prompt Injection
+(IPI)** at the architectural level rather than the model level.
 
----
+The central claim is simple and strategic: prompt injection cannot be reliably solved by
+training better models — even the labs building those models have said as much. So Ferrite
+does not try. Instead it constrains *what an agent is allowed to do* and *makes every
+deviation visible and consent-gated*, so that a successful injection has a bounded blast
+radius regardless of what the malicious instructions say. Security is enforced by the
+architecture, independent of model behaviour.
 
-## 2. The Problem
-
-Browsers were designed 30 years ago for humans clicking links. In 2026, AI agents autonomously browse, fill forms, make purchases, and execute complex multi-step workflows inside the same architecture. The result is a governance vacuum.
-
-Agentic browsers like Comet, Atlas, and Dia grant AI agents the same privileges as the human user with no formal governance model, no audit trail, and no capability-based access control. Traditional browser security (same-origin policy, sandboxing) becomes irrelevant when an AI agent executes with full user privileges.
-
-OpenAI admitted in December 2025 that prompt injection "may never be fully solved" at the model level — making architectural enforcement essential.
-
-### Real Attacks in 2025
-- **CometJacking** — exfiltrated emails and calendar data via hidden instructions (LayerX, Oct 2025)
-- **Screenshot Injection** — hidden text hijacked Comet and Fellou agents (Brave, Oct 2025)
-- **Tainted Memories** — poisoned Atlas's long-term memory via CSRF (LayerX, Oct 2025)
-- **HashJack** — instructions hidden in URL fragments (Cato Networks, Nov 2025)
-
----
-
-## 3. Research Gaps Ferrite Fills
-
-Academic research has advanced browser security and prompt injection defenses in parallel, but no prior work bridges them into a unified architectural solution for agentic browsing.
-
-| Research Area | Key Works | Gap Ferrite Fills |
-|---------------|-----------|-------------------|
-| Browser Compartmentalization | Capsicum (USENIX 2010), COWL (OSDI 2014), RLBox (USENIX 2020) | None extended to agentic contexts where AI acts with user privileges |
-| Prompt Injection Research | Greshake et al. 2023, Nasr et al. Oct 2025 | All defenses are model-level. No architectural enforcement exists |
-| Browser Agent Benchmarks | WASP, BrowseSafe, SecureWebArena (2025) | Benchmarks describe the problem but propose no architectural defense |
-| Transparency & Auditability | Certificate Transparency (RFC 6962), Sigstore/Rekor | Never applied to browser agent action auditability |
-
-**Core research gap:** No system provides capability-mediated governance of browser agent actions with cryptographic verifiability. Ferrite fills this by combining the Capsicum/COWL lineage with CT-style audit logs.
+This framing is deliberate. Competing on model training requires compute and data Ferrite
+does not have. Competing on *architecture* is a place where a small, focused team can make a
+genuine, defensible contribution.
 
 ---
 
-## 4. Architecture Summary
+## 2. The Main System: Indirect Prompt Injection Defense (`ferrite-ipi`)
 
-Ferrite runs as multiple logical components within a single OS process (using Tokio async tasks). Process isolation is future work.
+The IPI defense is the heart of the project — both the primary engineered system and the
+primary research contribution. Everything else in the browser exists to support, host, or
+make verifiable what `ferrite-ipi` does.
 
-### Trusted Zone
-- **UI Shell (Iced)** — browser chrome, consent dialogs, custom DevTools panels
-- **Capability Broker** — central authority: mints tokens, validates tokens, evaluates policies, classifies risk
-- **Policy Engine (Regorus)** — evaluates Rego policies against capability request context
-- **Risk Classifier** — categorizes requests as low/medium/high risk
-- **Audit System** — tamper-evident log with hash chain (upgrading to Merkle tree at month 5)
+### 2.1 The spine: predict → dry-run → compare → consent
 
-### Untrusted Zone
-- **Servo Engine (Track A)** — renders web content via SpiderMonkey + WebRender/wgpu
-- **Extension Sandbox (Extism/Wasmtime)** — runs Wasm extensions with capability-gated host functions
-- **Agent Runtime** — accepts WebSocket connections, routes JSON-RPC commands through broker
-- **Network Stack** — hyper + rustls + quinn + adblock-rust
-- **CEF Harness (Track B)** — Chromium via cef-rs, proves engine-agnostic architecture
+The defense is a defense-in-depth loop with one core mechanism:
 
-### Trust Boundary Crossing Rules
-- Untrusted → Trusted: only via structured capability requests over async channels
-- Trusted → Untrusted: only via opaque, unforgeable, scoped capability tokens
-- Broker NEVER passes raw privileged handles across the boundary
-- UI NEVER renders unsanitized untrusted content in consent dialogs
+1. **Predict** the agent's expected behaviour for a task — which tools it *must* use and
+   *may* use, and which origins it should legitimately touch — producing an expected
+   **fingerprint**.
+2. **Dry-run** the agent's plan in a sandboxed, network-contained environment where it
+   touches synthetic data instead of real user data and reaches no real network endpoint.
+3. **Compare** the *actual* tools called and origins touched during the dry-run against the
+   *expected* fingerprint, surfacing any deviation (extra tools, unexpected origins).
+4. **Consent**-gate the deviation: if the dry-run stayed within the expected fingerprint,
+   the real run proceeds; if it deviated, the user is shown exactly what the agent tried to
+   do beyond expectations and must approve or reject each extra action before anything real
+   happens.
 
----
+The insight is that an indirect injection almost always manifests as *behaviour the task did
+not call for* — exfiltrating data, calling tools the prompt never needed, reaching origins
+unrelated to the task. By establishing what "expected" looks like first and forcing anything
+beyond it through a human checkpoint in a trusted UI surface (isolated from web content), the
+architecture contains the injection without needing to detect the malicious *text* at all.
 
-## 5. Six Security Gaps Ferrite Solves
+### 2.2 The seven components
 
-| Gap | Existing Browsers | Ferrite's Solution |
-|-----|-------------------|--------------------|
-| Capability-based agent security | MV3 permission model (Chrome/Brave); no formal system (Comet/Atlas) | Broker-minted scoped tokens + WASI sandbox. Agents are first-class principals. |
-| Verifiable agent audit trail | NetLog is diagnostic, not cryptographic. Comet/Atlas have no tamper-evident logs. | CT-style hash-chained → Merkle log. Cryptographic proof of every agent action. |
-| Prompt injection hardening | Model-level training + classifiers — OpenAI admits insufficient. | Risk-tiered gating, step-up consent in trusted UI isolated from web content. |
-| Extension Wasm sandboxing | Process isolation + permission prompts (MV3). Coarse-grained. | Per-capability, per-origin, rate-limited Wasm component grants. |
-| Content blocking as primitive | Brave Shields blocks ads but not connected to formal audit. | adblock-rust engine with every block logged to cryptographic audit system. |
-| Governed AX tree for agents | No existing browser provides governed accessibility tree access. | AX tree exposed only through capability-gated broker. First-of-kind. |
+`ferrite-ipi` is built from seven components. (Module names are authoritative in `CLAUDE.md`;
+this is the conceptual view.)
 
----
+1. **Hybrid tool-decision engine** — produces the expected fingerprint. Combines a
+   deterministic rule-based layer (keyword → must-use tools) with an LLM-backed predictor
+   (temperature 0) for may-use tools. The two sets are kept strictly disjoint; the LLM layer
+   fails safe to an empty set on any error and filters its output against an allowlist so the
+   model cannot inject arbitrary tool IDs.
+2. **HTML/JS sanitizer** — strips injection-delivery vectors from page content (scripts,
+   event handlers, hidden elements) and scans extracted JS for known exfiltration and
+   instruction-override patterns; hashes raw content for the audit trail.
+3. **Synthetic data twin** — generates plausible-but-fake user data (AES-256-GCM encrypted at
+   rest, TTL rotation) so the dry-run never exposes real credentials, contacts, or PII to a
+   possibly-compromised agent.
+4. **Dual-layer network containment** — an application-level interceptor (all platforms) plus
+   a Linux network namespace (Linux-only), ensuring the dry-run reaches no real endpoint and
+   that every attempted outbound request is logged instead of sent.
+5. **Dry-run recorder** — orchestrates the contained dry-run, recording every tool call,
+   origin touched, and data field accessed without ever touching the real rendering engine.
+6. **Fingerprint comparator + consent UI** — computes the diff between expected and actual
+   fingerprints and drives the in-UI consent flow (approve/reject per extra action) before
+   any real execution.
+7. **IPI adversarial dataset pipeline** — captures confirmed injection events (true
+   positives) and benign deviations (false positives) into a labeled dataset for evaluation
+   and as a research artifact.
 
-## 6. Technology Stack
+### 2.3 Behavioural notes that are easy to get wrong
 
-### What We Build (Core Contribution)
-1. **Capability Broker + Token System** — central enforcement point, pure Rust, zero external privilege dependencies
-2. **Risk Classifier + Agent Governance** — Rego/OPA policy bundles via Regorus, risk tiers with step-up consent
-3. **Verifiable Audit Log** — hash-chain evolving to Merkle tree with rs_merkle
-4. **DevTools + Agent Protocol** — Capability Inspector, Agent Timeline, Audit Log Viewer (Iced), JSON-RPC over WebSocket
-
-### What We Reuse (Open Source Foundation)
-- **Browser Engine:** Servo v0.0.5 (MPL-2.0, pinned), CEF/Chromium (BSD, Track B)
-- **Sandbox & Policy:** Extism/Wasmtime (Apache-2.0), Regorus (MIT)
-- **Network & Crypto:** Tokio, hyper, rustls, quinn, rs_merkle, tracing + OpenTelemetry
-- **Storage & UI:** rusqlite, keyring, adblock-rust (MPL-2.0), Iced (MIT)
-
----
-
-## 7. Competitive Landscape (2025–2026)
-
-| Browser | Key Features | Security Posture |
-|---------|-------------|-----------------|
-| Perplexity Comet | Chromium-based, shopping/booking/email tasks | Vulnerable: CometJacking, Amazon lawsuit. No capability model. |
-| ChatGPT Atlas | RL-based red teaming + adversarial model updates | Admits prompt injection "unlikely to ever be fully solved." No crypto audit trail. |
-| Dia (Atlassian) | Replaced Arc ($610M acquisition), AI-first with memory & skills | Lighter on security research. No formal capability disclosures. |
-| Brave + Leo AI | 100M+ users, privacy-first with Shields | Developing "fine-grained permissions" — not yet shipped. |
-| Chrome / Edge | Gemini + Copilot integrations | Published agentic security paper (Dec 2025). Incremental approach. |
-
-**Key insight:** Every major player is adding AI agents to browsers. None have implemented formal capability-based access control or verifiable audit trails for agent actions.
+- Open-ended or vague prompts correctly produce **empty fingerprints**. This is intended: the
+  system assumes reasonably specific user prompts, and an empty expectation simply means
+  everything routes through consent.
+- Fingerprints **accumulate across turns** within a session.
+- The LLM may-use layer is **optional** — absent an API key, the engine runs rules-only and
+  the may-use set is empty.
 
 ---
 
-## 8. Implementation Plan (Months 1–2 Focus)
+## 3. Supporting Pillars
 
-### Month 1: Foundation
+These are genuine contributions, but in the current framing they *support* the IPI system
+rather than headline it.
 
-**Tasks:**
-- `ferrite-types` crate — shared vocabulary (CapabilityToken, AuditEvent, CapabilityRequest, PolicyResult, RiskLevel, etc.)
-- Servo v0.0.5 embedding shell — basic Iced window rendering a web page
-- `ferrite-broker` standalone library — token minting, validation, policy evaluation via Regorus
-- `ferrite-audit` — hash-chain append-only log writer + SQLite index for queries
-- `ferrite-policy` — Regorus integration, policy file loading from `policies/` directory, risk classifier
-- CI/CD pipeline (GitHub Actions) — build, test, clippy, fmt checks on all crates
-- Docker devcontainer — reproducible build environment with all Servo dependencies
-- Iced UI shell — basic browser window with tab bar, address bar, content area
+### 3.1 Verifiable audit log (`ferrite-audit-log`)
 
-**Milestone:** Servo renders a page. Broker passes unit tests. CI green. Verified by screenshot of rendered page, test report, CI badge.
+A SHA-256 hash-chained, append-only log persisted to SQLite, recording security-relevant
+events. This is the **verifiability layer** beneath the IPI defense: it turns "the agent was
+contained" into "we can cryptographically demonstrate, after the fact, exactly what the agent
+did and that any deviation was consent-gated." The design lineage is Certificate-Transparency
+-style append-only logging applied to agentic browser actions — an application of an
+established transparency primitive to a domain it has not been used in before.
 
-**Dependencies:** ferrite-types blocks everything. Servo embedding and ferrite-broker are independent and can proceed in parallel.
+### 3.2 Capability-lineage thinking
 
-### Month 2: Integration
+The project draws on the Capsicum/COWL capability-sandboxing lineage — the idea that an
+untrusted principal should hold only explicitly granted, scoped authority. In the current
+scope this shows up as the *conceptual model* (agents as principals, tools as the capability
+surface, fingerprints as expected-authority bounds) rather than as a standalone capability
+broker. The full broker that enforced this with minted tokens is **deferred** (see §6).
 
-**Tasks:**
-- Broker ↔ Servo integration — request interception via Tokio async channels
-- `ferrite-sandbox` — Extism setup, Wave 1 host functions (host_dom_read, host_network_fetch, host_storage_read, host_storage_write)
-- Audit log viewer panel in Iced — displays events from audit system via broadcast channel
-- Integration testing: extension loads in sandbox, calls host_dom_read through broker, receives DOM data
+---
 
-**Milestone:** Extension loads in sandbox. Broker integrated with Servo. Demo: extension calls host_dom_read and receives DOM data. Verified by demo recording.
+## 4. Browser Infrastructure (Stage 1)
 
-**Dependencies:** Needs broker + Servo from month 1. Sandbox needs broker.
+The IPI system needs a real browser to defend. Stage 1 built that browser, across the
+non-IPI crates:
 
-### Critical Path
+- **`ferrite-shell`** — top-level binary; CLI dispatch; smoke tests.
+- **`ferrite-servo`** — Servo (v0.0.5) rendering integration via a headless session model;
+  handles navigation, input forwarding, frame capture, multi-tab isolation.
+- **`ferrite-ui`** — Iced dark-mode UI: tabs, navigation, address bar, JS console, audit-log
+  viewer, and the agent sidebar that hosts the IPI consent flow.
+- **`ferrite-agent`** — the agent runtime: a `BrowserTool` model, the `AgentRuntime` and
+  `ToolExecutor` traits, a Gemini function-calling backend, and a token-bucket rate limiter.
+  This is the layer `ferrite-ipi` wraps and governs.
+
+---
+
+## 5. Architecture at a Glance
+
 ```
-ferrite-types → ferrite-broker → Servo integration → end-to-end capability loop
-→ agent runtime → agent governance demo → adversarial evaluation → paper
+            ┌──────────────────────────────────────────────┐
+            │                ferrite-ui (Iced)              │
+            │   tabs · nav · JS console · audit viewer       │
+            │   agent sidebar  ── hosts ──► IPI consent flow │
+            └───────────────┬───────────────┬───────────────┘
+                            │               │
+                  browser viewport     agent task
+                            │               │
+            ┌───────────────▼───┐   ┌───────▼────────────────────────┐
+            │   ferrite-servo    │   │         ferrite-ipi             │
+            │  (Servo v0.0.5)    │   │  predict → dry-run → compare →  │
+            │  render · input ·  │   │            consent              │
+            │  frames · tabs     │   │  7 components (see §2.2)        │
+            └────────────────────┘   └───────┬────────────────────────┘
+                                             │ governs
+                                     ┌───────▼────────────┐
+                                     │   ferrite-agent     │
+                                     │  AgentRuntime ·      │
+                                     │  ToolExecutor ·      │
+                                     │  Gemini · rate limit │
+                                     └───────┬─────────────┘
+                                             │ every security event
+                                     ┌───────▼─────────────┐
+                                     │  ferrite-audit-log   │
+                                     │  SHA-256 hash chain  │
+                                     │  + SQLite (verifiable)│
+                                     └─────────────────────┘
 ```
 
-### Risk-Adjusted Contingency Plans
-| Risk | Trigger | Contingency |
-|------|---------|-------------|
-| Servo embedding takes >4 weeks | End of month 1, no rendered page | Pivot to CEF-primary. Servo becomes research track. |
-| Extism proves too constraining | End of month 2, host functions don't work | Switch to raw Wasmtime immediately. Accept 3-week delay. |
-| Servo upgrade at month 4 breaks things | >1 week on upgrade | Abort upgrade. Stay on original pin. |
-| Agent LLM API costs >$200/month by month 4 | Budget exceeded | Switch to local LLM (Ollama + Llama 3). Reserve API for final eval. |
-| Team member leaves/unavailable | Any time | Prioritize critical path items. Defer standalone tools and polish. |
+The active workspace is exactly six crates: `ferrite-shell`, `ferrite-servo`, `ferrite-ui`,
+`ferrite-audit-log`, `ferrite-agent`, `ferrite-ipi`. This is verified against `Cargo.toml`
+and is the complete current set.
 
 ---
 
-## 9. Full Timeline Overview
+## 6. Scope: Deferred, Not Deleted
 
-| Month | Focus | Key Milestone |
-|-------|-------|---------------|
-| 1–2 | Foundation | Servo renders page, broker unit tests pass, CI green, extension loads in sandbox |
-| 3 | Integration | End-to-end demo: extension blocked from unauthorized access, denial cryptographically logged |
-| 4 | Agent Governance | LLM agent via JSON-RPC/WS, risk classification, CEF Track B, Wave 2 capabilities |
-| 5 | Hardening | 20+ adversarial scenarios, extension security analyzer CLI, AX tree, Merkle tree upgrade |
-| 6 | Evaluation | Three polished demos, broker latency measurement, proof verification, bandwidth savings |
-| 7–8 | Release | Paper writing (NDSS 2027 / ACSAC 2026), reproducible artifact, open-source release |
+The project began with a broader architecture centered on a capability broker. That scope was
+narrowed (2026-04) to focus on the IPI system as the deliverable. The following components
+were **removed from the active workspace but remain dormant on disk** and may be
+re-integrated in a later stage. They are out of current scope and must not reappear in code,
+diagrams, or planning unless explicitly revived:
 
----
+- Capability broker (token minting/enforcement) — `ferrite-capability-broker`
+- Policy engine (Regorus / Rego) — `ferrite-policy`
+- Wasm/Extism extension sandbox — `ferrite-sandbox`
+- CEF / Track B engine harness (engine-agnostic validation)
+- adblock-rust content blocking
+- Accessibility (AX) tree extraction for agents
 
-## 10. Quantitative Targets
-
-| Metric | Target |
-|--------|--------|
-| Enforcement coverage | 100% — no privileged action without valid token |
-| Broker latency | <1ms median capability check overhead |
-| Attack scenarios tested | 20+ including indirect prompt injection |
-| Bandwidth savings | ≥10% on tracker-heavy sites via adblock-rust |
+"Deferred, not deleted" is deliberate: the capability-lineage research thread (§3.2) may want
+the real broker back when the IPI core is mature. Treating these as archived-but-recoverable
+keeps that door open without letting the old architecture pollute current work.
 
 ---
 
-## 11. Future Work (Beyond 8 Months)
+## 7. Environment & Toolchain
 
-- Formal verification of capability token properties
-- Public transparency log integration (Sigstore Rekor)
-- Privacy-by-default partitioned state (per-origin storage isolation)
-- Energy-aware scheduling with per-tab resource budgets
-- Windows and Android platform support
-- Process isolation (separate OS processes per component)
-
----
-
-## 12. Licensing
-
-Dual **MIT/Apache-2.0** license. Community contributions welcome from day one.
-
----
-
-## 13. Team
-
-Three-person team:
-- **R1** — Systems/engine (Servo embedding, network stack, engine trait)
-- **R2** — Security/crypto (broker, audit log, policy engine, adversarial testing)
-- **R3** — UI/research (Iced shell, DevTools panels, paper writing)
+- **OS / shell:** Windows, PowerShell. No WSL2.
+- **Rust:** stable MSVC.
+- **IDE:** Google Antigravity (VS Code fork).
+- **Engine:** Servo v0.0.5 (pinned), feature-gated.
+- **UI:** Iced 0.13 (dark mode).
+- **Agent backend:** Gemini (function calling).
+- **Storage:** rusqlite 0.37 (`bundled`), workspace-wide; no `sea-query`/`sea-orm`/`sqlx`/`diesel`.
+- **CI:** GitHub Actions, Windows + macOS only. **Linux is intentionally not in CI** — which
+  means the Linux-only network-namespace path in component 4 is never exercised by CI. This is
+  a known coverage gap and should be noted as a limitation in any evaluation writeup.
+- **Containerization:** Docker devcontainer (dormant alongside the Linux toolchain).
 
 ---
 
-## 14. Reference Documents
+## 8. Research Framing *(provisional — subject to change)*
 
-The canonical project knowledge base is an 8-file markdown reference document set:
-- `00_master_index` — Document map and cross-references
-- `01_objectives` — Project goals, personas, success criteria
-- `02_architecture` — System-level architecture (source of truth)
-- `03_capability_broker` — Token format, lifecycle, minting, validation
-- `04_07_policy_sandbox_audit_governance` — Policy engine, Wasm sandbox, audit log, agent governance
-- `08_threat_model` — Threat analysis and mitigations
-- `09_12_ui_engine_network_a11y` — UI shell, engine integration, network stack, accessibility
-- `13_15_plan_stack_evaluation` — Implementation plan, technology stack, evaluation methodology
+> Everything in this section may change as the work matures. It is included to orient
+> collaborators and ground the paper, not as a fixed commitment.
 
-These are stored in the parent `Major Project` folder and are designed to be self-contained — each section can be handed independently to any AI tool for context.
+### 8.1 Where Ferrite sits in the literature
+
+Two research threads have advanced in parallel without being bridged:
+
+- **Browser/OS compartmentalization** (Capsicum, COWL, RLBox) established capability
+  sandboxing — but never extended it to *agentic* contexts where an AI acts with user
+  privileges.
+- **Prompt-injection research** has shown, repeatedly, that model-level defenses fail against
+  adaptive attacks. The defenses studied are almost entirely model-level; architectural
+  enforcement is largely absent.
+- **Transparency logs** (Certificate Transparency, Sigstore/Rekor) established append-only
+  verifiable logging — but never for browser-agent action auditability.
+
+Ferrite's gap-to-fill: an **architectural, model-independent IPI defense for agentic
+browsing, made verifiable through transparency-style audit logging** — combining the
+capability-lineage intuition with CT-style logs in a domain neither has been applied to.
+
+### 8.2 Research questions *(provisional)*
+
+Working questions the IPI system is meant to answer (expect these to be refined):
+
+1. Can an architectural predict→dry-run→compare→consent loop contain indirect prompt
+   injection without relying on detecting malicious *content*?
+2. What is the cost — latency, friction, false-positive consent prompts — of enforcing IPI
+   defense architecturally rather than at the model level?
+3. How well does behavioural fingerprinting (expected vs. actual tools/origins) distinguish
+   genuine injections from benign agent deviation?
+4. Can the resulting audit trail provide meaningful post-hoc verifiability of agent
+   containment?
+
+### 8.3 Target venues *(provisional)*
+
+Targeting applied-security venues; specific targets shift with deadlines and readiness, so
+treat any named venue as indicative rather than committed. Tracked separately from this
+document. Notably, the broader field is converging on "security and privacy of agentic
+systems" as a named theme, which is squarely Ferrite's territory.
+
+### 8.4 Planned research artifacts
+
+- A working research browser (the primary deliverable).
+- A **labeled IPI adversarial dataset** (component 7) — confirmed injections and benign
+  deviations — as a citable, reusable artifact.
+
+---
+
+## 9. Current State (summary)
+
+- **Stage 1 — browser infrastructure:** complete.
+- **Stage 2 — `ferrite-ipi`:** six of seven components implemented and passing; the dataset
+  pipeline (component 7) is the single remaining stub and the last piece of Stage 2.
+
+For the authoritative, dated status, see `PROGRESS.md`. For build/coding rules, see
+`CLAUDE.md`. This document is the why and the shape; those are the what and the how.
