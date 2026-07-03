@@ -2538,6 +2538,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ferrite-agent",
+ "ferrite-audit-log",
+ "ferrite-ipi",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ferrite-ipi"
 version = "0.1.0"
 dependencies = [
@@ -2551,6 +2567,7 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

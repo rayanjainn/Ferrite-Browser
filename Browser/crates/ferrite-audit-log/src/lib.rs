@@ -11,6 +11,10 @@ pub enum AuditEventKind {
     CapabilityDenied,
     CapabilityExercised,
     ContentBlocked,
+    /// An evaluation-harness execution record was produced (ferrite-eval). Recorded
+    /// so eval runs are themselves verifiable artifacts in the hash chain. The
+    /// `capability` field carries the exec_id; `url` carries the case_id.
+    EvalExecutionRecorded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

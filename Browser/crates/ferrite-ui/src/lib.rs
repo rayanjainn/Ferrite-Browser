@@ -19,7 +19,12 @@
 
 use std::collections::HashMap;
 
+use ferrite_agent::{
+    AgentRuntime, AgentTask, AgentToolCall, AgentToolResult, BrowserTool, GeminiAgent,
+};
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
+use ferrite_ipi::comparator::{compare, ConsentDecision, FingerprintDiff, OriginScope};
+use ferrite_ipi::tool_decision::{LoopOutcome, ToolDecisionEngine, ToolId};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{
@@ -27,9 +32,6 @@ use iced::{
 };
 use iced_widget::image::{Handle as ImageHandle, Image as ServoImage};
 use tokio::sync::oneshot;
-use ferrite_agent::{AgentRuntime, AgentTask, AgentToolCall, AgentToolResult, BrowserTool, GeminiAgent};
-use ferrite_ipi::comparator::{compare, ConsentDecision, FingerprintDiff};
-use ferrite_ipi::tool_decision::ToolId;
 
 // ---------------------------------------------------------------------------
 // Tool-execution bridge types (agent ↔ Iced main thread)
@@ -59,17 +61,22 @@ impl ToolRequest {
 
 impl Clone for ToolRequest {
     fn clone(&self) -> Self {
-        Self { call: self.call.clone(), reply: self.reply.clone() }
+        Self {
+            call: self.call.clone(),
+            reply: self.reply.clone(),
+        }
     }
 }
 
 impl std::fmt::Debug for ToolRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolRequest").field("call", &self.call).finish_non_exhaustive()
+        f.debug_struct("ToolRequest")
+            .field("call", &self.call)
+            .finish_non_exhaustive()
     }
 }
 
-pub type ToolRequestSender   = tokio::sync::mpsc::UnboundedSender<ToolRequest>;
+pub type ToolRequestSender = tokio::sync::mpsc::UnboundedSender<ToolRequest>;
 pub type ToolRequestReceiver = tokio::sync::mpsc::UnboundedReceiver<ToolRequest>;
 
 /// Implements `ferrite_agent::ToolExecutor` by forwarding calls to the Iced
@@ -84,7 +91,9 @@ impl ferrite_agent::ToolExecutor for BrowserToolExecutor {
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = ToolRequest::new(call.clone(), reply_tx);
         let _ = self.tx.send(req);
-        reply_rx.await.unwrap_or_else(|_| AgentToolResult::err(call.call_id, "channel closed"))
+        reply_rx
+            .await
+            .unwrap_or_else(|_| AgentToolResult::err(call.call_id, "channel closed"))
     }
 }
 
@@ -131,18 +140,78 @@ const PANEL_PADDING: u16 = 12;
 // Colour palette
 // ---------------------------------------------------------------------------
 
-const C_BASE: Color = Color { r: 0.08, g: 0.08, b: 0.10, a: 1.0 };
-const C_SURFACE: Color = Color { r: 0.11, g: 0.11, b: 0.14, a: 1.0 };
-const C_RAISED: Color = Color { r: 0.17, g: 0.17, b: 0.21, a: 1.0 };
-const C_DIVIDER: Color = Color { r: 0.20, g: 0.20, b: 0.25, a: 1.0 };
-const C_TEXT: Color = Color { r: 0.93, g: 0.93, b: 0.96, a: 1.0 };
-const C_TEXT_DIM: Color = Color { r: 0.50, g: 0.50, b: 0.58, a: 1.0 };
-const C_ACCENT: Color = Color { r: 0.44, g: 0.38, b: 1.0, a: 1.0 };
-const C_ACCENT_BRIGHT: Color = Color { r: 0.56, g: 0.50, b: 1.0, a: 1.0 };
-const C_INPUT: Color = Color { r: 0.14, g: 0.14, b: 0.18, a: 1.0 };
-const C_SAFE: Color = Color { r: 0.20, g: 0.84, b: 0.54, a: 1.0 };
-const C_WARN: Color = Color { r: 0.95, g: 0.65, b: 0.20, a: 1.0 };
-const C_DANGER: Color = Color { r: 1.0, g: 0.35, b: 0.35, a: 1.0 };
+const C_BASE: Color = Color {
+    r: 0.08,
+    g: 0.08,
+    b: 0.10,
+    a: 1.0,
+};
+const C_SURFACE: Color = Color {
+    r: 0.11,
+    g: 0.11,
+    b: 0.14,
+    a: 1.0,
+};
+const C_RAISED: Color = Color {
+    r: 0.17,
+    g: 0.17,
+    b: 0.21,
+    a: 1.0,
+};
+const C_DIVIDER: Color = Color {
+    r: 0.20,
+    g: 0.20,
+    b: 0.25,
+    a: 1.0,
+};
+const C_TEXT: Color = Color {
+    r: 0.93,
+    g: 0.93,
+    b: 0.96,
+    a: 1.0,
+};
+const C_TEXT_DIM: Color = Color {
+    r: 0.50,
+    g: 0.50,
+    b: 0.58,
+    a: 1.0,
+};
+const C_ACCENT: Color = Color {
+    r: 0.44,
+    g: 0.38,
+    b: 1.0,
+    a: 1.0,
+};
+const C_ACCENT_BRIGHT: Color = Color {
+    r: 0.56,
+    g: 0.50,
+    b: 1.0,
+    a: 1.0,
+};
+const C_INPUT: Color = Color {
+    r: 0.14,
+    g: 0.14,
+    b: 0.18,
+    a: 1.0,
+};
+const C_SAFE: Color = Color {
+    r: 0.20,
+    g: 0.84,
+    b: 0.54,
+    a: 1.0,
+};
+const C_WARN: Color = Color {
+    r: 0.95,
+    g: 0.65,
+    b: 0.20,
+    a: 1.0,
+};
+const C_DANGER: Color = Color {
+    r: 1.0,
+    g: 0.35,
+    b: 0.35,
+    a: 1.0,
+};
 
 // ---------------------------------------------------------------------------
 // State
@@ -191,7 +260,11 @@ pub struct FerriteBrowser {
     /// Sender used by spawned agent task to emit progress messages.
     pub agent_event_tx: Option<tokio::sync::mpsc::UnboundedSender<FerriteBrowserMessage>>,
     /// Receiver drained by the agent_event_sub subscription.
-    pub agent_event_rx: Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FerriteBrowserMessage>>>>,
+    pub agent_event_rx: Option<
+        std::sync::Arc<
+            tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FerriteBrowserMessage>>,
+        >,
+    >,
     // ── IPI consent state ────────────────────────────────────────────────────
     /// Set when the dry run finds extra tools; cleared after consent or cancel.
     pub pending_diff: Option<FingerprintDiff>,
@@ -267,7 +340,11 @@ pub enum FerriteBrowserMessage {
     GoForward,
     Reload,
     StopLoading,
-    LoadStatusChanged { tab: usize, status: String, url: String },
+    LoadStatusChanged {
+        tab: usize,
+        status: String,
+        url: String,
+    },
     FocusAddressBar,
     ClearAddressBarFocus,
     CloseActiveTab,
@@ -278,14 +355,22 @@ pub enum FerriteBrowserMessage {
     JsConsoleClear,
     // Mouse/scroll events forwarded to Servo
     /// Mouse moved over the content area — position is relative to content area origin.
-    ServoMouseMove { x: f32, y: f32 },
+    ServoMouseMove {
+        x: f32,
+        y: f32,
+    },
     /// Mouse button pressed (position taken from last ServoMouseMove).
     ServoMousePress,
     /// Mouse button released (position taken from last ServoMouseMove).
     ServoMouseRelease,
     /// Scroll wheel event.
-    ServoScroll { delta_x: f32, delta_y: f32 },
-    ContentAreaResized { height: f32 },
+    ServoScroll {
+        delta_x: f32,
+        delta_y: f32,
+    },
+    ContentAreaResized {
+        height: f32,
+    },
     // ── Agent bridge ──────────────────────────────────────────────────────────
     /// A tool call request has arrived from the agent runtime.
     ToolRequestArrived(ToolRequest),
@@ -343,8 +428,12 @@ pub fn update(
                     state.tab_titles.remove(i);
                 }
                 state.servo_sessions.remove(&i);
-                let keys_to_shift: Vec<usize> =
-                    state.servo_sessions.keys().copied().filter(|&k| k > i).collect();
+                let keys_to_shift: Vec<usize> = state
+                    .servo_sessions
+                    .keys()
+                    .copied()
+                    .filter(|&k| k > i)
+                    .collect();
                 for k in keys_to_shift {
                     if let Some(session) = state.servo_sessions.remove(&k) {
                         state.servo_sessions.insert(k - 1, session);
@@ -563,24 +652,54 @@ pub fn update(
                 };
                 let agent = GeminiAgent::from_key(api_key);
 
+                // ── Defense-mode single decision point (Task 18) ──────────────
+                // ToolDecisionEngine::new() reads FERRITE_DEFENSE once; On is the
+                // unchanged default everywhere. Off skips straight to the real run
+                // (no sanitizer, no dry-run, no consent). SanitizerOnly runs the
+                // sanitizer but also skips straight to the real run. On runs the
+                // sanitizer and continues into the existing fingerprint/dry-run/
+                // compare/consent loop, unchanged.
+                let engine = ToolDecisionEngine::new();
+                match engine.prepare_task(&agent_task) {
+                    LoopOutcome::Bypassed => {
+                        run_agent_loop(&agent_task, &agent, &executor, &event_tx).await;
+                        return;
+                    }
+                    LoopOutcome::RanSanitizerOnly { .. } => {
+                        run_agent_loop(&agent_task, &agent, &executor, &event_tx).await;
+                        return;
+                    }
+                    // LoopOnly and On both continue into the fingerprint/dry-run/
+                    // compare/consent loop below. They differ only in whether the
+                    // sanitizer ran first (On) or was bypassed (LoopOnly) — a
+                    // distinction the dry-run path will act on in Task 20; here the
+                    // loop itself is identical, so both fall through.
+                    LoopOutcome::RanLoopOnly | LoopOutcome::RanFullLoop { .. } => {
+                        // fall through to the unchanged full loop below
+                    }
+                }
+
                 // ── IPI dry run ──────────────────────────────────────────────
-                let engine = ferrite_ipi::tool_decision::ToolDecisionEngine::new();
                 let fingerprint = engine.fingerprint_from_task(&agent_task).await;
                 let twin_path = std::env::temp_dir().join("ferrite-ipi-twin.enc");
                 let orch = ferrite_ipi::dry_run::DryRunOrchestrator::new(twin_path);
                 let dry_record = match orch.run(&agent_task, &[], &agent).await {
                     Ok(r) => r,
                     Err(e) => {
-                        let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(
-                            format!("dry run failed: {}", e),
-                        ));
+                        let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(format!(
+                            "dry run failed: {}",
+                            e
+                        )));
                         return;
                     }
                 };
                 let _ = event_tx.send(FerriteBrowserMessage::AgentToolLogged(
                     "[dry run complete — checking for unexpected activity]".to_string(),
                 ));
-                let diff = compare(&fingerprint, &dry_record);
+                // TODO(Task 19): no per-task origin-scope authoring exists yet —
+                // task_open is the honest stand-in (admits any origin) until the
+                // dataset pipeline supplies authored OriginScope values per case.
+                let diff = compare(&fingerprint, &dry_record, &OriginScope::task_open());
                 if !diff.is_clean() {
                     let _ = event_tx.send(FerriteBrowserMessage::ConsentRequired(diff));
                     return;
@@ -633,7 +752,10 @@ pub fn update(
             state.agent_is_running = true;
 
             let executor = match state.tool_tx.clone() {
-                Some(tx) => FilteredToolExecutor { inner: BrowserToolExecutor { tx }, rejected },
+                Some(tx) => FilteredToolExecutor {
+                    inner: BrowserToolExecutor { tx },
+                    rejected,
+                },
                 None => return Task::none(),
             };
             let event_tx = match state.agent_event_tx.clone() {
@@ -655,8 +777,7 @@ pub fn update(
         // ── Agent bridge ──────────────────────────────────────────────────────
         FerriteBrowserMessage::ToolRequestArrived(req) => {
             if let Some(reply_tx) = req.take_reply() {
-                let result = if let Some(session) =
-                    state.servo_sessions.get_mut(&state.active_tab)
+                let result = if let Some(session) = state.servo_sessions.get_mut(&state.active_tab)
                 {
                     match &req.call.tool {
                         BrowserTool::Navigate(url) => {
@@ -670,21 +791,15 @@ pub fn update(
                         BrowserTool::ClickElement(_sel) => {
                             AgentToolResult::ok(req.call.call_id, "")
                         }
-                        BrowserTool::FillForm { .. } => {
-                            AgentToolResult::ok(req.call.call_id, "")
-                        }
+                        BrowserTool::FillForm { .. } => AgentToolResult::ok(req.call.call_id, ""),
                         BrowserTool::ExtractData(_sel) => {
                             AgentToolResult::ok(req.call.call_id, "not yet implemented")
                         }
-                        BrowserTool::ExecuteJs(code) => {
-                            match session.execute_js(code) {
-                                Ok(r) => AgentToolResult::ok(req.call.call_id, r),
-                                Err(e) => AgentToolResult::err(req.call.call_id, e),
-                            }
-                        }
-                        BrowserTool::WriteClipboard(_) => {
-                            AgentToolResult::ok(req.call.call_id, "")
-                        }
+                        BrowserTool::ExecuteJs(code) => match session.execute_js(code) {
+                            Ok(r) => AgentToolResult::ok(req.call.call_id, r),
+                            Err(e) => AgentToolResult::err(req.call.call_id, e),
+                        },
+                        BrowserTool::WriteClipboard(_) => AgentToolResult::ok(req.call.call_id, ""),
                         _ => AgentToolResult::ok(req.call.call_id, "not yet implemented"),
                     }
                 } else {
@@ -719,8 +834,12 @@ pub fn update(
                 let url_changed =
                     !new_url.is_empty() && new_url != "about:blank" && new_url != prev_url;
                 if status_changed || url_changed {
-                    let status =
-                        if is_now_loading { "loading" } else { "complete" }.to_string();
+                    let status = if is_now_loading {
+                        "loading"
+                    } else {
+                        "complete"
+                    }
+                    .to_string();
                     return Task::done(FerriteBrowserMessage::LoadStatusChanged {
                         tab: active,
                         status,
@@ -767,9 +886,12 @@ fn tab_bar_style(_theme: &Theme) -> container::Style {
 fn close_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: Some(Background::Color(match status {
-            button::Status::Hovered | button::Status::Pressed => {
-                Color { r: 1.0, g: 0.35, b: 0.35, a: 0.15 }
-            }
+            button::Status::Hovered | button::Status::Pressed => Color {
+                r: 1.0,
+                g: 0.35,
+                b: 0.35,
+                a: 0.15,
+            },
             _ => Color::TRANSPARENT,
         })),
         text_color: match status {
@@ -797,7 +919,10 @@ fn nav_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
             _ => Color::TRANSPARENT,
         })),
         text_color: match status {
-            button::Status::Disabled => Color { a: 0.20, ..C_TEXT_DIM },
+            button::Status::Disabled => Color {
+                a: 0.20,
+                ..C_TEXT_DIM
+            },
             _ => C_TEXT,
         },
         border: Border {
@@ -875,7 +1000,12 @@ fn bottom_panel_style(_theme: &Theme) -> container::Style {
             },
         },
         shadow: iced::Shadow {
-            color: Color { a: 0.3, r: 0.0, g: 0.0, b: 0.0 },
+            color: Color {
+                a: 0.3,
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+            },
             offset: iced::Vector::new(0.0, -4.0),
             blur_radius: 14.0,
         },
@@ -893,6 +1023,7 @@ fn kind_label(kind: &AuditEventKind) -> (&'static str, Color) {
         AuditEventKind::CapabilityDenied => ("DENIED", C_DANGER),
         AuditEventKind::CapabilityExercised => ("USED", Color::from_rgb(0.4, 0.7, 1.0)),
         AuditEventKind::ContentBlocked => ("BLOCKED", C_WARN),
+        AuditEventKind::EvalExecutionRecorded => ("EVAL", Color::from_rgb(0.6, 0.6, 0.6)),
     }
 }
 
@@ -959,11 +1090,13 @@ async fn run_agent_loop(
                         BrowserTool::Navigate(url) => format!("[navigate] {}", url),
                         BrowserTool::ReadPage => "[dom.read] read page".to_string(),
                         BrowserTool::ClickElement(sel) => format!("[dom.write] click {}", sel),
-                        BrowserTool::FillForm { selector, value } =>
-                            format!("[form.fill] {}={}", selector, value),
+                        BrowserTool::FillForm { selector, value } => {
+                            format!("[form.fill] {}={}", selector, value)
+                        }
                         BrowserTool::ExtractData(sel) => format!("[dom.read] extract {}", sel),
-                        BrowserTool::ExecuteJs(code) =>
-                            format!("[js.execute] {}", &code[..code.len().min(40)]),
+                        BrowserTool::ExecuteJs(code) => {
+                            format!("[js.execute] {}", &code[..code.len().min(40)])
+                        }
                         BrowserTool::ReadClipboard => "[clipboard.read]".to_string(),
                         BrowserTool::WriteClipboard(s) => format!("[clipboard.write] {}", s),
                         BrowserTool::DownloadFile(url) => format!("[download.file] {}", url),
@@ -1007,19 +1140,27 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             let is_active = i == active_tab_idx;
             let spinning = is_loading_active && i == active_tab_idx;
 
-            let favicon = text(if spinning { "..." } else if is_active { ">" } else { "-" })
-                .size(11)
-                .color(if is_active { C_ACCENT } else { C_TEXT_DIM });
+            let favicon = text(if spinning {
+                "..."
+            } else if is_active {
+                ">"
+            } else {
+                "-"
+            })
+            .size(11)
+            .color(if is_active { C_ACCENT } else { C_TEXT_DIM });
 
-            let label_elem = text(truncate(label, 22))
-                .size(13)
-                .color(if is_active { C_TEXT } else { C_TEXT_DIM });
+            let label_elem = text(truncate(label, 22)).size(13).color(if is_active {
+                C_TEXT
+            } else {
+                C_TEXT_DIM
+            });
 
-            let close_btn = button(
-                text("x")
-                    .size(10)
-                    .color(if can_close { C_TEXT_DIM } else { Color::TRANSPARENT }),
-            )
+            let close_btn = button(text("x").size(10).color(if can_close {
+                C_TEXT_DIM
+            } else {
+                Color::TRANSPARENT
+            }))
             .padding([2, 4])
             .width(Length::Fixed(18.0))
             .height(Length::Fixed(18.0))
@@ -1124,15 +1265,21 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         .padding([5, 11])
         .style(nav_btn_style)
         .on_press_maybe(
-            state.can_go_forward.then_some(FerriteBrowserMessage::GoForward),
+            state
+                .can_go_forward
+                .then_some(FerriteBrowserMessage::GoForward),
         );
 
     let reload_btn: Element<FerriteBrowserMessage> = if state.is_loading {
-        button(text("Stop").size(12)).padding([6, 11]).style(nav_btn_style)
+        button(text("Stop").size(12))
+            .padding([6, 11])
+            .style(nav_btn_style)
             .on_press(FerriteBrowserMessage::StopLoading)
             .into()
     } else {
-        button(text("Reload").size(12)).padding([6, 11]).style(nav_btn_style)
+        button(text("Reload").size(12))
+            .padding([6, 11])
+            .style(nav_btn_style)
             .on_press(FerriteBrowserMessage::Reload)
             .into()
     };
@@ -1158,7 +1305,11 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     };
 
     let addr_input = text_input(
-        if is_about { "Search or type an address" } else { "" },
+        if is_about {
+            "Search or type an address"
+        } else {
+            ""
+        },
         &state.address_bar_input,
     )
     .id(text_input::Id::new(ADDRESS_BAR_ID))
@@ -1177,7 +1328,10 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             icon: C_TEXT_DIM,
             placeholder: C_TEXT_DIM,
             value: C_TEXT,
-            selection: Color { a: 0.30, ..C_ACCENT },
+            selection: Color {
+                a: 0.30,
+                ..C_ACCENT
+            },
         }
     })
     .on_input(FerriteBrowserMessage::AddressBarChanged)
@@ -1204,7 +1358,11 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         .align_y(iced::Alignment::Center),
     )
     .padding([5, 10])
-    .style(if state.show_audit_panel { panel_btn_active } else { panel_btn_inactive })
+    .style(if state.show_audit_panel {
+        panel_btn_active
+    } else {
+        panel_btn_inactive
+    })
     .on_press(FerriteBrowserMessage::ToggleAuditPanel);
 
     let js_btn = button(
@@ -1216,7 +1374,11 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         .align_y(iced::Alignment::Center),
     )
     .padding([5, 10])
-    .style(if state.show_js_console { panel_btn_active } else { panel_btn_inactive })
+    .style(if state.show_js_console {
+        panel_btn_active
+    } else {
+        panel_btn_inactive
+    })
     .on_press(FerriteBrowserMessage::ToggleJsConsole);
 
     let agent_btn = button(
@@ -1228,7 +1390,11 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         .align_y(iced::Alignment::Center),
     )
     .padding([5, 10])
-    .style(if state.show_agent_sidebar { panel_btn_active } else { panel_btn_inactive })
+    .style(if state.show_agent_sidebar {
+        panel_btn_active
+    } else {
+        panel_btn_inactive
+    })
     .on_press(FerriteBrowserMessage::ToggleAgentSidebar);
 
     let toolbar = container(
@@ -1244,8 +1410,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // ── Progress bar ───────────────────────────────────────────────────────
     let progress_offset = state.progress_offset;
     let maybe_progress: Option<Element<FerriteBrowserMessage>> = if state.is_loading {
-        let pulse =
-            0.55 + 0.45 * (progress_offset * std::f32::consts::TAU * 1.5).sin().abs();
+        let pulse = 0.55 + 0.45 * (progress_offset * std::f32::consts::TAU * 1.5).sin().abs();
         Some(
             container(text(""))
                 .width(Length::Fill)
@@ -1272,7 +1437,10 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let audit_panel: Option<Element<FerriteBrowserMessage>> = if state.show_audit_panel {
         let hdr = container(
             row![
-                text("  Audit Log").size(12).color(C_TEXT).width(Length::Fill),
+                text("  Audit Log")
+                    .size(12)
+                    .color(C_TEXT)
+                    .width(Length::Fill),
                 button(text("Refresh").size(11))
                     .padding([2, 8])
                     .style(panel_btn_inactive)
@@ -1324,15 +1492,24 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     let ts = e.timestamp.format("%H:%M:%S%.3f").to_string();
                     container(
                         row![
-                            text(e.sequence.to_string()).size(12).color(C_TEXT_DIM).width(36),
+                            text(e.sequence.to_string())
+                                .size(12)
+                                .color(C_TEXT_DIM)
+                                .width(36),
                             text(ts).size(12).color(C_TEXT_DIM).width(76),
                             text(ks).size(12).color(kc).width(72),
                             text(truncate(&e.principal_id.to_string(), 8))
-                                .size(12).color(C_TEXT).width(95),
+                                .size(12)
+                                .color(C_TEXT)
+                                .width(95),
                             text(e.capability.as_deref().unwrap_or("-"))
-                                .size(12).color(C_TEXT).width(95),
+                                .size(12)
+                                .color(C_TEXT)
+                                .width(95),
                             text(truncate(e.url.as_deref().unwrap_or("-"), 60))
-                                .size(12).color(C_TEXT_DIM).width(Length::Fill),
+                                .size(12)
+                                .color(C_TEXT_DIM)
+                                .width(Length::Fill),
                         ]
                         .spacing(8)
                         .padding([3, PANEL_PADDING]),
@@ -1344,11 +1521,15 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         };
 
         Some(
-            container(column![hdr, col_hdr, scrollable(column(rows)).height(Length::Fill)])
-                .width(Length::Fill)
-                .height(220)
-                .style(bottom_panel_style)
-                .into(),
+            container(column![
+                hdr,
+                col_hdr,
+                scrollable(column(rows)).height(Length::Fill)
+            ])
+            .width(Length::Fill)
+            .height(220)
+            .style(bottom_panel_style)
+            .into(),
         )
     } else {
         None
@@ -1358,8 +1539,13 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let js_panel: Option<Element<FerriteBrowserMessage>> = if state.show_js_console {
         let hdr = container(
             row![
-                text("  JS Console").size(12).color(C_TEXT).width(Length::Fill),
-                text(format!("({} shortcut)", MOD_LABEL)).size(11).color(C_TEXT_DIM),
+                text("  JS Console")
+                    .size(12)
+                    .color(C_TEXT)
+                    .width(Length::Fill),
+                text(format!("({} shortcut)", MOD_LABEL))
+                    .size(11)
+                    .color(C_TEXT_DIM),
                 button(text("Clear").size(11))
                     .padding([2, 8])
                     .style(panel_btn_inactive)
@@ -1396,11 +1582,11 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                             .padding([2, PANEL_PADDING])
                             .width(Length::Fill)
                             .into(),
-                        container(
-                            text(format!("  {}", res))
-                                .size(12)
-                                .color(if err { C_DANGER } else { C_SAFE }),
-                        )
+                        container(text(format!("  {}", res)).size(12).color(if err {
+                            C_DANGER
+                        } else {
+                            C_SAFE
+                        }))
                         .padding([1, PANEL_PADDING])
                         .width(Length::Fill)
                         .into(),
@@ -1431,7 +1617,10 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     icon: C_TEXT_DIM,
                     placeholder: C_TEXT_DIM,
                     value: C_TEXT,
-                    selection: Color { a: 0.30, ..C_ACCENT },
+                    selection: Color {
+                        a: 0.30,
+                        ..C_ACCENT
+                    },
                 }
             })
             .on_input(FerriteBrowserMessage::JsInputChanged)
@@ -1515,18 +1704,19 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             // Home / new-tab page — always shown for about:blank, even if Servo
             // has produced a blank white frame for that URL.
             new_tab_page(state)
-        } else if let Some((w, h, bytes)) =
-            state.servo_sessions.get(&active).and_then(|s| s.get_frame())
+        } else if let Some((w, h, bytes)) = state
+            .servo_sessions
+            .get(&active)
+            .and_then(|s| s.get_frame())
         {
             // Live Servo frame — interactive via mouse_area
             let handle = ImageHandle::from_rgba(w, h, bytes);
-            let img = ServoImage::new(handle).width(Length::Fill).height(Length::Fill);
+            let img = ServoImage::new(handle)
+                .width(Length::Fill)
+                .height(Length::Fill);
 
             mouse_area(container(img).width(Length::Fill).height(Length::Fill))
-                .on_move(|pos| FerriteBrowserMessage::ServoMouseMove {
-                    x: pos.x,
-                    y: pos.y,
-                })
+                .on_move(|pos| FerriteBrowserMessage::ServoMouseMove { x: pos.x, y: pos.y })
                 .on_press(FerriteBrowserMessage::ServoMousePress)
                 .on_release(FerriteBrowserMessage::ServoMouseRelease)
                 .on_scroll(|delta| {
@@ -1543,12 +1733,13 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 .into()
         } else {
             // Loading placeholder (no frame yet for a non-blank URL)
-            let pulse = 0.25
-                + 0.20
-                    * (state.progress_offset * std::f32::consts::TAU).sin().abs();
+            let pulse = 0.25 + 0.20 * (state.progress_offset * std::f32::consts::TAU).sin().abs();
             container(
                 column![
-                    text("Fe").size(40).color(Color { a: pulse, ..C_ACCENT }),
+                    text("Fe").size(40).color(Color {
+                        a: pulse,
+                        ..C_ACCENT
+                    }),
                     container(text("")).height(10),
                     text("Loading...").size(14).color(C_TEXT_DIM),
                 ]
@@ -1629,7 +1820,10 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 icon: C_TEXT_DIM,
                 placeholder: C_TEXT_DIM,
                 value: C_TEXT,
-                selection: Color { a: 0.30, ..C_ACCENT },
+                selection: Color {
+                    a: 0.30,
+                    ..C_ACCENT
+                },
             }
         })
         .on_input(FerriteBrowserMessage::NewTabSearchChanged)
@@ -1668,11 +1862,23 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     border: Border {
                         radius: iced::border::Radius::new(12.0),
                         width: 1.0,
-                        color: if hov { C_DIVIDER } else { Color { a: 0.35, ..C_DIVIDER } },
+                        color: if hov {
+                            C_DIVIDER
+                        } else {
+                            Color {
+                                a: 0.35,
+                                ..C_DIVIDER
+                            }
+                        },
                     },
                     shadow: if hov {
                         iced::Shadow {
-                            color: Color { a: 0.15, r: 0.44, g: 0.38, b: 1.0 },
+                            color: Color {
+                                a: 0.15,
+                                r: 0.44,
+                                g: 0.38,
+                                b: 1.0,
+                            },
                             offset: iced::Vector::new(0.0, 2.0),
                             blur_radius: 8.0,
                         }
@@ -1698,7 +1904,9 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             column![
                 text("Fe").size(64).color(C_ACCENT),
                 text("ferrite").size(40).color(C_TEXT),
-                text("capability-governed browser").size(13).color(C_TEXT_DIM),
+                text("capability-governed browser")
+                    .size(13)
+                    .color(C_TEXT_DIM),
             ]
             .spacing(6)
             .align_x(iced::Alignment::Center),
@@ -1710,19 +1918,17 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             row(tile_row).spacing(12).wrap(),
             container(text("")).height(40),
             // Keyboard shortcut hints
-            container(
-                text(shortcuts_text).size(11).color(C_TEXT_DIM),
-            )
-            .padding([8, 16])
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(C_SURFACE)),
-                border: Border {
-                    radius: iced::border::Radius::new(8.0),
-                    width: 1.0,
-                    color: C_DIVIDER,
-                },
-                ..container::Style::default()
-            }),
+            container(text(shortcuts_text).size(11).color(C_TEXT_DIM),)
+                .padding([8, 16])
+                .style(|_: &Theme| container::Style {
+                    background: Some(Background::Color(C_SURFACE)),
+                    border: Border {
+                        radius: iced::border::Radius::new(8.0),
+                        width: 1.0,
+                        color: C_DIVIDER,
+                    },
+                    ..container::Style::default()
+                }),
         ]
         .spacing(0)
         .align_x(iced::Alignment::Center),
@@ -1779,8 +1985,7 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
     let keyboard_sub = keyboard::on_key_press(handle_key_press);
 
     let servo_tick = if !state.servo_sessions.is_empty() {
-        time::every(std::time::Duration::from_millis(16))
-            .map(|_| FerriteBrowserMessage::ServoFrame)
+        time::every(std::time::Duration::from_millis(16)).map(|_| FerriteBrowserMessage::ServoFrame)
     } else {
         Subscription::none()
     };
@@ -1797,8 +2002,12 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
                     loop {
                         let msg = rx_arc.lock().await.recv().await;
                         match msg {
-                            Some(msg) => { let _ = sender.send(msg).await; }
-                            None => { std::future::pending::<()>().await; }
+                            Some(msg) => {
+                                let _ = sender.send(msg).await;
+                            }
+                            None => {
+                                std::future::pending::<()>().await;
+                            }
                         }
                     }
                 }),
@@ -1844,9 +2053,11 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
 
 fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // Header: "Agent" label + optional Stop button.
-    let mut header_items: Vec<Element<FerriteBrowserMessage>> = vec![
-        text("Agent").size(16).color(C_TEXT).width(Length::Fill).into(),
-    ];
+    let mut header_items: Vec<Element<FerriteBrowserMessage>> = vec![text("Agent")
+        .size(16)
+        .color(C_TEXT)
+        .width(Length::Fill)
+        .into()];
     if state.agent_is_running {
         header_items.push(
             button(text("Stop").size(12))
@@ -1885,19 +2096,23 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
 
     // Task input — disabled (greyed container) when running.
     let task_input: Element<FerriteBrowserMessage> = if state.agent_is_running {
-        container(text(state.agent_task_input.as_str()).size(13).color(C_TEXT_DIM))
-            .width(Length::Fill)
-            .padding([7, 10])
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(Color { a: 0.6, ..C_INPUT })),
-                border: Border {
-                    radius: iced::border::Radius::new(6.0),
-                    width: 1.0,
-                    color: C_DIVIDER,
-                },
-                ..container::Style::default()
-            })
-            .into()
+        container(
+            text(state.agent_task_input.as_str())
+                .size(13)
+                .color(C_TEXT_DIM),
+        )
+        .width(Length::Fill)
+        .padding([7, 10])
+        .style(|_: &Theme| container::Style {
+            background: Some(Background::Color(Color { a: 0.6, ..C_INPUT })),
+            border: Border {
+                radius: iced::border::Radius::new(6.0),
+                width: 1.0,
+                color: C_DIVIDER,
+            },
+            ..container::Style::default()
+        })
+        .into()
     } else {
         text_input("Enter a task...", &state.agent_task_input)
             .width(Length::Fill)
@@ -1915,7 +2130,10 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
                     icon: C_TEXT_DIM,
                     placeholder: C_TEXT_DIM,
                     value: C_TEXT,
-                    selection: Color { a: 0.30, ..C_ACCENT },
+                    selection: Color {
+                        a: 0.30,
+                        ..C_ACCENT
+                    },
                 }
             })
             .on_input(FerriteBrowserMessage::AgentTaskInputChanged)
@@ -1927,13 +2145,17 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
     let run_btn = button(text("Run Task").size(13))
         .padding([7, 0])
         .width(Length::Fill)
-        .style(if run_disabled { panel_btn_inactive } else { accent_btn_style })
+        .style(if run_disabled {
+            panel_btn_inactive
+        } else {
+            accent_btn_style
+        })
         .on_press_maybe((!run_disabled).then_some(FerriteBrowserMessage::AgentTaskSubmitted));
 
     // ── Consent panel (shown instead of log+response when diff is pending) ──
     let body: Element<FerriteBrowserMessage> = if let Some(diff) = &state.pending_diff {
         let mut tool_rows: Vec<Element<FerriteBrowserMessage>> = {
-            let mut tools: Vec<&ToolId> = diff.extra_tools.iter().collect();
+            let mut tools: Vec<&ToolId> = diff.extra_primitives.iter().collect();
             tools.sort_by_key(|t| &t.0);
             tools
                 .into_iter()
@@ -1959,7 +2181,10 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
                         background: Some(Background::Color(if rejected {
                             C_DANGER
                         } else {
-                            Color { a: 0.25, ..C_DANGER }
+                            Color {
+                                a: 0.25,
+                                ..C_DANGER
+                            }
                         })),
                         text_color: Color::WHITE,
                         border: Border {
@@ -1994,7 +2219,11 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
         let proceed_btn = button(text("Proceed with approved").size(12))
             .padding([7, 10])
             .width(Length::Fill)
-            .style(if complete { accent_btn_style } else { panel_btn_inactive })
+            .style(if complete {
+                accent_btn_style
+            } else {
+                panel_btn_inactive
+            })
             .on_press_maybe(complete.then_some(FerriteBrowserMessage::ConsentSubmitted));
 
         let cancel_btn = button(text("Cancel").size(12))
@@ -2013,12 +2242,10 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             .on_press(FerriteBrowserMessage::ConsentCancelled);
 
         let mut panel_items: Vec<Element<FerriteBrowserMessage>> = vec![
-            row![
-                text("! Unexpected Activity Detected")
-                    .size(14)
-                    .color(C_DANGER)
-                    .width(Length::Fill),
-            ]
+            row![text("! Unexpected Activity Detected")
+                .size(14)
+                .color(C_DANGER)
+                .width(Length::Fill),]
             .into(),
             text(diff.summary()).size(12).color(C_TEXT_DIM).into(),
             sep().into(),
@@ -2030,19 +2257,17 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
         panel_items.push(cancel_btn.into());
 
         scrollable(
-            container(
-                column(panel_items).spacing(8).padding([8, 12]),
-            )
-            .width(Length::Fill)
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(Color {
-                    r: C_WARN.r,
-                    g: C_WARN.g,
-                    b: C_WARN.b,
-                    a: 0.08,
-                })),
-                ..container::Style::default()
-            }),
+            container(column(panel_items).spacing(8).padding([8, 12]))
+                .width(Length::Fill)
+                .style(|_: &Theme| container::Style {
+                    background: Some(Background::Color(Color {
+                        r: C_WARN.r,
+                        g: C_WARN.g,
+                        b: C_WARN.b,
+                        a: 0.08,
+                    })),
+                    ..container::Style::default()
+                }),
         )
         .height(Length::Fill)
         .into()

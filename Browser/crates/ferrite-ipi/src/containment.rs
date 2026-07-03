@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use crate::twin::SyntheticTwin;
+use std::sync::{Arc, Mutex};
 
 /// Shared state for the Option C application-layer interceptor.
 #[derive(Debug, Default)]

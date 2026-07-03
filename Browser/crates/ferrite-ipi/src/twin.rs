@@ -23,14 +23,14 @@ impl SyntheticTwin {
         let mut rng = rand::thread_rng();
         let id: u32 = rng.gen_range(1000..9999);
         Self {
-            name:        format!("Alex Ferrite-{}", id),
-            email:       format!("user{}@ferrite-test.invalid", id),
-            password:    format!("Synth!Pass{}#", id),
-            phone:       format!("+1-555-{:04}-{:04}", id, rng.gen_range(1000u32..9999u32)),
+            name: format!("Alex Ferrite-{}", id),
+            email: format!("user{}@ferrite-test.invalid", id),
+            password: format!("Synth!Pass{}#", id),
+            phone: format!("+1-555-{:04}-{:04}", id, rng.gen_range(1000u32..9999u32)),
             credit_card: format!("4000-0000-0000-{:04}", id),
-            ssn:         format!("000-00-{:04}", id),
-            address:     format!("{} Synthetic Ave, Testville, CA 00000", id),
-            created_at:  chrono::Utc::now(),
+            ssn: format!("000-00-{:04}", id),
+            address: format!("{} Synthetic Ave, Testville, CA 00000", id),
+            created_at: chrono::Utc::now(),
         }
     }
 
@@ -81,7 +81,10 @@ pub struct TwinManager {
 
 impl TwinManager {
     pub fn new(storage_path: std::path::PathBuf) -> Self {
-        Self { storage_path, ttl_hours: 24 }
+        Self {
+            storage_path,
+            ttl_hours: 24,
+        }
     }
 
     /// Loads the stored twin if present and unexpired.
@@ -131,10 +134,8 @@ mod tests {
 
     #[test]
     fn twin_manager_load_or_generate_returns_valid_twin() {
-        let path = std::env::temp_dir().join(format!(
-            "ferrite-twin-test-{}.enc",
-            uuid::Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ferrite-twin-test-{}.enc", uuid::Uuid::new_v4()));
         let mgr = TwinManager::new(path.clone());
         let twin = mgr.load_or_generate();
         assert!(twin.email.contains("ferrite-test.invalid"));

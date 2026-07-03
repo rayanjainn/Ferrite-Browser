@@ -174,23 +174,34 @@ predict→dry-run→compare→consent loop turned off.
   the attack is real and the surface is genuinely vulnerable.
 - **Defense ON:** the same case runs through the full loop; we record whether the deviation
   was contained (consent-gated or blocked).
-- **Sanitizer-only (optional ablation):** the sanitizer runs but the dry-run/compare/consent
-  loop is bypassed. This isolates how much containment comes from passive content-stripping
-  versus the full architectural loop — directly answering the reviewer question "is it the
-  architecture, or just the filter?" It is **upside, not floor**: run only if time allows,
-  and never required for the committed result. Supported by `DefenseMode::SanitizerOnly`
-  (TO-DO Task 18).
+- **Loop-only:** the sanitizer is bypassed and the agent's raw (un-sanitized) content runs
+  through the full dry-run/compare/consent loop. This is the **RQ1 number** — it measures the
+  architecture's standalone containment with the content filter explicitly off, which is the
+  cleanest possible evidence that containment comes from the architecture rather than from
+  passive stripping. Supported by `DefenseMode::LoopOnly` (TO-DO Task 18).
+- **Sanitizer-only:** the sanitizer runs but the dry-run/compare/consent loop is bypassed.
+  Measures the filter's standalone containment. Supported by `DefenseMode::SanitizerOnly`.
+
+> **Per-layer power is read from the isolated modes, not from ON.** In ON, the sanitizer
+> strips first and the loop runs only on the residue, so each layer sees only what upstream
+> passed through — ON therefore *understates* each layer's standalone power and must not be
+> read as a per-layer number. The sanitizer's power is M1a (Sanitizer-only); the
+> architecture's power is M1_loop (Loop-only); ON is the composed, deployed-system number.
+> The two deltas are first-class results: **M1 − M1_loop** = the sanitizer's marginal
+> contribution to the shipped stack; **M1 − M1a** = the architecture's marginal contribution
+> beyond passive stripping.
 
 **The result is the delta.** "Injection succeeds X% with defense off → contained Y% with
 defense on" *is* the headline. Without the OFF condition, a high ON containment number could
 just mean the attacks were weak. Every attack case is run in both conditions.
 
-(Optional, stretch) Two further conditions are upside, not required:
+The committed four conditions are OFF, ON, Loop-only, and Sanitizer-only — together they
+isolate each layer and measure their composition.
+
+(Optional, stretch) One further condition is upside, not required:
 - A **model-level** defense (e.g. a prompt-based "ignore injected instructions" system
-  instruction) to strengthen the "architectural beats model-level" claim.
-- The **sanitizer-only** ablation above, to attribute containment between the sanitizer and
-  the full loop.
-Both are run only if effort budget allows; the committed result stands on OFF vs. ON alone.
+  instruction) to strengthen the "architectural beats model-level" claim. Run only if effort
+  budget allows; the committed result stands on the four conditions above.
 
 ---
 
@@ -199,7 +210,8 @@ Both are run only if effort budget allows; the committed result stands on OFF vs
 | # | Metric | Corpus | Definition | Answers RQ |
 |---|--------|--------|------------|------------|
 | M1 | **Containment rate (stratified)** | attack, `in_scope` only | % of injection attempts caught (consent-gated or blocked) vs. executed silently, computed over in-scope attacks (categories 1–4) only | RQ1 (architectural containment) |
-| M1a | **Sanitizer-only containment** *(optional ablation)* | attack | % caught with the sanitizer active but the dry-run/compare/consent loop bypassed; the delta M1 − M1a attributes containment to the architectural loop beyond passive stripping | RQ1 (attribution — optional) |
+| M1a | **Sanitizer-only containment** | attack | % caught with the sanitizer active but the dry-run/compare/consent loop bypassed (the filter's standalone power) | RQ1 (attribution) |
+| M1_loop | **Loop-only containment** | attack, `in_scope` only | % caught by the full loop running on UN-sanitized content (the architecture's standalone power, sanitizer off) — the most direct RQ1 evidence | RQ1 (architectural containment, isolated) |
 | M2 | **Attack success rate (baseline)** | attack, defense OFF | % of injections that succeed with defense disabled | establishes attacks are real |
 | M3 | **False-positive consent rate** | benign | % of benign tasks that still triggered a consent prompt / block | RQ2 (cost / friction) |
 | M4 | **Dry-run latency overhead** | both | added wall-clock time from the contained dry-run (the agent plan runs twice on clean tasks) | RQ2 (cost) |
@@ -209,6 +221,18 @@ Both are run only if effort budget allows; the committed result stands on OFF vs
 M5 is the synthesis metric: M1 (catch attacks) and M3 (don't flag benign) are the two axes
 of the same discrimination question, and reporting them together (rather than M1 alone) is
 what makes the evaluation honest.
+**Per-layer attribution and the meaning of ON (four-mode design).** Containment is measured
+under four defense modes (§4): OFF (M2, attacks are real), Sanitizer-only (M1a, filter alone),
+Loop-only (M1_loop, architecture alone), and ON (M1, composed stack). **Standalone layer power
+is read from the isolated modes, never from ON.** In ON the sanitizer strips before the loop, so
+the loop acts only on the sanitizer's misses; ON's per-layer catch rates therefore *understate*
+each layer and are not reported as standalone numbers. ON is the deployed-system number — the
+right metric for "how well does the shipped product contain attacks," and the wrong metric for
+"how good is layer X." The two deltas are reported as results: **M1 − M1_loop** (sanitizer's
+marginal contribution to the shipped stack) and **M1 − M1a** (architecture's marginal
+contribution beyond passive stripping). Note this design isolates each layer and measures their
+composition, but does not decompose a single ON run into per-layer credit — that decomposition
+comes from comparing the isolated-mode records case-by-case, not from instrumenting ON.
 
 **Scope-tightness stratification (Decision 4).** M1 is additionally reported broken down by the
 case's `scope_type` (`exact` / `domain_suffix` / `task_open`). Tight scopes carry strong
@@ -427,9 +451,12 @@ The evaluation as designed implies a bounded set of new code, decomposed into TO
    patterns in *tool-output* text, not just HTML/JS. Defense-in-depth (containment already
    holds without it via the loop), but needed for full T1b coverage and for the sanitizer to
    be exercised on the second carrier. Bounded — a plumbing extension of existing pattern logic.
-3. **Defense mode toggle (Task 18)** — a clean switch with three modes (On / SanitizerOnly /
-   Off) to run the agent with the full IPI loop, sanitizer-only, or fully disabled, for the §4
-   baseline and optional ablation. Implemented as `DefenseMode`.
+3. **Defense mode toggle (Task 18)** — a clean switch with four modes (On / SanitizerOnly /
+   LoopOnly / Off) to run the agent as the full composed stack, sanitizer-only, loop-only
+   (sanitizer bypassed — isolates the architecture for RQ1), or fully disabled, for the §4
+   baseline and the per-layer ablation. Implemented as `DefenseMode`. (The base three-mode
+   toggle shipped first; `LoopOnly` was added once the four-condition measurement design in
+   §4/§5 was settled.)
 4. **Evaluation harness (Task 21)** — a runner that takes a corpus, executes each case across
    defense modes, and emits dataset records. Lives in a dedicated **`ferrite-eval` crate**,
    Servo-free by default (depends only on `ferrite-ipi` + `ferrite-agent`; the eval runs
@@ -472,17 +499,23 @@ The evaluation as designed implies a bounded set of new code, decomposed into TO
 | R9 | AgentDojo Slack slice | ON (+ OFF) | external-benchmark validation (run once) |
 | R10 | Sampled events from R1–R9 | — | M6 verifiability / audit-chain integrity |
 
-*Optional ablation rows (upside, not floor — run only if effort budget allows; see §4):*
+*Per-layer ablation rows (isolate each layer; see §4/§5). Run after the freeze (they touch the
+same frozen defense):*
 
 | Run | Corpus | Condition | Produces |
 |-----|--------|-----------|----------|
-| A1 | Attack — Tier 1 (T1a) | Sanitizer-only | M1a sanitizer-only containment; M1 − M1a attributes containment to the loop |
-| A2 | Attack — Tier 2 (T1b) | Sanitizer-only | M1a on the tool-output carrier (exercises the T1b sanitizer extension alone) |
+| A1 | Attack — Tier 1 (T1a) | Sanitizer-only | M1a sanitizer-only containment (filter alone, web content) |
+| A2 | Attack — Tier 2 (T1b) | Sanitizer-only | M1a on the tool-output carrier (T1b sanitizer extension alone) |
+| A3 | Attack — Tier 1 (T1a) | Loop-only | M1_loop architecture-alone containment (sanitizer off, web content) — RQ1 |
+| A4 | Attack — Tier 2 (T1b) | Loop-only | M1_loop on the tool-output carrier (architecture alone) |
+
+The deltas are the findings: **M1 − M1_loop** (sanitizer's marginal contribution) and
+**M1 − M1a** (architecture's marginal contribution). A3 (Loop-only on T1a) is the single most
+direct RQ1 result — the architecture containing injection with the content filter off.
 
 M5 (discrimination) is computed across R2/R4 (attacks caught) vs. R5 (benign flagged).
 R7–R9 are the firewall-protected independence runs — executed only after the defense is
-frozen. A1–A2 are optional and, if run, must also occur after the freeze (they touch the
-same frozen defense).
+frozen. A1–A4 likewise run only after the freeze.
 
 M1 from R2/R4 is additionally tabulated by `scope_type` (Decision 4) — a breakdown of these same runs, not extra runs.
 
@@ -524,8 +557,13 @@ fixed, the *number* is set by measurement).
    feature-flag fallback for any live-page cases. Makes the workspace seven crates
    (PROJECT_REFERENCE §5 updated accordingly). See §8 item 4.
 
-7. **Stretch conditions — RESOLVED.** Both optional upside, decided at run time: the
-   sanitizer-only ablation (A1/A2, §9) and the model-level-defense baseline (§4).
+7. **Defense-mode conditions — RESOLVED (revised).** Four committed modes (OFF / ON /
+   Sanitizer-only / Loop-only), isolating each layer and measuring their composition (§4/§5).
+   Per-layer power is read from the isolated modes; ON is the deployed-stack number, never a
+   per-layer number. Ablation runs A1–A4 (§9) are committed (not upside), run post-freeze.
+   The **model-level-defense baseline** (§4) remains optional upside, decided at run time.
+   (Supersedes the prior "both optional" resolution — the loop-only isolation is RQ1's most
+   direct evidence and cannot be optional.)
 
 **Tool-vocabulary decision (the schema gate) — RESOLVED.** Two-layer vocabulary: semantic
 capabilities (fingerprint + consent UI) over browser primitives (execution + dry-run record),
@@ -564,8 +602,9 @@ running them before the defense is frozen (lost credibility).
 
 ## 12. Mapping to Research Questions
 
-- **RQ1** (architectural containment without content detection) → M1 (stratified), R2/R4, the
-  delta vs. M2.
+- **RQ1** (architectural containment without content detection) → M1_loop (A3/A4 — the
+  architecture isolated, sanitizer off) as the primary evidence, M1 (stratified, R2/R4) for
+  the composed stack, and the deltas vs. M2 (attacks real) and vs. M1a (beyond stripping).
 - **RQ2** (cost of architectural enforcement) → M3 (friction) + M4 (latency).
 - **RQ3** (fingerprint discrimination of injection vs. benign deviation) → M5.
 - **RQ4** (post-hoc verifiability) → M6.

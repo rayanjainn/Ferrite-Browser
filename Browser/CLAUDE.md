@@ -201,10 +201,15 @@ Ordered; earlier gates later. Full design in `FINALIZED_DECISIONS.md` and `EVALU
    lower-then-compare with per-origin attribution + the unscopable rule; unify key loading
    (shared loader above). Contained to `tool_decision`, `dry_run.rs`, `comparator.rs`. The
    existing `comparator.rs` tests encode the old single-vocabulary model and will be rewritten.
-2. **Defense mode toggle (Task 18)** — `DefenseMode { On, SanitizerOnly, Off }`. `Off` bypasses
-   the entire predict→dry-run→compare→consent loop; `SanitizerOnly` runs the sanitizer but
-   bypasses the loop; `On` is the unchanged default. Switchable via setter + `FERRITE_DEFENSE`
-   env var. For §4 baseline + optional ablation.
+2. **Defense mode toggle (Task 18)** — `DefenseMode { On, SanitizerOnly, LoopOnly, Off }`.
+   `Off` bypasses the entire predict→dry-run→compare→consent loop; `SanitizerOnly` runs the
+   sanitizer but bypasses the loop; `LoopOnly` bypasses the sanitizer and runs the loop on
+   un-sanitized content (isolates the architecture's standalone containment — RQ1); `On` is
+   the full stack (sanitizer strips, then the loop runs on the sanitized residue) and is the
+   unchanged default. Switchable via setter + `FERRITE_DEFENSE` env var. For the §4 baseline +
+   the four-mode ablation. **Per-layer power is read from the isolated modes (SanitizerOnly,
+   LoopOnly), never from On — On measures the composed deployed stack, in which each layer
+   sees only what upstream passed through.**
 3. **Component 7 `dataset.rs` (Task 19)** — implement to the finalized two-layer schema in
    `EVALUATION_PLAN.md` §7. Flat `src/dataset.rs` (not a mod dir). Supersedes the thin
    `IpiEvent`/`IpiLabel` currently in `comparator.rs`. rusqlite 0.37; temp paths via
