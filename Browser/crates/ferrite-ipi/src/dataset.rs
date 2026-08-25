@@ -110,6 +110,10 @@ pub enum RunLabel {
     // architecture's standalone containment (M1_loop, RQ1). A3 = T1a, A4 = T1b.
     A3,
     A4,
+    // Benign sanitizer-only ablation (benign corpus, sanitizer active, loop bypassed) — isolates
+    // the sanitizer's benign FALSE-STRIP behavior. Produces M3a, kept DISTINCT from M3 (R5, the
+    // full-stack benign consent rate). Ablation family (A-series), not a headline experiment.
+    A5,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

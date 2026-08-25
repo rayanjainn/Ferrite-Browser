@@ -214,9 +214,13 @@ isolate each layer and measure their composition.
 | M1_loop | **Loop-only containment** | attack, `in_scope` only | % caught by the full loop running on UN-sanitized content (the architecture's standalone power, sanitizer off) — the most direct RQ1 evidence | RQ1 (architectural containment, isolated) |
 | M2 | **Attack success rate (baseline)** | attack, defense OFF | % of injections that succeed with defense disabled | establishes attacks are real |
 | M3 | **False-positive consent rate** | benign | % of benign tasks that still triggered a consent prompt / block | RQ2 (cost / friction) |
+| M3a | **Sanitizer benign false-strip rate** | benign | % of benign cases the sanitizer flags/excises when run sanitizer-only (loop bypassed), i.e. benign × SanitizerOnly (A5) | RQ2 (sanitizer cost, isolated) |
 | M4 | **Dry-run latency overhead** | both | added wall-clock time from the contained dry-run (the agent plan runs twice on clean tasks) | RQ2 (cost) |
 | M5 | **Fingerprint discrimination** | both | how cleanly expected-vs-actual fingerprinting separates genuine injections from benign deviation (e.g. precision/recall, or a confusion matrix over M1/M3) | RQ3 (discrimination) |
 | M6 | **Verifiability demonstration** | sampled | for sampled events, show the audit log reconstructs the containment decision and chain integrity holds | RQ4 (post-hoc verifiability) |
+
+M3 and M3a are distinct benign false-positive numbers (full stack vs. sanitizer alone) and are
+never combined.
 
 M5 is the synthesis metric: M1 (catch attacks) and M3 (don't flag benign) are the two axes
 of the same discrimination question, and reporting them together (rather than M1 alone) is
@@ -381,7 +385,7 @@ is authored, trusted, and never written from run data (integrity rule). Origin s
 | `exec_id` | Uuid | PK |
 | `case_id` | Uuid | FK |
 | `timestamp` | DateTime&lt;Utc&gt; | |
-| `run_label` | enum R1..R10 \| A1 \| A2 | |
+| `run_label` | enum R1..R10 \| A1..A5 | A1/A2 sanitizer-only, A3/A4 loop-only, A5 benign sanitizer-only (M3a) |
 | `model` | enum Gemini (extensible) | stored so a future model slice is append-only |
 | `defense_mode` | enum On \| SanitizerOnly \| Off | Task 18 |
 | `expected_fingerprint` | Option&lt;SemanticFingerprint&gt; | None in Off; capabilities (action-class × scope) |
@@ -508,6 +512,9 @@ same frozen defense):*
 | A2 | Attack — Tier 2 (T1b) | Sanitizer-only | M1a on the tool-output carrier (T1b sanitizer extension alone) |
 | A3 | Attack — Tier 1 (T1a) | Loop-only | M1_loop architecture-alone containment (sanitizer off, web content) — RQ1 |
 | A4 | Attack — Tier 2 (T1b) | Loop-only | M1_loop on the tool-output carrier (architecture alone) |
+| A5 | Benign | Sanitizer-only | M3a sanitizer benign false-strip rate |
+
+A5 runs post-freeze with the other ablations.
 
 The deltas are the findings: **M1 − M1_loop** (sanitizer's marginal contribution) and
 **M1 − M1a** (architecture's marginal contribution). A3 (Loop-only on T1a) is the single most
@@ -605,7 +612,8 @@ running them before the defense is frozen (lost credibility).
 - **RQ1** (architectural containment without content detection) → M1_loop (A3/A4 — the
   architecture isolated, sanitizer off) as the primary evidence, M1 (stratified, R2/R4) for
   the composed stack, and the deltas vs. M2 (attacks real) and vs. M1a (beyond stripping).
-- **RQ2** (cost of architectural enforcement) → M3 (friction) + M4 (latency).
+- **RQ2** (cost of architectural enforcement) → M3 (friction) + M3a (sanitizer-isolated
+  companion to M3) + M4 (latency).
 - **RQ3** (fingerprint discrimination of injection vs. benign deviation) → M5.
 - **RQ4** (post-hoc verifiability) → M6.
 

@@ -403,7 +403,7 @@ by `scope_type`; `TaskOpen` admits broadly and is reported weak).
 | `exec_id` | `Uuid` | PK |
 | `case_id` | `Uuid` | FK → CaseDefinition |
 | `timestamp` | `DateTime<Utc>` | |
-| `run_label` | enum `R1..R10 \| A1 \| A2` | which matrix run |
+| `run_label` | enum R1..R10 \| A1..A5 | A3/A4 loop-only and A5 benign sanitizer-only (M3a) added post-freeze; see EVALUATION_PLAN §7/§9 for the current matrix |
 | `model` | enum `Gemini` (extensible) | Decision: store for append-only future models |
 | `defense_mode` | enum `On \| SanitizerOnly \| Off` | Task 18 |
 | `expected_fingerprint` | `Option<SemanticFingerprint>` | None in Off; capabilities (action-class × scope) |
