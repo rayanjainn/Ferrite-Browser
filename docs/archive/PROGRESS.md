@@ -1,3 +1,11 @@
+> HISTORICAL — DESCRIBES A PROJECT THAT NO LONGER EXISTS. DO NOT USE AS CONTEXT.
+> New live log is `docs/PROGRESS.md` (starts empty at the rebuild). This file
+> is the real institutional history of the pre-rebuild implementation — the
+> team's own dated "Known Issues" entries here were the most reliable part of
+> the old doc set and are worth reading for *why* something was built a
+> certain way. Do not read it as describing current state. See
+> `docs/archive/README.md`.
+
 # Ferrite Browser — Progress Tracker
 
 > **How to use this file:**

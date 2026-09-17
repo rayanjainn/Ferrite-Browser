@@ -4,13 +4,17 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Browser/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.devcontainer/**'
       - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'Browser/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.devcontainer/**'
       - '.github/workflows/ci.yml'
 
@@ -33,10 +37,6 @@ jobs:
             platform: macos
             binary_suffix: ""
 
-    defaults:
-      run:
-        working-directory: Browser
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,32 +46,29 @@ jobs:
         run: |
           brew update
           brew install cmake pkg-config openssl gstreamer sqlite
-        working-directory: .
 
       - name: Install system dependencies (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           choco install -y cmake sqlite
-        working-directory: .
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: Browser
           key: ${{ matrix.platform }}
 
       - name: Fetch dependencies
         run: cargo fetch
 
+      # Only one platform needs to check formatting — it's not platform-dependent.
       - name: Check formatting
-        if: matrix.platform == 'linux'
+        if: matrix.platform == 'macos'
         run: cargo fmt --check
 
       - name: Clippy (zero warnings)
@@ -79,13 +76,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
-
-      - name: Build hello-ext Wasm
-        if: matrix.platform == 'linux'
-        run: |
-          cd ../extensions/hello-ext
-          cargo build --target wasm32-unknown-unknown --release
-        working-directory: Browser
 
       - name: Build release binary
         run: cargo build --release -p ferrite-shell --features ferrite-servo/servo
@@ -122,7 +112,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ferrite-${{ steps.label.outputs.binary_label }}-${{ matrix.platform }}
-          path: Browser/staged/
+          path: staged/
           retention-days: 90
 
   # ─────────────────────────────────────────────────────────────

@@ -1,3 +1,11 @@
+> HISTORICAL — DESCRIBES A PROJECT THAT NO LONGER EXISTS. DO NOT USE AS CONTEXT.
+> New live ledger is `docs/TO-DO.md` (stable T-### IDs). This file is the
+> source A0 derived that ledger's still-open items from — its own inline
+> "⏳ To Do" / "✅ Done" markers are frequently stale mid-document (PROGRESS.md
+> was always the authoritative "what is done" record, per the project's own
+> doc hierarchy) so do not trust a status marker here over what's in
+> `docs/TO-DO.md`. See `docs/archive/README.md`.
+
 ## Task 1: Servo shell
 ### Block 1: Add `ferrite-servo` crate + Servo dependency  |  ✅ Done
 What it does: Creates the new crate and gets Servo compiling as a dependency. Nothing runs yet — just proves the build works with Servo in the tree.

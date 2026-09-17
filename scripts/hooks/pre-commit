@@ -1,0 +1,25 @@
+#!/bin/sh
+# scripts/hooks/pre-commit — fmt/clippy gate on staged crates only.
+# Installed via: git config core.hooksPath scripts/hooks (see scripts/hooks/install.sh)
+# Required by docs/REBUILD_DIRECTIVE.md R11. Scoped to crates with staged
+# changes (not the whole workspace) so an unrelated crate's pre-existing
+# warnings never block a commit to a crate that's actually clean.
+set -e
+
+CRATES=$(git diff --cached --name-only --diff-filter=ACM \
+  | grep -E '^crates/[^/]+/' \
+  | sed -E 's#^crates/([^/]+)/.*#\1#' \
+  | sort -u)
+
+if [ -z "$CRATES" ]; then
+  exit 0
+fi
+
+CARGO="${CARGO:-cargo}"
+command -v "$CARGO" >/dev/null 2>&1 || { echo "pre-commit: cargo not found, skipping fmt/clippy gate" >&2; exit 0; }
+
+for crate in $CRATES; do
+  echo "pre-commit: checking $crate" >&2
+  "$CARGO" fmt -p "$crate" --check || { echo "pre-commit: cargo fmt --check failed for $crate" >&2; exit 1; }
+  "$CARGO" clippy -p "$crate" --all-targets -- -D warnings || { echo "pre-commit: cargo clippy failed for $crate" >&2; exit 1; }
+done
