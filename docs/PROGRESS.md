@@ -74,19 +74,48 @@ write "not implemented" instead (R2). This is the habit the old
   auto-generated, no human activity) — judged safe to proceed without
   further coordination.
 
-**Commits:** `e474403` (flatten) `a45b2ad` (delete dead crates) `d670dad`
-(gitignore merge) `9e3f097`+`ffe3c63` (archive pass — the first attempt's
-`git add -A -- docs/ Resources` silently failed on the already-moved
-`Resources/` pathspec and committed pure renames with no banner content;
-`ffe3c63` is the fixup that actually landed the banners and the three new
-A0 files). Remaining commits for the CLAUDE.md/README/devcontainer
-rewrites, hooks, and TO-DO.md regeneration are cited in
-`docs/handoffs/a0.md`.
+Also fixed `.github/workflows/ci.yml`, which the flatten broke: every step
+used `working-directory: Browser` / `Browser/**` path filters against a
+directory that no longer existed, unconditionally installed a `wasm32`
+target for the now-deleted extension sandbox, and had an unreachable
+"Build hello-ext Wasm" step gated on a `linux` matrix entry the matrix
+never had (windows/macos only) — that step referenced a directory this
+same session deleted. Fixed in-session rather than deferred to A1, since
+leaving CI broken from a change this session made is worse than touching a
+file slightly outside A0's original scope.
+
+Attempted to verify the devcontainer image actually builds
+(`docker build -f .devcontainer/Dockerfile .`), not just that
+`cargo metadata` resolves — a bad `COPY` path fails at image-build time,
+which `cargo metadata` can't see. The Docker daemon isn't available in this
+sandbox (CLI present, no running daemon, no Docker Desktop installed), so
+the build genuinely failed (`connect: no such file or directory`) — the
+background-task notification reported "completed, exit code 0" because the
+wrapper script's own last command (an `echo`) succeeded even though the
+`docker build` inside it didn't; caught by reading the actual log rather
+than trusting the notification. Fell back to exhaustively verifying every
+`COPY` source path and every stub-loop crate name in the rewritten
+Dockerfile against the real tree by hand — all match — and reporting the
+real-build gap honestly instead of claiming a verification that didn't
+happen.
+
+**Commits:** `e474403` (flatten, proven content-identical via
+`cargo metadata` before/after) → `a45b2ad` (delete dead crates) →
+`d670dad` (gitignore merge) → `9e3f097`+`ffe3c63` (archive pass — the
+first attempt's `git add -A -- docs/ Resources` silently failed on the
+already-moved `Resources/` pathspec and committed pure renames with no
+banner content; `ffe3c63` is the fixup that actually landed the banners
+and the three new A0 files — see the note below) → `01c3f54`
+(CLAUDE.md/README.md rewrite) → `6ccfdad` (devcontainer fix) → `bf29736`
+(hooks, both check scripts, `docs/REBUILD_DIRECTIVE.md` saved to disk,
+ci.yml fix) → `dc7876e` (docs/TO-DO.md regenerated as the T-### ledger,
+check_purge.sh self-exclusion fix).
 
 **Tests:** none — A0 is archaeology/doc/config work, not implementation.
-`cargo metadata --no-deps` (before/after diff, see above) is the closest
-thing to a test this phase has, and it's cited because R2 requires a
-citation, not because it's a unit test.
+`cargo metadata --no-deps` (before/after diff, see above), `scripts/check_purge.sh`,
+and `scripts/check_no_archive_links.sh` (both run clean as of `dc7876e`) are
+the closest things to tests this phase has, cited because R2 requires a
+citation, not because they're unit tests.
 
 **Known issues discovered, filed as T-### (see `docs/TO-DO.md`):**
 - The commit that added the fixup above (`ffe3c63`) is itself evidence for
@@ -94,4 +123,20 @@ citation, not because it's a unit test.
   claimed to include content it didn't, and only got caught because this
   entry was written by re-deriving the diff rather than trusting the earlier
   commit message. No T-### filed — this is a demonstrated argument for R2,
-  not a defect in the product.
+  not a defect in the product. The docker-build notification mismatch above
+  is the same lesson a second time, from the harness side rather than git.
+- T-207: `cargo fmt --check` currently fails on 5 files across
+  `ferrite-agent`, `ferrite-eval`, `ferrite-servo`, `ferrite-shell` —
+  discovered when the new pre-commit hook correctly blocked a trivial
+  one-line comment fix in `ferrite-servo/src/shell.rs` (crate-scoped fmt
+  check caught pre-existing, unrelated dirty files). The comment fix was
+  reverted rather than forced through by reformatting a crate that A9 is
+  going to rewrite anyway; `scripts/check_purge.sh` now carries one
+  documented, tracked exception for that file's historical "capability
+  broker" mention instead.
+- T-208: the 10 pilot-corpus cases are real assets that should seed the
+  real corpus, but are not grandfathered — they get re-labelled under the
+  post-rebuild `GroundTruth` enum, re-validated against the type-level
+  carrier partition (T-006), and count toward the 10% double-authoring /
+  κ ≥ 0.8 requirement like any new case (per the session's own amendment,
+  now recorded in `docs/TO-DO.md` rather than only in chat).
