@@ -1,3 +1,8 @@
+> HISTORICAL — DESCRIBES A PROJECT THAT NO LONGER EXISTS. DO NOT USE AS CONTEXT.
+> Extracted into `docs/DECISIONS.md` as ADR-001 through ADR-008. This file is
+> the iteration-by-iteration reasoning behind those ADRs, not itself a live
+> reference. See `docs/archive/README.md`.
+
 # Ferrite — Finalized Design Decisions
 
 > Built by working each remaining decision through three iterations and three lenses

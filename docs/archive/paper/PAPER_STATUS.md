@@ -1,3 +1,9 @@
+> HISTORICAL — DESCRIBES A PROJECT THAT NO LONGER EXISTS. DO NOT USE AS CONTEXT.
+> Paper track is out of scope for the rebuild (`docs/REBUILD_DIRECTIVE.md` §0).
+> Every deadline below was already past at archiving time; the engineering
+> TO-DO independently says the paper track is parked. Do not schedule against
+> this file. See `docs/archive/README.md`.
+
 # Ferrite Browser — Paper Status Tracker
 
 > Updated by whoever last touched the paper.

@@ -1,3 +1,7 @@
+> HISTORICAL — DESCRIBES A PROJECT THAT NO LONGER EXISTS. DO NOT USE AS CONTEXT.
+> Superseded by `docs/EVALUATION.md`; genuinely-true decisions extracted to
+> `docs/DECISIONS.md`. Kept for the reasoning trail only. See `docs/archive/README.md`.
+
 # Ferrite Browser — Evaluation Methodology Plan
 
 > **Status of this document — READ FIRST.**

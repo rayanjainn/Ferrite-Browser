@@ -1,3 +1,10 @@
+> HISTORICAL — DESCRIBES A PROJECT THAT NO LONGER EXISTS. DO NOT USE AS CONTEXT.
+> Superseded by `docs/ARCHITECTURE.md`. Note this file was already stale
+> before archiving (claimed six workspace crates and a stubbed dataset
+> pipeline when the real count was seven and the dataset pipeline was 673
+> lines and complete) — do not treat it as having been fully reliable even
+> historically. See `docs/archive/README.md`.
+
 # Ferrite Browser — Project Reference
 
 > **Status of this document.** This is the human-facing reference for Ferrite: what it is,
