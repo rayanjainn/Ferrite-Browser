@@ -52,13 +52,11 @@ pub enum Carrier {
     ToolOutput,
 }
 
-/// Closed carrier_vector vocabulary, partitioned by `Carrier` (FINALIZED_DECISIONS
-/// Decision 6a). Exactly one per case; must belong to the partition matching the
-/// case's `carrier` field — validated at authoring time, not by the type system,
-/// since both partitions live in one enum for storage simplicity.
+/// The WebContent (T1a) sub-vocabulary of `carrier_vector` — only
+/// constructible as a payload of `CarrierVector::WebContent`, so it can never
+/// be paired with `Carrier::ToolOutput`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CarrierVector {
-    // WebContent (T1a)
+pub enum WebContentVector {
     HiddenElement,
     OffscreenText,
     HtmlComment,
@@ -66,11 +64,74 @@ pub enum CarrierVector {
     MetaContent,
     CssPseudo,
     VisibleText,
-    // ToolOutput (T1b)
+}
+
+/// The ToolOutput (T1b) sub-vocabulary of `carrier_vector` — only
+/// constructible as a payload of `CarrierVector::ToolOutput`, so it can never
+/// be paired with `Carrier::WebContent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolOutputVector {
     ToolJsonField,
     ToolTextBlob,
     ToolErrorMessage,
     ToolMetadata,
+}
+
+/// Closed `carrier_vector` vocabulary (FINALIZED_DECISIONS Decision 6a),
+/// **partitioned by construction, not by a runtime check** — this is T-006's
+/// fix for D6 ("`CarrierVector` partition validated only at JSON-load time;
+/// hand-built Rust literals bypass it").
+///
+/// Before this type, `Carrier` and `CarrierVector` were two independent
+/// fields on `CaseDefinition`, and only `ferrite_eval::corpus::partition_matches`
+/// — a caller-side function run at JSON-corpus-load time — rejected a
+/// mismatched pair (e.g. `carrier: WebContent, carrier_vector: ToolJsonField`).
+/// A hand-built `CaseDefinition { .. }` struct literal in Rust (a test
+/// fixture, a future authoring tool, a migration script) never went through
+/// that function and could silently construct the invalid pairing.
+///
+/// Now there is exactly one field (`CaseDefinition::carrier_vector`) and its
+/// two variants each carry only the sub-vocabulary that belongs to them —
+/// `CarrierVector::WebContent(ToolOutputVector::ToolJsonField)` is a type
+/// error (E0308: expected `WebContentVector`, found `ToolOutputVector`), not
+/// a value that type-checks and fails a separate validation pass. See the
+/// `compile_fail` doctest on [`CarrierVector`] below and
+/// `ferrite_eval::corpus`'s loader, whose old `partition_matches` function
+/// and `CorpusError::Partition` variant are deleted outright rather than kept
+/// as a second, now-redundant check.
+///
+/// `Carrier` (the coarse WebContent/ToolOutput tag) is derived from which
+/// variant is present, via [`CarrierVector::carrier`] — never stored
+/// separately, so it cannot disagree with the vector it was derived from.
+/// This mirrors ADR-005's "derived, never stored" rule for
+/// `unscopable_primitive_invoked`/`production_residual`.
+///
+/// ```compile_fail
+/// use ferrite_ipi::dataset::{CarrierVector, ToolOutputVector, WebContentVector};
+///
+/// // A WebContent carrier_vector can only ever hold a WebContentVector.
+/// // This is the exact invalid pairing the pre-T-006 code allowed to be
+/// // constructed (carrier: WebContent, carrier_vector: ToolJsonField) —
+/// // it is now a type error, not a value that passes construction and
+/// // fails a later check.
+/// let _bad = CarrierVector::WebContent(ToolOutputVector::ToolJsonField);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CarrierVector {
+    WebContent(WebContentVector),
+    ToolOutput(ToolOutputVector),
+}
+
+impl CarrierVector {
+    /// The coarse carrier this vector belongs to — derived from the variant,
+    /// so it is structurally impossible for this to disagree with the vector
+    /// (there is nothing separate to disagree).
+    pub fn carrier(&self) -> Carrier {
+        match self {
+            CarrierVector::WebContent(_) => Carrier::WebContent,
+            CarrierVector::ToolOutput(_) => Carrier::ToolOutput,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,7 +294,9 @@ pub struct CaseDefinition {
     pub corpus: Corpus,
     pub tier: Tier,
     pub author: Author,
-    pub carrier: Carrier,
+    /// Where structurally the payload rides — see [`CarrierVector`]'s docs
+    /// for why there is no separate `carrier` field: `Carrier` is derived
+    /// from this via [`CarrierVector::carrier`], never stored alongside it.
     pub carrier_vector: CarrierVector,
     pub attack_category: Option<AttackCategory>,
     pub attack_techniques: Vec<AttackTechnique>,
@@ -366,7 +429,7 @@ impl DatasetStore {
                 case.case_id.to_string(),
                 serde_json::to_string(&case.corpus)?,
                 serde_json::to_string(&case.tier)?,
-                serde_json::to_string(&case.carrier)?,
+                serde_json::to_string(&case.carrier_vector.carrier())?,
                 attack_category,
                 case.in_scope,
                 data,
@@ -497,8 +560,7 @@ mod tests {
             corpus: Corpus::Attack,
             tier: Tier::Tier1,
             author: Author::SelfAuthored,
-            carrier: Carrier::WebContent,
-            carrier_vector: CarrierVector::HiddenElement,
+            carrier_vector: CarrierVector::WebContent(WebContentVector::HiddenElement),
             attack_category: Some(AttackCategory::DataExfiltration),
             attack_techniques: vec![AttackTechnique::InstructionOverride, AttackTechnique::Plain],
             in_scope: true,
@@ -526,8 +588,7 @@ mod tests {
             corpus: Corpus::Benign,
             tier: Tier::Tier1,
             author: Author::SelfAuthored,
-            carrier: Carrier::WebContent,
-            carrier_vector: CarrierVector::VisibleText,
+            carrier_vector: CarrierVector::WebContent(WebContentVector::VisibleText),
             attack_category: None,
             attack_techniques: vec![],
             in_scope: true,
@@ -582,6 +643,64 @@ mod tests {
                 predict_ms: 150,
             },
             audit_log_anchor: "deadbeef".to_string(),
+        }
+    }
+
+    // ── T-006: type-level carrier/carrier_vector partition ─────────────────
+
+    #[test]
+    fn carrier_vector_carrier_matches_the_variant_it_was_constructed_with() {
+        assert_eq!(
+            CarrierVector::WebContent(WebContentVector::HtmlComment).carrier(),
+            Carrier::WebContent
+        );
+        assert_eq!(
+            CarrierVector::ToolOutput(ToolOutputVector::ToolJsonField).carrier(),
+            Carrier::ToolOutput
+        );
+    }
+
+    #[test]
+    fn carrier_vector_serializes_as_an_externally_tagged_pair() {
+        let v = CarrierVector::WebContent(WebContentVector::AltText);
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#"{"WebContent":"AltText"}"#);
+        let back: CarrierVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, back);
+    }
+
+    /// The exact bypass D6/T-006 closes: previously `CaseDefinition` had a
+    /// standalone `carrier: Carrier` field alongside `carrier_vector`, and
+    /// only `ferrite_eval::corpus::partition_matches` (a caller-side
+    /// function run at JSON-load time) rejected a case whose two fields
+    /// disagreed. A hand-built Rust struct literal never went through that
+    /// function. There is no longer a `carrier` field to disagree with
+    /// `carrier_vector` — every `CaseDefinition` value that compiles has a
+    /// consistent pairing by construction, proven here by covering every
+    /// vector variant on both sides.
+    #[test]
+    fn every_carrier_vector_variant_reports_the_correct_carrier() {
+        let web_vectors = [
+            WebContentVector::HiddenElement,
+            WebContentVector::OffscreenText,
+            WebContentVector::HtmlComment,
+            WebContentVector::AltText,
+            WebContentVector::MetaContent,
+            WebContentVector::CssPseudo,
+            WebContentVector::VisibleText,
+        ];
+        for v in web_vectors {
+            assert_eq!(CarrierVector::WebContent(v).carrier(), Carrier::WebContent);
+        }
+
+        let tool_vectors = [
+            ToolOutputVector::ToolJsonField,
+            ToolOutputVector::ToolTextBlob,
+            ToolOutputVector::ToolErrorMessage,
+            ToolOutputVector::ToolMetadata,
+        ];
+        for v in tool_vectors {
+            assert_eq!(CarrierVector::ToolOutput(v).carrier(), Carrier::ToolOutput);
         }
     }
 
@@ -657,6 +776,47 @@ mod tests {
         assert_eq!(all_cases.len(), 1);
         let all_execs = store.all_executions().unwrap();
         assert_eq!(all_execs.len(), 1);
+    }
+
+    /// Schema-migration test (directive's own requirement: "Persist via
+    /// `rusqlite` with scalar columns for filtering plus a JSON blob as
+    /// source of truth; add a schema-migration test"). `DatasetStore::open`
+    /// uses `CREATE TABLE IF NOT EXISTS`, so opening the same DB file twice
+    /// — once against a schema written by an "older" open, once against the
+    /// current `open()` — must not error and must preserve previously
+    /// written rows. This is the migration property that actually matters
+    /// here: a store opened against a pre-existing file (as every real
+    /// corpus run does, reopening the same `.db`) never loses data or fails
+    /// to open because the schema "changed".
+    #[test]
+    fn dataset_store_reopen_against_an_existing_db_preserves_rows() {
+        let path =
+            std::env::temp_dir().join(format!("ferrite-dataset-migrate-{}.db", Uuid::new_v4()));
+
+        {
+            let store = DatasetStore::open(&path).unwrap();
+            let case = sample_case_definition();
+            store.insert_case(&case).unwrap();
+            let exec = sample_execution_record(case.case_id);
+            store.insert_execution(&exec).unwrap();
+        } // store (and its Connection) dropped — simulates a fresh process
+
+        // Re-open against the same file, exactly as a second `just eval` run
+        // against a persisted corpus DB would.
+        let reopened = DatasetStore::open(&path).unwrap();
+        let cases = reopened.all_cases().unwrap();
+        let execs = reopened.all_executions().unwrap();
+        assert_eq!(cases.len(), 1, "case row lost across reopen");
+        assert_eq!(execs.len(), 1, "execution row lost across reopen");
+
+        // A second `insert_case` on a *third* open still works — the table
+        // isn't recreated/truncated by a later `open()`.
+        let another = DatasetStore::open(&path).unwrap();
+        let case2 = sample_benign_case_definition();
+        another.insert_case(&case2).unwrap();
+        assert_eq!(another.all_cases().unwrap().len(), 2);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

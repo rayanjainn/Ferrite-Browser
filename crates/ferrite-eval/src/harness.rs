@@ -563,9 +563,9 @@ mod e2e_tests {
     };
     use ferrite_core::OriginScope;
     use ferrite_ipi::dataset::{
-        AttackCategory, AttackTechnique, Author, Carrier, CarrierVector, ConsentOutcome,
-        DatasetStore, ExpectedFinding, FinalOutcome, FindingLocation, GroundTruth, LayerOutcome,
-        Tier,
+        AttackCategory, AttackTechnique, Author, CarrierVector, ConsentOutcome, DatasetStore,
+        ExpectedFinding, FinalOutcome, FindingLocation, GroundTruth, LayerOutcome, Tier,
+        ToolOutputVector, WebContentVector,
     };
     use std::collections::HashSet;
     use std::sync::Mutex as StdMutex;
@@ -610,8 +610,7 @@ mod e2e_tests {
             corpus: Corpus::Attack,
             tier: Tier::Tier1,
             author: Author::SelfAuthored,
-            carrier: Carrier::WebContent,
-            carrier_vector: CarrierVector::HtmlComment,
+            carrier_vector: CarrierVector::WebContent(WebContentVector::HtmlComment),
             attack_category: Some(AttackCategory::AgentRedirection),
             attack_techniques: vec![AttackTechnique::InstructionOverride],
             in_scope: true,
@@ -651,8 +650,7 @@ mod e2e_tests {
             corpus: Corpus::Benign,
             tier: Tier::Tier1,
             author: Author::SelfAuthored,
-            carrier: Carrier::WebContent,
-            carrier_vector: CarrierVector::VisibleText,
+            carrier_vector: CarrierVector::WebContent(WebContentVector::VisibleText),
             attack_category: None,
             attack_techniques: vec![],
             in_scope: true,
@@ -677,8 +675,7 @@ mod e2e_tests {
             corpus: Corpus::Attack,
             tier: Tier::Tier2,
             author: Author::SelfAuthored,
-            carrier: Carrier::ToolOutput,
-            carrier_vector: CarrierVector::ToolJsonField,
+            carrier_vector: CarrierVector::ToolOutput(ToolOutputVector::ToolJsonField),
             attack_category: Some(AttackCategory::DataExfiltration),
             attack_techniques: vec![AttackTechnique::InstructionOverride],
             in_scope: true,
@@ -847,8 +844,7 @@ mod e2e_tests {
             corpus: Corpus::Benign,
             tier: Tier::Tier1,
             author: Author::SelfAuthored,
-            carrier: Carrier::WebContent,
-            carrier_vector: CarrierVector::VisibleText,
+            carrier_vector: CarrierVector::WebContent(WebContentVector::VisibleText),
             attack_category: None,
             attack_techniques: vec![],
             in_scope: true,

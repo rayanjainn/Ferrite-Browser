@@ -215,8 +215,8 @@ mod tests {
     use super::*;
     use ferrite_core::OriginScope;
     use ferrite_ipi::dataset::{
-        AttackCategory, AttackTechnique, Author, Carrier, CarrierVector, ExpectedFinding,
-        FindingLocation, GroundTruth, Tier,
+        AttackCategory, AttackTechnique, Author, CarrierVector, ExpectedFinding, FindingLocation,
+        GroundTruth, Tier, WebContentVector,
     };
     use ferrite_ipi::dry_run::{FindingCarrier, RecordedFinding};
     use ferrite_ipi::sanitizer::Finding;
@@ -246,8 +246,7 @@ mod tests {
             corpus: Corpus::Attack,
             tier: Tier::Tier1,
             author: Author::SelfAuthored,
-            carrier: Carrier::WebContent,
-            carrier_vector: CarrierVector::HtmlComment,
+            carrier_vector: CarrierVector::WebContent(WebContentVector::HtmlComment),
             attack_category: Some(AttackCategory::DataExfiltration),
             attack_techniques: vec![AttackTechnique::InstructionOverride],
             in_scope: true,
@@ -275,8 +274,7 @@ mod tests {
             corpus: Corpus::Benign,
             tier: Tier::Tier1,
             author: Author::SelfAuthored,
-            carrier: Carrier::WebContent,
-            carrier_vector: CarrierVector::VisibleText,
+            carrier_vector: CarrierVector::WebContent(WebContentVector::VisibleText),
             attack_category: None,
             attack_techniques: vec![],
             in_scope: true,

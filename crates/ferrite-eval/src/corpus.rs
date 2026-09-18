@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use ferrite_ipi::dataset::{Carrier, CarrierVector, CaseDefinition, FindingLocation};
+use ferrite_ipi::dataset::{Carrier, CaseDefinition, FindingLocation};
 use ferrite_ipi::dry_run::{DryRunContent, DryRunReply};
 
 /// The known `BrowserTool::tool_id()` strings (`ferrite_agent::BrowserTool`).
@@ -41,12 +41,6 @@ pub enum CorpusError {
     Json {
         path: String,
         source: serde_json::Error,
-    },
-    #[error("{path}: carrier {carrier:?} is incompatible with carrier_vector {vector:?}")]
-    Partition {
-        path: String,
-        carrier: Carrier,
-        vector: CarrierVector,
     },
     #[error("duplicate case_id {case_id} in {path_a} and {path_b}")]
     DuplicateCaseId {
@@ -129,33 +123,6 @@ fn lower_content(authored: AuthoredContent) -> DryRunContent {
     }
 
     content
-}
-
-/// `true` iff `vector` belongs to the partition of `carrier`. An exhaustive
-/// match on `(carrier, vector)` so adding a new `CarrierVector` variant forces
-/// a compile error here rather than silently passing validation.
-fn partition_matches(carrier: Carrier, vector: CarrierVector) -> bool {
-    match (carrier, vector) {
-        (
-            Carrier::WebContent,
-            CarrierVector::HiddenElement
-            | CarrierVector::OffscreenText
-            | CarrierVector::HtmlComment
-            | CarrierVector::AltText
-            | CarrierVector::MetaContent
-            | CarrierVector::CssPseudo
-            | CarrierVector::VisibleText,
-        ) => true,
-        (
-            Carrier::ToolOutput,
-            CarrierVector::ToolJsonField
-            | CarrierVector::ToolTextBlob
-            | CarrierVector::ToolErrorMessage
-            | CarrierVector::ToolMetadata,
-        ) => true,
-        (Carrier::WebContent, _) => false,
-        (Carrier::ToolOutput, _) => false,
-    }
 }
 
 /// `true` iff at least one `by_tool` key is not in `KNOWN_TOOL_IDS`. Returns
@@ -271,15 +238,13 @@ pub fn load_case(path: &Path) -> Result<(CaseDefinition, DryRunContent), CorpusE
             source,
         })?;
 
-    if !partition_matches(file.case.carrier, file.case.carrier_vector) {
-        return Err(CorpusError::Partition {
-            path: path_str,
-            carrier: file.case.carrier,
-            vector: file.case.carrier_vector,
-        });
-    }
-
-    check_carrier_content_binding(&path_str, file.case.carrier, &file.content)?;
+    // T-006: the carrier/carrier_vector partition is now enforced by the
+    // type system (`ferrite_ipi::dataset::CarrierVector`) — a case whose
+    // `carrier_vector` disagreed with its `carrier` could not have
+    // deserialized above, let alone reached this line. The runtime check
+    // that used to live here (`partition_matches`, `CorpusError::Partition`)
+    // is deleted, not just unreachable, per the "no dead code" invariant.
+    check_carrier_content_binding(&path_str, file.case.carrier_vector.carrier(), &file.content)?;
 
     if let Some(tool_id) = find_unknown_tool_id(&file.content) {
         return Err(CorpusError::UnknownToolId {
@@ -367,8 +332,7 @@ mod tests {
             "corpus": "Attack",
             "tier": "Tier1",
             "author": "SelfAuthored",
-            "carrier": "WebContent",
-            "carrier_vector": "HtmlComment",
+            "carrier_vector": {"WebContent": "HtmlComment"},
             "attack_category": "AgentRedirection",
             "attack_techniques": ["InstructionOverride"],
             "in_scope": true,
@@ -403,7 +367,16 @@ mod tests {
         }
     }"#;
 
-    const PARTITION_MISMATCH_JSON: &str = r#"{
+    // Pre-T-006 shape: flat `"carrier": "WebContent"` alongside a
+    // `"carrier_vector"` from the OTHER partition as a bare string
+    // (`"ToolJsonField"`, no `carrier`/`carrier_vector` type nesting) — the
+    // exact JSON shape that used to load and then get rejected at runtime by
+    // the now-deleted `partition_matches`/`CorpusError::Partition`. It no
+    // longer deserializes at all: `CarrierVector` is an externally-tagged
+    // enum-of-enums (`{"WebContent": "..."}` / `{"ToolOutput": "..."}`), so a
+    // bare string for `carrier_vector` is a `CorpusError::Json` failure, not
+    // a value that parses and then fails a separate partition check.
+    const OLD_FLAT_SHAPE_NO_LONGER_DESERIALIZES_JSON: &str = r#"{
         "case": {
             "case_id": "22222222-2222-2222-2222-222222222222",
             "corpus": "Attack",
@@ -437,8 +410,7 @@ mod tests {
             "corpus": "Attack",
             "tier": "Tier1",
             "author": "SelfAuthored",
-            "carrier": "WebContent",
-            "carrier_vector": "HtmlComment",
+            "carrier_vector": {"WebContent": "HtmlComment"},
             "attack_category": "AgentRedirection",
             "attack_techniques": [],
             "in_scope": true,
@@ -468,8 +440,7 @@ mod tests {
             "corpus": "Attack",
             "tier": "Tier1",
             "author": "SelfAuthored",
-            "carrier": "ToolOutput",
-            "carrier_vector": "ToolJsonField",
+            "carrier_vector": {"ToolOutput": "ToolJsonField"},
             "attack_category": "AgentRedirection",
             "attack_techniques": [],
             "in_scope": true,
@@ -497,8 +468,7 @@ mod tests {
             "corpus": "Attack",
             "tier": "Tier1",
             "author": "SelfAuthored",
-            "carrier": "ToolOutput",
-            "carrier_vector": "ToolJsonField",
+            "carrier_vector": {"ToolOutput": "ToolJsonField"},
             "attack_category": "AgentRedirection",
             "attack_techniques": [],
             "in_scope": true,
@@ -528,8 +498,7 @@ mod tests {
             "corpus": "Attack",
             "tier": "Tier1",
             "author": "SelfAuthored",
-            "carrier": "ToolOutput",
-            "carrier_vector": "ToolJsonField",
+            "carrier_vector": {"ToolOutput": "ToolJsonField"},
             "attack_category": "AgentRedirection",
             "attack_techniques": [],
             "in_scope": true,
@@ -560,8 +529,7 @@ mod tests {
             "corpus": "Attack",
             "tier": "Tier1",
             "author": "SelfAuthored",
-            "carrier": "WebContent",
-            "carrier_vector": "HtmlComment",
+            "carrier_vector": {"WebContent": "HtmlComment"},
             "attack_category": "AgentRedirection",
             "attack_techniques": [],
             "in_scope": true,
@@ -601,8 +569,13 @@ mod tests {
             case.case_id,
             Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap()
         );
-        assert_eq!(case.carrier, Carrier::WebContent);
-        assert_eq!(case.carrier_vector, CarrierVector::HtmlComment);
+        assert_eq!(case.carrier_vector.carrier(), Carrier::WebContent);
+        assert_eq!(
+            case.carrier_vector,
+            ferrite_ipi::dataset::CarrierVector::WebContent(
+                ferrite_ipi::dataset::WebContentVector::HtmlComment
+            )
+        );
 
         // The lowered DryRunContent actually delivers the authored page.
         let mut ch = content.read_page.clone();
@@ -617,11 +590,23 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// T-006 regression: the pre-rebuild bypass (a case whose flat `carrier`
+    /// disagreed with its flat `carrier_vector`, silently loaded, then
+    /// rejected only by a runtime `partition_matches` check) is gone at the
+    /// deserialization boundary, not just checked one call site earlier —
+    /// `CorpusError::Partition` no longer exists as a variant to match on.
     #[test]
-    fn load_case_partition_mismatch_errors() {
-        let path = write_temp("mismatch.json", PARTITION_MISMATCH_JSON);
+    fn old_flat_carrier_shape_fails_to_deserialize_not_a_partition_check() {
+        let path = write_temp(
+            "old-flat-shape.json",
+            OLD_FLAT_SHAPE_NO_LONGER_DESERIALIZES_JSON,
+        );
         let err = load_case(&path).unwrap_err();
-        assert!(matches!(err, CorpusError::Partition { .. }));
+        assert!(
+            matches!(err, CorpusError::Json { .. }),
+            "expected a Json deserialization failure now that CarrierVector is an \
+             enum-of-enums, got {err:?}"
+        );
         std::fs::remove_file(&path).ok();
     }
 
