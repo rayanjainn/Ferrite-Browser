@@ -4,11 +4,13 @@
 //! `Utc::now()` is a test whose outcome depends on when it runs. Everything
 //! in the workspace that needs the time takes a `&dyn Clock` (or a generic
 //! `C: Clock`) instead, so production wires in [`SystemClock`] and tests wire
-//! in [`FixedClock`], which only moves when a test moves it.
+//! in `FixedClock`, which only moves when a test moves it.
 //!
-//! [`FixedClock`] is gated behind `cfg(test)` in this crate and the
-//! `test-util` feature for downstream crates, so no test-only code reaches a
-//! default build (R9).
+//! `FixedClock` is gated behind `cfg(test)` in this crate and the `test-util`
+//! feature for downstream crates, so no test-only code reaches a default
+//! build (R9) — it is deliberately not linked here, because in a default
+//! build there is no item to link to, and `cargo doc` failing on that link is
+//! the proof.
 
 use chrono::{DateTime, Utc};
 
