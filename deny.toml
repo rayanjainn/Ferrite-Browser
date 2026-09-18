@@ -104,7 +104,6 @@ skip = [
   { name = "libloading" },
   { name = "linux-raw-sys" },
   { name = "ndk-sys" },
-  { name = "nix" },
   { name = "objc2" },
   { name = "objc2-foundation" },
   { name = "parking_lot" },
