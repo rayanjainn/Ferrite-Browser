@@ -56,17 +56,33 @@ section there for what was deliberately deleted and why).
 
 ## Building
 
+The `justfile` is the single command surface (`just --list` to see every
+recipe). Common ones:
+
+```
+just check   # fmt-check + clippy (--all-targets, deny warnings) + unused deps
+just test    # full workspace test suite
+just audit   # cargo-deny: licenses, security advisories, duplicate versions
+```
+
+Plain `cargo` works too if you don't have `just`:
+
 ```
 cargo build --workspace
 cargo test --workspace
 ```
 
-Building the real Servo engine is optional and slow:
+Building the real Servo engine is optional and slow (`just build-servo`, or
+`cargo build -p ferrite-servo --features servo`).
+
+### Local tooling
+
+`rustup` (stable, with the `rustfmt`/`clippy`/`llvm-tools` components —
+`rust-toolchain.toml` pins these) plus:
 
 ```
-cargo build -p ferrite-servo --features servo
+brew install just cargo-deny        # or: cargo install just cargo-deny
+cargo install cargo-machete --locked
 ```
 
-A `justfile` single-command surface is planned (`docs/REBUILD_DIRECTIVE.md`
-§6/A1) but not yet built — the commands above are the current, real way to
-build and test this workspace.
+`just install-hooks` wires the commit-msg/pre-commit git hooks after that.
