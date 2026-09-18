@@ -23,7 +23,7 @@ use ferrite_agent::{
     AgentRuntime, AgentTask, AgentToolCall, AgentToolResult, BrowserTool, GeminiAgent,
 };
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
-use ferrite_ipi::comparator::{compare, ConsentDecision, FingerprintDiff, OriginScope};
+use ferrite_ipi::comparator::{compare, ConsentDecision, ExpectedFingerprint, FingerprintDiff};
 use ferrite_ipi::tool_decision::{LoopOutcome, ToolDecisionEngine, ToolId};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
@@ -696,10 +696,29 @@ pub fn update(
                 let _ = event_tx.send(FerriteBrowserMessage::AgentToolLogged(
                     "[dry run complete — checking for unexpected activity]".to_string(),
                 ));
-                // TODO(Task 19): no per-task origin-scope authoring exists yet —
-                // task_open is the honest stand-in (admits any origin) until the
-                // dataset pipeline supplies authored OriginScope values per case.
-                let diff = compare(&fingerprint, &dry_record, &OriginScope::task_open());
+                // No per-task per-capability origin-scope authoring exists yet
+                // (T-001's live-path bridge, see ferrite_ipi::comparator's
+                // module docs). The task's own declared context URL — already
+                // threaded in above as `agent_task.context_url` — narrows
+                // every capability to an exact scope on it; task_open (which
+                // admits any origin) is used only when no context URL is
+                // known at all, never unconditionally.
+                let context_origin = agent_task
+                    .context_url
+                    .as_deref()
+                    .and_then(|url| ferrite_core::Origin::parse(url).ok());
+                let scope = match &context_origin {
+                    Some(origin) => ferrite_core::OriginScope::exact([origin.clone()])
+                        .expect("one origin is never empty"),
+                    None => ferrite_core::OriginScope::task_open(
+                        "no context URL known for this task; see ferrite_ipi::comparator's \
+                         module docs, \"Where a per-capability OriginScope comes from\"",
+                    )
+                    .expect("non-blank rationale"),
+                };
+                let expected =
+                    ExpectedFingerprint::from_legacy_tool_fingerprint(&fingerprint, scope);
+                let diff = compare(&expected, &dry_record);
                 if !diff.is_clean() {
                     let _ = event_tx.send(FerriteBrowserMessage::ConsentRequired(diff));
                     return;
