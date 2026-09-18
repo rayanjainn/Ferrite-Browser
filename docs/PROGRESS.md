@@ -365,3 +365,113 @@ The load-bearing ones, by name:
   declaration, so a variant cannot exist without appearing in `ALL`), but
   Rust has no stable way to assert an enum's variant *count*, so that
   guarantee rests on the macro being the only way these enums are declared.
+
+## 2026-09-18 — A3 (Model layer) — `ferrite-model`: providers, decorators, conformance suite, T-213
+
+**Session note, for the record (R2):** the first A3 attempt hit an
+account-level opus rate limit mid-session after landing 2 clean commits
+(`75ba980`, `d9f9438` — trait/guard/config, then cache/throttle/budget
+decorators; 89 tests green at that point) and leaving the four backends
+half-written, uncommitted. Rather than spend a second full subagent
+session re-deriving context already on disk, the coordinating session
+picked up directly in the same worktree and finished it. Everything below
+was independently re-verified against the actual crate, not assumed from
+the interrupted session's last message.
+
+**Landed:**
+- Completed the four backends: `MockProvider`/`ReplayProvider` were
+  already scaffolded by the first session; `OllamaProvider`,
+  `GeminiProvider`, and the shared `backends/http.rs` (status
+  classification, `Retry-After` parsing, a streaming bounded body read
+  that abandons an oversized response mid-transfer rather than buffering
+  it first) are new.
+- Found and fixed a real bug while generating the first fixtures:
+  `fixtures::FIXTURE_DIR` was a relative string constant
+  (`"crates/ferrite-model/tests/fixtures/model"`), which resolves wrong
+  under plain `cargo test` — Cargo runs a package's test binaries with the
+  *package* directory as the working directory, not the workspace root,
+  so the constant silently pointed at a nonexistent nested
+  `crates/ferrite-model/crates/ferrite-model/...` path the moment it was
+  actually used. Replaced with `fixture_dir()`, built from
+  `CARGO_MANIFEST_DIR` (compile-time, always correct regardless of
+  runtime CWD), plus a regression test pinning the result is absolute and
+  ends where the committed fixtures actually live.
+- Generated two real, committed fixtures under
+  `crates/ferrite-model/tests/fixtures/model/` via `fixtures::write()`
+  against literal, realistic Ollama/Gemini wire JSON — there is no
+  `OLLAMA_API_KEY` in this sandbox, so this stood in for an actual
+  `just record` session. The generator itself was a throwaway test file,
+  deleted immediately after running once.
+- `tests/conformance.rs` — the A3 exit-gate deliverable
+  ("the provider conformance suite passes identically against
+  `MockProvider` and `ReplayProvider`"): one `assert_conforms(&dyn
+  ModelProvider)` function run against both, proving a caller holding the
+  trait object cannot tell which backend answered except at
+  `Provenance::provider` — and a dedicated test pins that this is the one
+  *deliberate* place they're allowed to differ, not an accidental gap in
+  "identically."
+- Added `OllamaProvider::fetch_wire`/`GeminiProvider::fetch_wire` (not in
+  either session's original plan): `ModelProvider::complete` digests a
+  response into a `CompletionResponse` and discards the raw bytes, but
+  `fixtures::write` needs the *verbatim* wire body (`fixtures.rs`'s own
+  module doc: "so replay exercises the real parser"). Without a way to
+  get the raw body, `just record` could not actually do what §10.3
+  describes. Both methods share the same request/classify/read_bounded
+  path `complete()` uses, just stopping one step earlier.
+- CLI examples (`examples/models.rs`, `probe.rs`, `record.rs`,
+  `cache_stats.rs`) and four matching `justfile` recipes. `cache_stats`
+  needed `config::default_cache_dir()` made `pub` (was crate-private) so
+  it doesn't have to construct a full `ModelConfig` — which would
+  otherwise force `FERRITE_MODEL_SMALL`/`MAIN` to be set just to look at
+  a directory that has nothing to do with them.
+- Secret-scan addition to `scripts/hooks/pre-commit` (§10.1): a targeted
+  pattern for `OLLAMA_API_KEY=<something-token-shaped>` /
+  `FERRITE_GEMINI_API_KEY=<...>` actually being assigned in a staged
+  diff, deliberately not a name-only match (every file in this crate
+  legitimately says `OLLAMA_API_KEY` by name; a name-only block would
+  fire on every commit and teach everyone to route around it). Verified
+  against both a real staged secret (blocked) and the crate's own
+  legitimate `OLLAMA_API_KEY`-mentioning source (clean).
+- `deny.toml`: `keyring`+`dirs` (new deps, justified inline in the
+  commit) introduced a second, separately-caused batch of duplicate-
+  version crates (the `windows_*` per-target family, `dirs`/`dirs-sys`)
+  on top of A1's Servo-vs-iced batch — added to the same `[bans] skip`
+  array (TOML disallows redefining a key in one table) with its own
+  comment block so the two causes stay traceable rather than blurring
+  into one pile.
+
+**Commits:** `75ba980` (trait/guard/config, T-103+T-213) → `d9f9438`
+(decorators, T-103) — both from the interrupted session, re-verified
+rather than re-done → `3dcaba5` (backends, fixtures, conformance suite,
+CLI examples, justfile, pre-commit hook, deny.toml — everything above).
+**Known inaccuracy in `3dcaba5`'s own message, recorded here per R2
+rather than silently left**: it says "examples added in the next
+commit," written when the intent was to split them out; a `git add -A`
+before committing staged everything together and there was no next
+commit. The content is correct either way — only the message's claim
+about which commit contains what is wrong.
+
+**Tests:** `cargo test -p ferrite-model` — 154 passing (151 unit + 3
+conformance), 0 failed. `cargo test --workspace` — every existing suite
+still green (`ferrite-core`'s 56, the pre-A2 crates' totals unchanged).
+`cargo clippy --workspace --all-targets -- -D warnings` clean. `cargo
+fmt --all --check` clean. `cargo deny check` exits 0 (advisories/bans/
+licenses/sources all `ok`). `cargo machete` clean. `just check` and
+`just test` both green end to end.
+
+**Not done / not verified, stated plainly (R2):**
+- `just models`, `just probe`, and `just record` all build, and were
+  confirmed to fail cleanly with an actionable error (not a panic) when
+  run with no `OLLAMA_API_KEY`/`FERRITE_MODEL_SMALL` configured — but
+  none of the three has ever made a real network call. There is no
+  Ollama Cloud key in this sandbox. A3's exit gate literally asks a
+  *human* to run `just probe` by hand once; that step is still open and
+  needs to happen outside an automated session.
+- `just cache-stats` **was** run for real, offline, against an empty
+  cache dir, and works.
+- The two committed fixtures were generated from hand-written literal
+  wire JSON, not a real recorded response. They exercise the real
+  parsers (that's the point of storing the wire body verbatim), but they
+  are not proof Ollama/Gemini's actual current API matches this crate's
+  assumptions — only a live `just probe`/`just record` run can confirm
+  that.
