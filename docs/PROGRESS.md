@@ -1900,7 +1900,7 @@ example added alongside the existing T1a one, and §11's placeholder ("not
 covered yet") for AgentDojo adaptation mechanics replaced with a real
 section citing `ferrite_eval::agentdojo` and stating its honest scope.
 
-**T-203 (closed, `<this entry's SHA>`) — schema-completeness audit against
+**T-203 (closed, `bdd631e`) — schema-completeness audit against
 `docs/REBUILD_DIRECTIVE.md` §13.2, performed before authoring more cases,
 per the task's own instruction:**
 
