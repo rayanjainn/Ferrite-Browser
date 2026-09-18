@@ -551,3 +551,125 @@ provided was never tried — the first one worked, so trying the second
 would have been pointless exposure of an unused credential. It was not
 stored anywhere. If the first key is ever revoked, the user has the
 second one to provide again.
+
+## 2026-09-18 — A4 (Fingerprint engine) — `ferrite-ipi`: hybrid predict-phase engine, T-104
+
+**Session note:** this worktree's branch was initially checked out from a
+stale `origin/main` (the pre-rebuild tree — `Browser/`-nested, no `docs/`,
+no `crates/`) rather than this repo's local `main` (which already carries
+A0–A3). Recreated `rebuild/a04-fingerprint-engine` from local `main`
+(`1bcb7e9`) before doing anything else; flagging it in case the same stale
+base bites a later agent's worktree setup.
+
+**Landed:**
+- `crates/ferrite-ipi/src/fingerprint/{mod,rules,engine}.rs` (new module,
+  wired in via `pub mod fingerprint;` in `lib.rs`; `ferrite-ipi/Cargo.toml`
+  gains `ferrite-core`/`ferrite-model`, both already single-sourced in the
+  root `Cargo.toml`'s `[workspace.dependencies]`).
+- `rules::rule_based_must_use` — the deterministic keyword layer, retyped
+  from the pre-rebuild `tool_decision::rule_based_must_use`
+  (`crates/ferrite-ipi/src/tool_decision/mod.rs`, left untouched as
+  reference material per `docs/AUDIT.md`) against `ferrite_core::Capability`
+  instead of a stringly `ToolId`. Same keyword groups; a keyword table
+  (`RULES: &[(Capability, &[&str])]`) instead of a chain of `if`s.
+- `engine::generate_fingerprint` — calls a `&dyn ferrite_model::ModelProvider`
+  (never a concrete backend, per §10.5) to predict `may_use` for whatever
+  capabilities the rules did not already pin down. The request carries only
+  the prompt and the still-available capability names — never page content
+  (§10.3).
+- **Closed-allowlist filtering**: `predict_may_use` matches each predicted
+  label against `Capability::ALL` by exact `as_str()` equality; anything
+  else is dropped at the boundary, not merely rejected after being
+  provisionally trusted.
+- **Disjointness by construction**: `Fingerprint::new` is the only
+  non-empty constructor and is private; it subtracts `must_use` from the
+  candidate `may_use` before storing either, so there is no public way to
+  build a `Fingerprint` with a capability in both sets.
+- **Fail to empty, enforced by control flow**: `predict_may_use` is two
+  `let-else` guards — a provider `Err` or an unparseable structured body
+  each return `BTreeSet::new()` before the line that would insert into the
+  result ever runs. `must_use` is computed from the prompt alone, before
+  the model is ever called, so a provider failure cannot touch it.
+- **`js.execute` structurally absent**: `Fingerprint`'s two layers are
+  `BTreeSet<Capability>`, and `Capability` (`ferrite_core::taxonomy`) has no
+  variant belonging to `ActionClass::Execute` — this module inherits that
+  guarantee for free by reusing the taxonomy's own type rather than
+  inventing a parallel "predicted tool" enum. A `compile_fail` doctest on
+  `Capability::JsExecute` (mirroring `ferrite_core::taxonomy`'s own pattern
+  on `ScopablePrimitive::JsExecute`) pins this down at the module boundary;
+  `engine::tests::a_fingerprint_can_never_express_js_execute` restates it
+  under the most permissive input the engine can produce (every capability
+  claimed plausible by the model).
+
+**One real gap found while writing the tests, fixed before landing:** the
+directive's "no capabilities left to predict" optimization
+(`generate_fingerprint` skipping the model call when `must_use` already
+covers every capability) was unreachable through the public function alone
+— `rule_based_must_use` has no clipboard keywords, so it can never produce
+all seven capabilities, and the first version of the corresponding test
+silently exercised the normal call path instead of the skip. Factored the
+skip logic into a private `generate_from_must_use(provider, model_tag,
+prompt, must_use)` that `generate_fingerprint` delegates to, so the test
+can drive the skip path directly with a synthetic `must_use` rather than
+leaving an untested (and, at the time, actually untriggerable) branch in
+place.
+
+**Commits:** `d9e2c12`.
+
+**Tests:** `cargo test -p ferrite-ipi` — 123 unit tests passing (28 new in
+`fingerprint::{rules,engine}::tests`, 95 pre-existing and unaffected), plus
+2 doctests in `fingerprint::mod` (one `compile_fail`). Table-driven:
+`fingerprint::engine::tests::table_driven_prompts_produce_the_expected_fingerprint`.
+Adversarial out-of-allowlist filtering:
+`out_of_allowlist_labels_are_filtered_not_passed_through`,
+`prompt_injection_text_embedded_in_the_response_array_is_dropped`.
+Provider-failure injection (all via `ferrite_model::MockProvider`, no live
+call): `a_transport_failure_fails_to_empty`, `a_timeout_fails_to_empty`,
+`a_rate_limit_fails_to_empty`, `a_server_error_fails_to_empty`,
+`a_budget_exhaustion_fails_to_empty`, `truncated_json_fails_to_empty`,
+`an_empty_body_fails_to_empty`, `an_oversized_response_is_rejected_and_fails_to_empty`.
+Empty-fingerprint routing:
+`a_fully_failing_prediction_on_an_open_ended_prompt_is_the_actual_empty_fingerprint`.
+Disjointness property test over 8 synthetic prompts against the worst-case
+model answer (every capability claimed plausible):
+`prop_must_use_and_may_use_are_always_disjoint`. js.execute absence:
+the `compile_fail` doctest in `fingerprint/mod.rs`, plus
+`a_fingerprint_can_never_express_js_execute` and
+`rule_layer_can_never_pin_down_js_execute`.
+
+Full gate: `just check` (fmt-check + `clippy --workspace --all-targets -D
+warnings` + `cargo machete`) clean workspace-wide. `just test` (full
+workspace `cargo test`) — every crate green, 0 failures, exit code 0
+(`ferrite-ipi`: 123 unit + 2 doc; `ferrite-model`: 151 unit + 3
+conformance; `ferrite-core`: 58 unit + 2 doc; everything else unchanged
+from A3's numbers). `cargo deny check` — `advisories ok, bans ok, licenses
+ok, sources ok` (one pre-existing, unrelated `unmatched-source` warning for
+the Servo git dependency, since Servo is not built by default).
+
+**Not done / explicitly deferred:**
+- No timeout test against `MockProvider::push_hang()` in this module —
+  bounding a hung call is `ferrite_model::decorators::Throttle`'s
+  per-request timeout, already proven in that crate's own suite (A3). This
+  module has no timeout of its own; a caller handing it a provider that
+  never resolves gets a call that never resolves, the same contract every
+  `ModelProvider` caller has.
+- No `js-prompt-injection-in-the-response-body` test beyond the one
+  smuggled-string case in `prompt_injection_text_embedded_in_the_response_array_is_dropped`
+  — broader adversarial-string fuzzing of the response body was judged out
+  of this charter's scope (the filter is an exact-match allowlist check
+  against a 7-item closed set, so its correctness does not depend on the
+  space of adversarial strings tried against it).
+- Scope authoring (`OriginScope` per capability) is not part of this
+  module's output. `Fingerprint::must_use`/`may_use` are bare
+  `BTreeSet<Capability>`, not `ferrite_core::ExpectedCapabilitySet` —
+  per-task origin scoping is authored data (ADR-004), not something a
+  keyword layer or a model call can derive from prompt text alone, and
+  wiring `Fingerprint` into an `ExpectedCapabilitySet` is naturally A7's
+  comparator-integration concern, not this charter's.
+- `comparator.rs`, `sanitizer.rs`, `dry_run.rs`, `twin.rs`,
+  `containment.rs`, `dataset.rs` and `tool_decision/` were not touched, per
+  charter.
+
+**Known issues discovered:** none new beyond the worktree-base note above
+(not filed as a T-### — it is a one-time harness/setup issue for this
+session, not a repo defect).
