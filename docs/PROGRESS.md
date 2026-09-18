@@ -673,3 +673,140 @@ the Servo git dependency, since Servo is not built by default).
 **Known issues discovered:** none new beyond the worktree-base note above
 (not filed as a T-### — it is a one-time harness/setup issue for this
 session, not a repo defect).
+
+## 2026-09-18 — A5 — Sanitizer rebuilt as versioned data, live excision wired at one of two call sites
+
+**Session note:** this worktree's branch was also initially checked out
+from the same stale, pre-rebuild tree A4 hit (`Browser/`-nested, no
+`docs/`/`crates/`, unrelated commit history — `git log --oneline -20`
+showed things like "Task 17", "Git LFS", "CI bug fixing v1.0", nothing
+resembling the rebuild). Recreated `rebuild/a05-sanitizer` from this
+repo's local `main` (`97c7164`, which carries A0–A4) before doing anything
+else, exactly as `docs/handoffs/a04.md` warned a future agent might need
+to.
+
+**Landed:**
+- `crates/ferrite-ipi/src/sanitizer/{mod,patterns,detect,html,excise,config}.rs`
+  (new module directory, replacing the old flat `sanitizer.rs` — Rust
+  cannot have both `sanitizer.rs` and `sanitizer/mod.rs` resolve to the
+  same `crate::sanitizer` path, and the charter's own framing ("rebuilding
+  it as a new module") reads as a replacement, not an addition; the old
+  file's logic and tests were folded into the new layout rather than
+  archived-in-place per `docs/AUDIT.md`'s note that it is reference
+  material to be reshaped).
+- `patterns.rs` — `PatternDef`/`PatternSet` as versioned data (`id`,
+  `description`, `regex`, `since_version`, a crate-wide
+  `PATTERN_SET_VERSION`), replacing the old inline
+  `general_injection_patterns()` tuple array. Two independent statics:
+  `GENERAL_PATTERNS` (5 patterns, unchanged count from pre-rebuild, per
+  the parameter rationale in `docs/REBUILD_DIRECTIVE.md` §13.4) and
+  `SCRIPT_PATTERNS` (5 JS-specific exfiltration primitives).
+- `detect.rs` — `Finding`/`LocatedFinding`, `detect()` against a
+  `PatternSet`, `detect_injection_in_value()`'s recursive JSON walk with
+  path tagging (`results[0].description`, not "somewhere in the blob").
+  Golden corpus: two positive + two negative examples per pattern (10
+  patterns total), table-driven, plus a test that every pattern has
+  corpus coverage.
+- `html.rs` — `ammonia`-based cleaning plus the comment/script carriers
+  extracted from raw HTML before `clean()` runs, ported near-verbatim
+  from the old `sanitize_html`.
+- `excise.rs` — sentence-segment, tag-boundary-safe excision
+  (`segment_bounds`/`merge_ranges`/`excise_ranges`, ported from the old
+  code), single-space replacement (never a marker — argued in the module
+  docs). New: an HTML-validity property test
+  (`excision_never_produces_malformed_html`) over 12 hand-built HTML
+  fixtures (injections mid-paragraph, tag-spanning, nested, at
+  document start/end, inside table cells, next to self-closing tags,
+  inside attribute-bearing elements), using `ammonia::clean()`'s own
+  parse/serialize as the well-formedness oracle: the test asserts
+  `clean(excise(clean(html))) == excise(clean(html))`, i.e. the excised
+  output is already a fixpoint of ammonia's parser — reasoning for why
+  that's a sufficient check is written into the test module's doc
+  comment rather than asserted without justification.
+- `config.rs` — `SanitizerConfig { detect_enabled, strip_enabled }` and
+  `run()`, the single call that makes excision live: `run(&config, html)`
+  returns a `SanitizedPage` whose `clean_html` is already excised when
+  `strip_enabled` is set, instead of requiring a caller to remember a
+  second `excise_*` call (the previous design's actual failure mode).
+  `PROVISIONAL_FALSE_STRIP_RATE_CEILING = 0.02`, cited to `docs/TO-DO.md`
+  T-203 as provisional, gates
+  `benign_fixture_false_strip_rate_is_below_the_provisional_ceiling`,
+  measured over a 35-sentence benign fixture corpus (ordinary web/tool
+  prose, several deliberately close to trigger vocabulary) — the test
+  passes at the current pattern set (0 of 35 stripped, well under the
+  2% ceiling; the ceiling itself, not this run's exact rate, is what's
+  provisional and needs A11's real audit against a real ~100-case benign
+  corpus per §13.3).
+- Independent-toggle tests: `detect_only_reports_findings_but_leaves_content_unchanged`,
+  `strip_mode_reports_findings_and_returns_modified_text`,
+  `off_mode_detects_nothing_and_returns_input_verbatim`.
+- `crates/ferrite-ipi/src/tool_decision/mod.rs` — minimal, explicitly
+  charter-sanctioned touch (the exception written into A5's charter for
+  wiring `strip_enabled` live): added `DefenseMode::sanitizer_detect_enabled`/
+  `sanitizer_strip_enabled`, and changed `ToolDecisionEngine::prepare_task`'s
+  `On`/`SanitizerOnly` arms from calling the old detect-only
+  `sanitizer::sanitize_html` to calling the new config-gated
+  `sanitizer::run`. This closes D3/T-003 **at this one call site**: before
+  the change, `On` and `SanitizerOnly` both only ever detected, never
+  excised, at this call site — a second, previously-unnamed instance of
+  D3's exact symptom, alongside the one the defect register names.
+
+**Verified, not assumed:** `cargo test -p ferrite-ipi` — 142 unit tests
+passing (up from the 123 A4's own PROGRESS.md entry above verified at its
+landing — no other agent touched `ferrite-ipi` between A4 and this
+session; net +19 after removing the old flat `sanitizer.rs`'s 26 tests and
+adding more, restructured, in the new layout), 2 doctests unchanged (A4's
+`fingerprint::mod` doctests). `cargo fmt -p ferrite-ipi --check` clean.
+`cargo clippy -p ferrite-ipi --all-targets -- -D warnings` clean. `just
+check` (fmt-check + `clippy --workspace --all-targets -D warnings` +
+`cargo machete`) clean workspace-wide — this also proves `ferrite-eval`
+and `ferrite-ui`, both of which depend on `ferrite_ipi::sanitizer::Finding`
+and `ferrite_ipi::dry_run` (which itself calls into the new sanitizer
+module), still compile and lint clean against the rebuilt API. `just
+test` — every crate green, 0 failures, exit 0 (`ferrite-ipi`: 142 unit + 2
+doc; every other crate's count unchanged from A4's numbers:
+`ferrite-model` 151 + 3 conformance, `ferrite-core` 45 + 9 schema + 2 doc,
+`ferrite-eval` 58 + 3 + 5, `ferrite-agent` 4, `ferrite-servo` 1). `cargo
+deny check` — `advisories ok, bans ok, licenses ok, sources ok` (same
+pre-existing, unrelated Servo-git-source `unmatched-source` warning A3/A4
+also saw).
+
+**A compatibility constraint discovered while porting, fixed before
+landing:** `crate::dry_run::RecordingExecutor` (out of this charter's
+scope) hardcodes the exact string `"instruction_override"` in its own
+test `w1_t1a_comment_caught`. The initial pattern split gave the
+"ignore ... previous/prior/above" rule and the "disregard ... previous"
+rule two distinct new IDs (`instruction_override_ignore`/
+`instruction_override_disregard`), which is the more correct design (the
+two were previously silently sharing one label) but broke that test.
+Since `dry_run.rs` cannot be touched per charter, the fix went the other
+way: the "ignore" pattern kept the bare `instruction_override` id, and
+only the "disregard" pattern got the new, previously-nonexistent
+`instruction_override_disregard` id. Documented at the point of
+definition in `patterns.rs`.
+
+**Not done / explicitly deferred — read before assuming T-003 is fully
+closed:** `docs/TO-DO.md` T-003 names a literal field, `strip_enabled`,
+that lives in `crate::dry_run::RecordingExecutor`/`DryRunOrchestrator` —
+a file this charter explicitly forbids touching. That flag still defaults
+to `false`, and neither of its two current callers
+(`ferrite-eval/src/harness.rs`'s `run_one`, which calls
+`set_detect_enabled` but never `set_strip_enabled`; `ferrite-ui/src/lib.rs`,
+which calls neither) ever flips it to `true` — both files are outside
+`ferrite-ipi` and outside this charter's file list. **This means the
+dry-run/eval-harness path — the one that actually produces
+`ExecutionRecord`s and metrics — still runs with excision off**, even
+though the sanitizer itself and its one in-crate production call site
+(`tool_decision::prepare_task`) now support and use live excision
+correctly. T-003 is marked `in-progress`, not `done`, in `docs/TO-DO.md`;
+a new task (T-215) is filed for the remaining half, owned by A6
+(`dry_run.rs`) and A12 (`harness.rs`, which already owns closing T-004,
+itself dependent on T-003). Full detail in `crates/ferrite-ipi/src/sanitizer/mod.rs`'s
+"How far this actually reaches" doc section and `docs/handoffs/a05.md`.
+
+**Commits:** `58c9121`.
+
+**Known issues discovered:** T-215 (new, see above) — `dry_run.rs`'s
+`RecordingExecutor.strip_enabled` and its two production-shaped callers
+never set it `true`; this is the literal field D3/T-003 names, and it
+remains unwired outside this charter's reach.
