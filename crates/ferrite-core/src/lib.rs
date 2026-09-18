@@ -13,6 +13,8 @@
 
 pub mod error;
 pub mod ids;
+pub mod scope;
 
-pub use error::IdError;
+pub use error::{IdError, ScopeError};
 pub use ids::{CaseId, ExecId, Origin, PrincipalId};
+pub use scope::{DomainSuffix, OriginScope, Specificity};

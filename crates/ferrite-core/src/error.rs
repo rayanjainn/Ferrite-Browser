@@ -7,6 +7,36 @@
 
 use thiserror::Error;
 
+/// An [`OriginScope`](crate::scope::OriginScope) or
+/// [`DomainSuffix`](crate::scope::DomainSuffix) was handed a value that
+/// violates ADR-004's authoring rules.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ScopeError {
+    /// An `Exact` or `DomainSuffix` scope was built with no entries. Such a
+    /// scope admits nothing, which is never what an author meant — it is the
+    /// silent way to write a capability that can never be attributed.
+    #[error("an origin scope of kind {kind} must list at least one entry")]
+    Empty {
+        /// The scope variant that was empty.
+        kind: &'static str,
+    },
+
+    /// A `TaskOpen` scope was built without a written rationale. ADR-004
+    /// requires one, because task-open is the weak-scope tier and its use has
+    /// to be justifiable and reportable rather than a default.
+    #[error("a task-open origin scope requires a written rationale (ADR-004)")]
+    MissingRationale,
+
+    /// A domain suffix was not a usable domain.
+    #[error("domain suffix {value:?} is unusable: {reason}")]
+    InvalidDomainSuffix {
+        /// The rejected input.
+        value: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+}
+
 /// A newtype identifier was handed a value that violates its invariants.
 ///
 /// `kind` is the identifier type's name (`"CaseId"`, `"PrincipalId"`, …) so
