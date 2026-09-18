@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/ferrite-core",
+  "crates/ferrite-model",
   "crates/ferrite-shell",
   "crates/ferrite-audit-log",
   "crates/ferrite-servo",
@@ -41,6 +42,18 @@ sha2 = "0.10"
 hex = "0.4"
 url = "2"
 
+# ── ferrite-model ────────────────────────────────────────────────────────
+# OS keyring for OLLAMA_API_KEY (docs/REBUILD_DIRECTIVE.md §10.1: the key
+# comes from the env var or the OS keyring "and nowhere else" — no config
+# file, no key file). Platform-native backends only: no dbus/secret-service
+# daemon is pulled in, and nothing links on a platform we do not target.
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
+# Home-directory resolution for the on-disk response cache at
+# `~/.cache/ferrite-model/` (§10.3). `std` has no OS-neutral equivalent —
+# `$HOME` is Unix-only and the justfile's `home_directory()` is a just
+# builtin that Rust cannot call.
+dirs = "5"
+
 # ── ferrite-ipi ──────────────────────────────────────────────────────────
 ammonia = "3"
 regex = "1"
@@ -65,6 +78,7 @@ ferrite-agent = { path = "crates/ferrite-agent" }
 ferrite-audit-log = { path = "crates/ferrite-audit-log" }
 ferrite-core = { path = "crates/ferrite-core" }
 ferrite-ipi = { path = "crates/ferrite-ipi" }
+ferrite-model = { path = "crates/ferrite-model" }
 ferrite-servo = { path = "crates/ferrite-servo" }
 ferrite-ui = { path = "crates/ferrite-ui" }
 

@@ -124,6 +124,31 @@ skip = [
   { name = "ttf-parser" },
   { name = "windows-core" },
   { name = "windows-sys" },
+
+  # A second, separately-caused batch (A3, T-103), appended to the same
+  # `skip` key rather than a second `[bans] skip = [...]` table (TOML
+  # disallows redefining a key in one table — cargo-deny would refuse to
+  # parse this file if these were split into two): `keyring` (the OS-
+  # keyring fallback §10.1 requires) and `dirs` (home-directory resolution
+  # for ~/.cache/ferrite-model) each pull their own copies of the
+  # windows-targets/windows_*_{msvc,gnu,gnullvm} per-target crates and of
+  # `dirs`/`dirs-sys` themselves, at versions the iced/winit stack above
+  # already has different ones of. Same structural situation as the block
+  # above (two dependency trees, different eras, meeting in one
+  # workspace), different cause — called out separately in this comment so
+  # the two are traceable to their actual sources rather than blurred into
+  # one undifferentiated pile.
+  { name = "dirs" },
+  { name = "dirs-sys" },
+  { name = "windows-targets" },
+  { name = "windows_aarch64_gnullvm" },
+  { name = "windows_aarch64_msvc" },
+  { name = "windows_i686_gnu" },
+  { name = "windows_i686_gnullvm" },
+  { name = "windows_i686_msvc" },
+  { name = "windows_x86_64_gnu" },
+  { name = "windows_x86_64_gnullvm" },
+  { name = "windows_x86_64_msvc" },
 ]
 
 [sources]
