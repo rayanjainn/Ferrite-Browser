@@ -140,3 +140,112 @@ citation, not because they're unit tests.
   carrier partition (T-006), and count toward the 10% double-authoring /
   κ ≥ 0.8 requirement like any new case (per the session's own amendment,
   now recorded in `docs/TO-DO.md` rather than only in chat).
+
+## 2026-09-18 — A1 (Foundation) — workspace deps, profiles, deny.toml, justfile, CI rework
+
+**Landed:**
+- Installed real local tooling to verify against rather than write blind:
+  a full `rustup` stable toolchain (only `rustup` itself pre-existed; no
+  active toolchain, no `cargo`/`rustc` on `PATH` — symlinked
+  `~/.cargo/bin/{cargo,rustc,rustfmt,cargo-fmt,cargo-clippy,clippy-driver,
+  rustdoc}` to the rustup-managed binaries, then later added the
+  `llvm-tools` component properly), plus `just`/`cargo-deny` (homebrew)
+  and `cargo-machete` (`cargo install`). Every claim below was actually
+  run on this machine, not inferred from reading the directive.
+- `[workspace.dependencies]` (T-101): every crate now uses `dep.workspace
+  = true`, including single-consumer deps. `tokio` trimmed `["full"]` →
+  `["rt-multi-thread", "macros", "time", "sync"]` (grepped every
+  `tokio::` call site first); `chrono` trimmed to `["clock", "serde"]`.
+  Added `[profile.dev/test/release/bench]` per §7.2.
+- **Closed T-207 for real** (was left open at A0's handoff): `cargo fmt
+  --all` (whitespace only) plus documented
+  `#[allow(clippy::await_holding_lock)]` on the 10 `ENV_GUARD`-across-
+  `.await` sites in `ferrite-eval` — root cause was the old CI's
+  `cargo clippy --workspace` lacking `--all-targets`, so it never linted
+  test code at all. Whole workspace is now both `cargo fmt --check`- and
+  `cargo clippy --workspace --all-targets -- -D warnings`-clean.
+- `cargo machete` found one real unused dependency (`ferrite-ui`'s
+  `uuid`, zero references, removed) and one false positive (`libservo`,
+  only referenced inside `#[cfg(feature = "servo")]`; documented via
+  `[package.metadata.cargo-machete] ignored`).
+- **`deny.toml` (T-101):** required adding a `license` field (none of the
+  7 crates had one — see the flagged decision below) and `publish =
+  false` (fixes a wildcard-dependency false-positive on our own path
+  deps) to every crate manifest. `cargo deny check` surfaced real,
+  fixable security advisories, not just noise — patched in the same
+  session (see the dependency-bump commit): **ammonia 3.3.1 → 3.3.3**
+  fixes two XSS advisories (RUSTSEC-2026-0193 mXSS via MathML,
+  RUSTSEC-2026-0213 SVG animate/set) in `ferrite-ipi`'s own
+  `sanitizer.rs::sanitize_html()` — the HTML-cleaning half of the IPI
+  defense; **rand 0.8.5 → 0.8.8** fixes an unsoundness advisory
+  (RUSTSEC-2026-0097) in the exact API (`rand::thread_rng()`) `twin.rs`
+  calls directly; **rustls-webpki 0.103.10 → 0.103.13** fixes three
+  certificate-validation advisories on the real TLS path
+  `ferrite-agent`'s `reqwest` client uses for Gemini API calls. One
+  advisory (RUSTSEC-2026-0285, a rustls TLS 1.3 handshake edge case) has
+  no available fix yet and IS on that same real network path — recorded
+  prominently in `deny.toml`'s ignore-list comment, not buried. A ~30-
+  crate duplicate-version skip list is bulk-justified (Servo pinned to
+  an old git tag vs. the current iced/winit stack — one structural
+  cause, not individually vetted crate-by-crate beyond confirming the
+  cause), documented as such rather than claimed as individually
+  audited.
+- `rust-toolchain.toml` (stable + rustfmt/clippy/llvm-tools — the last
+  one added after discovering `[profile.release]`'s `strip =
+  "debuginfo"` needs `rust-objcopy`, which isn't available without it).
+- `.cargo/config.toml`: deliberately does NOT hardcode `build.target-dir`
+  (no `~`/env expansion support, wrong call for a multi-OS/multi-
+  contributor repo per D13) — documented the deviation from
+  §7.4's literal suggestion inline; the `justfile` exports
+  `CARGO_TARGET_DIR` via `just`'s portable `home_directory()` instead.
+- `justfile`: `default`, `ci`, `check`, `fmt`, `lint`, `audit`, `test`,
+  `test-fast`, `test-live`, `run`, `build-servo`, `bloat`, `eval`,
+  `clean-cache`, `disk`, `install-hooks`. Every recipe actually run and
+  verified except `bloat`/`clean-cache` (need `cargo-bloat`/`cargo-sweep`,
+  not installed — noted in-recipe, not silently absent).
+- `.github/workflows/ci.yml` reworked: matrix widened to
+  ubuntu/macos/windows (was macos/windows); added cargo-machete,
+  cargo-deny (`EmbarkStudios/cargo-deny-action`), and both doc-drift
+  scripts as gates; clippy now uses `--all-targets`. **Flagged behavior
+  change** (T-210): the Servo-enabled "latest" release moved from every
+  push to main → weekly (Monday 06:00 UTC) + manual `workflow_dispatch`,
+  per §7.1's Servo-cost mandate. Not remotely verified (this sandbox
+  can't run GitHub Actions) — YAML syntax and job/trigger structure
+  checked locally; every command the workflow runs was actually executed
+  on this machine.
+- `docs/BUILD_BUDGET.md` created with real numbers: 1.7 GB dev-profile
+  target-dir (target well under the 12 GB budget), 3m32s cold
+  `just check && just test` (under the 5-minute budget; caveat: registry
+  cache was warm, not a true from-network clone — see that file).
+- README.md documents the justfile + required local tooling install
+  commands (a real onboarding gap: nothing previously said a fresh
+  contributor needs `just`/`cargo-deny`/`cargo-machete` installed).
+
+**Commits:** `42401fd`,`068fd8e` (T-207 fmt/clippy closure, split across
+two commits because the first deliberately excluded `ferrite-eval` until
+its deeper clippy issue was fixed for real rather than dodged) →
+`52bab06` (security-relevant dependency bumps) → `8b9d665` (deny.toml/
+license/publish/toolchain) → `af8d8e3` (justfile) → `9fee225` (CI
+rework) → `1ec1774` (README/toolchain docs). One earlier commit in this
+sequence (the `[workspace.dependencies]` consolidation itself) landed
+*combined into* `068fd8e` rather than as its own commit — the pre-commit
+hook blocked a separate attempt, the fix (the T-207 work above) was
+staged in the same working-tree pass, and both got committed together
+when the hook finally passed. The commit message for `068fd8e` describes
+only the T-207 fix, not the dependency consolidation it also contains —
+noted here since R2 requires the record to be accurate even when a
+commit message wasn't.
+
+**Tests:** `cargo test --workspace` (95 unit tests + ferrite-servo's 1 +
+all doctests) green after every change in this entry; `cargo fmt --all
+--check` clean; `cargo clippy --workspace --all-targets -- -D warnings`
+clean; `cargo deny check` exits 0; `cargo machete` clean; `just check`,
+`just test-fast`, `just disk`, `just eval` (correctly fails informatively),
+`just install-hooks` all run for real.
+
+**Needs owner confirmation, filed as T-209/T-210 (not silently decided):**
+the `MIT OR Apache-2.0` license choice (inherited from the archived
+`.rules` file's stated intent, not freshly confirmed), and the CI
+release-cadence change (every push → weekly + manual). Nothing has
+shipped to a remote yet — 17 commits sit local on `main`, unpushed
+(verified via `git log --oneline origin/main..HEAD | wc -l` at write time).
