@@ -35,16 +35,20 @@ stop and flag it; do not resurrect the crate.
 
 ## Build / test / run
 
-No `justfile` yet (it's an A1 deliverable per the rebuild directive — this
-section gets rewritten to `just ...` commands once it lands). Until then:
+`justfile` at the repo root is the command surface (`just --list` for every
+recipe):
 
 ```
-cargo build --workspace              # builds everything except Servo (feature-gated, see below)
-cargo test --workspace               # must pass with no network and no API key set
-cargo clippy --workspace -- -D warnings
-cargo fmt --check
-cargo build -p ferrite-servo --features servo   # pulls in the real Servo engine; slow, optional
+just check          # fmt-check + clippy --all-targets -D warnings + unused deps
+just test           # full workspace test suite (no network, no API key required — R7)
+just audit          # cargo-deny: licenses, advisories, duplicate versions
+just build-servo    # pulls in the real Servo engine; slow, optional, not part of check/test
 ```
+
+Plain `cargo` works too if `just` isn't installed: `cargo build --workspace`,
+`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all --check`. Note `--all-targets` on clippy — its absence
+previously hid a real bug for months (`docs/TO-DO.md` T-207).
 
 ## Invariants that must never be violated
 
