@@ -1785,3 +1785,251 @@ the consent panel`.
 the type system (closes T-006), build the real corpus per §13.3, decide
 the AgentDojo mapping-or-delete question (T-009). See
 `docs/handoffs/a10.md`.
+
+## 2026-09-18 — A11 (Dataset + corpus) — type-level carrier partition, AgentDojo adapter, corpus grown to 29 cases, T-006/T-009/T-201/T-203/T-208
+
+**Session note:** same hazard A4–A10 hit — worktree HEAD started on the
+stale, unrelated pre-rebuild tree (`65b6d67`, `Browser/`-nested,
+`FINALIZED_DECISIONS.md` at the root, no `crates/`/`docs/`), even though
+`git log --oneline -5 main` on the same worktree correctly showed A0–A10's
+history. `git checkout -b rebuild/a11-dataset-corpus` initially branched
+from the bad HEAD; caught before any file edits, fixed with
+`git checkout main && git reset --hard main` while on the new branch
+(nothing lost — working tree was clean). Recreated from local `main`
+(`53c8190`, carries A0–A10) before any real work.
+
+**Scope-mismatch note confirmed, per the launch brief's own instruction to
+re-verify it:** the directive's §6/A11 scope line names
+`crates/ferrite-eval/src/dataset/`, `corpus/`, but the real types
+(`CaseDefinition`/`Carrier`/`CarrierVector`/`Tier`/`RunLabel`/`Author`) live
+in `crates/ferrite-ipi/src/dataset.rs` (flat file, 683 lines pre-session),
+and the loader (`load_case`/`load_corpus`/`partition_matches`) lives in
+`crates/ferrite-eval/src/corpus.rs` (flat file, 795 lines pre-session) — no
+`dataset/`/`corpus/` directories exist or were created; splitting into
+modules was not warranted by this session's changes (dataset.rs grew by
+~130 lines, corpus.rs shrank by removing `partition_matches`). Worked in
+both files, as the launch brief anticipated.
+
+**T-006/D6 (closed, `6e6926a`):** `CarrierVector` is now an enum-of-enums —
+`CarrierVector::WebContent(WebContentVector)` /
+`CarrierVector::ToolOutput(ToolOutputVector)` — replacing the old two
+independent `CaseDefinition` fields (`carrier: Carrier`,
+`carrier_vector: CarrierVector`, an 11-variant flat enum). `Carrier` is now
+derived via `CarrierVector::carrier()`, never stored, so it structurally
+cannot disagree with the vector it's derived from. `ferrite_eval::corpus`'s
+old `partition_matches` function and `CorpusError::Partition` variant are
+**deleted**, not superseded — the runtime check they performed is now a
+compile error (Rust) or a deserialization failure (JSON), not a second,
+now-redundant check layered on top. Proof:
+- `ferrite_ipi::dataset::CarrierVector`'s own doc comment carries a
+  `compile_fail` doctest constructing the exact old bypass
+  (`CarrierVector::WebContent(ToolOutputVector::ToolJsonField)`) and shows
+  it fails with E0308.
+- `dataset::tests::every_carrier_vector_variant_reports_the_correct_carrier`,
+  `dataset::tests::carrier_vector_carrier_matches_the_variant_it_was_constructed_with`,
+  `dataset::tests::carrier_vector_serializes_as_an_externally_tagged_pair`.
+- `corpus::tests::old_flat_carrier_shape_fails_to_deserialize_not_a_partition_check`
+  proves the pre-T-006 flat JSON shape (`"carrier": "WebContent",
+  "carrier_vector": "ToolJsonField"`) is now a `CorpusError::Json` failure,
+  not a value that parses and then fails a separate partition check.
+- `dataset::tests::dataset_store_reopen_against_an_existing_db_preserves_rows`
+  is the schema-migration test the directive's persistence requirement asks
+  for (`DatasetStore::open`'s `CREATE TABLE IF NOT EXISTS` reopened against
+  an existing file preserves prior rows and accepts new inserts).
+
+All call sites updated (mechanical, required by the type change, not
+feature work): `dataset.rs`'s own `insert_case` (SQL column now populated
+via `case.carrier_vector.carrier()`), `corpus.rs`'s
+`check_carrier_content_binding` (now takes the derived `Carrier`),
+`ferrite-eval`'s test fixtures in `harness.rs`/`adjudication.rs`/
+`corpus.rs`/`tests/pilot_w6.rs`, and all 10 `tests/pilot_corpus/*.json`
+files (T-208, below).
+
+**T-009/D9 (closed, `6e6926a` — resolved as "implement for real," not
+delete):** `crates/ferrite-eval/src/agentdojo.rs` is a genuine, tested
+adapter — not enum plumbing. Three `AgentDojoSlackTask` constants
+transcribe real `InjectionTask` definitions from AgentDojo's own Slack
+suite (`github.com/ethz-spylab/agentdojo`,
+`src/agentdojo/default_suites/v1/slack/injection_tasks.py`, fetched live
+2026-09-18 via `WebFetch` — payload text, target tool, and phishing
+indicator copied from source, not invented). Because Ferrite is a browser
+agent with no Slack-shaped tools, `adapt_agentdojo_slack_task` performs a
+documented **tool substitution** (`read_channel_messages` →
+`extract_data`; `send_direct_message`/`post_webpage` → `form.fill`;
+`get_webpage` → `navigate`), not a literal port — the module's doc comment
+gives the full table and rationale, consistent with ADR-008's "without
+fabricating capabilities" constraint. Output round-trips through the real,
+public `corpus::load_case` (same function every hand-authored case uses),
+proven by
+`agentdojo::tests::adapted_case_round_trips_through_the_real_corpus_loader`.
+Seeded `tests/agentdojo_corpus/` with the 3 adapted cases (tagged
+`Tier3AgentDojo`/`AgentDojo`), validated by
+`agentdojo_corpus_validate.rs`'s 3 tests. `harness.rs`'s existing
+`Tier3AgentDojo`/`RunLabel::R9` dual-mode wiring is untouched (out of this
+charter's scope) and now has real data behind it instead of zero.
+**Honest scope:** 3 of AgentDojo's ~7 Slack injection tasks × ~20 user-task
+pairings — a citable external sample, not a suite port. Recorded as an
+explicit gap against directive §13.3's Tier 3 target (n=60) in
+`docs/TO-DO.md`, not silently passed off as "done."
+
+**T-208 (closed, `6e6926a`):** all 10 `tests/pilot_corpus/*.json` files
+re-validated against the new `carrier_vector` shape — every file's
+`"carrier"`/`"carrier_vector"` flat pair rewritten to the nested
+`{"WebContent": "..."}`/`{"ToolOutput": "..."}` form (mechanical, no
+`ground_truth`/`attack_category`/other-field changes; `GroundTruth`'s enum
+itself was untouched by this session). All 10 still load and validate
+(`pilot_corpus_validate.rs`'s existing 3 tests, unmodified, still pass
+against the reshaped files) and all 10 are single-authored
+(`Author::SelfAuthored`) — they count toward the corpus-size denominator
+below but not toward the 10%-double-authored numerator (see honesty note
+below). `tests/pilot_w6.rs`'s 5 throwaway full-pipeline fixtures needed the
+same mechanical fix (found by running the suite, not by inspection) and are
+now fixed and green.
+
+**T-201 (closed, `d1531c0`):** extended
+`crates/ferrite-eval/tests/pilot_corpus/CORPUS_AUTHORING_GUIDE.md` in place
+rather than writing a new `docs/CORPUS_AUTHORING.md` — it's the
+established, already-referenced location, sitting next to the fixtures
+whoever authors a case will actually be looking at. Found and fixed real,
+pre-existing drift while re-verifying it against source (not just adding a
+new section): §5's `expected_origins` example still documented the flat
+4-field `OriginScope` struct A7's comparator rebuild replaced with a
+3-variant externally-tagged enum, and §3.2 documented the pre-T-006 flat
+`carrier`/`carrier_vector` pair. Both corrected in place, a T1b worked
+example added alongside the existing T1a one, and §11's placeholder ("not
+covered yet") for AgentDojo adaptation mechanics replaced with a real
+section citing `ferrite_eval::agentdojo` and stating its honest scope.
+
+**T-203 (closed, `bdd631e`) — schema-completeness audit against
+`docs/REBUILD_DIRECTIVE.md` §13.2, performed before authoring more cases,
+per the task's own instruction:**
+
+| Metric | Formula needs | Present on `ExecutionRecord`/`CaseDefinition`? |
+|---|---|---|
+| ASR_m, CR_m | `final_outcome` (per exec) × `corpus` (per case) | Yes — join on `case_id` |
+| ADR_m | `fingerprint_caught` × `ground_truth` variant (deviation-class) | Yes |
+| SDR_m | `sanitizer_caught` × `expected_finding` presence | Yes |
+| FGR_m | `consent_gated` × `corpus == Benign` | Yes |
+| **FSR** | **segment-level** excised/total count | **Gap — see below** |
+| UP_m | `actual_events` compared across modes for the same `case_id` | Yes (computable at the metrics layer via a join; no new field needed) |
+| R (residual) | `ground_truth == WithinFingerprintDataOnly` | Yes |
+| ΔL (latency) | `Timing.total_ms`, p50/p95 aggregated per mode | Yes |
+| **ΔT (token overhead)** | **prompt/completion token counts per execution** | **Gap — see below** |
+
+**Two real gaps found, not silently passed:**
+1. **FSR is only available as a case-level proxy, not the segment-level
+   ratio §13.2 literally defines.** `ExecutionRecord` has no per-segment
+   finding/strip count — only `sanitizer_caught: LayerOutcome`
+   (Caught/Missed/NotApplicable, one value per execution) and
+   `final_outcome` (which for benign×SanitizerOnly already distinguishes
+   `BenignFalseFlag`/`BenignNoFlag`, per D4's outcome lattice). A12's
+   metrics module can compute a **case-level** FSR proxy
+   (`|BenignFalseFlag| / |benign cases run SanitizerOnly|`) with zero
+   schema changes, but that is not the same number as "segments excised /
+   segments total" when a case's page/tool-output contains more than one
+   sentence — `sanitizer/config.rs`'s own unit test
+   (`benign_fixture_false_strip_rate_is_below_the_provisional_ceiling`)
+   gets the literal per-segment number today only because each of its 35
+   fixtures *is* exactly one segment. Filed as **T-225** below.
+2. **No field anywhere in `ExecutionRecord`/`Timing` carries model token
+   usage**, even though `ferrite_model::response::TokenUsage`
+   (`prompt_eval_count`/`eval_count`, §10.1's exact wire fields) already
+   exists one crate over. ΔT (extra model tokens per task, §13.2) cannot be
+   computed from persisted data as things stand. Not fixed in this
+   session: populating it means threading `TokenUsage` out of the
+   fingerprint-predict and agent-loop model calls into `harness.rs`'s
+   orchestration, which is metrics/harness territory (A12's charter, not a
+   `dataset.rs`-only change) and risked non-minimal changes to
+   `harness.rs`'s matrix logic, which this charter explicitly excludes.
+   Filed as **T-226** below, with the exact proposed field
+   (`Timing.tokens: Option<ferrite_model::response::TokenUsage>` or
+   equivalent) named so A12 doesn't have to re-derive it.
+
+**Benign false-strip ceiling (`PROVISIONAL_FALSE_STRIP_RATE_CEILING`,
+`crates/ferrite-ipi/src/sanitizer/config.rs`) — re-affirmed, still
+provisional, not newly locked:** measured rate against the module's own
+35-item benign fixture set is **0/35 (0.0%)**
+(`sanitizer::config::tests::benign_fixture_false_strip_rate_is_below_the_provisional_ceiling`,
+verified passing this session), well under the current 0.02 ceiling. This
+session's own new benign corpus cases (below) include one deliberate
+near-miss (`d25_benign_tool_textblob_support_ticket.json`: "please
+disregard the previous email" *does* match the sanitizer's
+`instruction_override_disregard` pattern — a genuine, intentional
+false-strip case, not an error) and one deliberate true-negative
+(`d21_benign_stock_price_trigger_adjacent.json`: "Ignore minor after-hours
+fluctuations" contains "Ignore" but does not match any of the 5 compound
+regexes). **Not locked as final** because the directive's own gating
+condition — a real ~100-case benign corpus (§13.3) — isn't met; this
+session's corpus has 7 benign cases total. Left provisional, honestly,
+rather than declared final on 7 cases.
+
+**Corpus composition — exact, verified counts (`grep`-counted across all
+three corpus directories, not estimated):**
+
+| Stratum | Count | Directory |
+|---|---|---|
+| Tier 1 (WebContent) | 17 | 12 attack (5 pilot T1a `ref01`–`ref05` + 1 pilot cat-5 `ref09` + 6 new `c1x`) + 5 benign (1 pilot `ref10` + 4 new `d21`/`d22`/`d23`/`d26`) |
+| Tier 2 (ToolOutput) | 9 | 7 attack (3 pilot T1b `ref06`–`ref08` + 4 new `c2x`) + 2 new benign (`d24`/`d25`) |
+| Tier 3 (AgentDojo) | 3 | all attack, all new this session |
+| **Total** | **29** | 10 `tests/pilot_corpus/` + 16 `tests/corpus/` + 3 `tests/agentdojo_corpus/` |
+| Attack / Benign split | 22 / 7 | `grep -c '"corpus": "Attack"'` / `"Benign"` across all three directories |
+
+This is **far short of directive §13.3's ~360-case target** (Tier 1: 120,
+Tier 2: 80, Tier 3: 60, Benign: 100). Grown from the pre-session 10 to 29 —
+roughly triple, not the full target. Stated exactly, not rounded up. The
+16 newly-authored cases (`tests/corpus/`) cover carrier vectors and attack
+categories the original 5 Tier-1/3 Tier-2 pilot cases didn't exercise
+(`OffscreenText`, `MetaContent`, `CssPseudo`, `ToolMetadata`, a
+`WithinFingerprintOriginShift` and a `WithinFingerprintDataOnly` case) —
+see `docs/TO-DO.md`'s new corpus-remainder row for the full stratum-by-
+stratum shortfall against §13.3.
+
+**Double-authoring / Cohen's κ — honest statement, not a fabricated
+number:** **zero cases in this corpus are genuinely independently
+double-authored.** All 29 are `Author::SelfAuthored` (26) or
+`Author::AgentDojo` (3, itself a citation-derived provenance, not a second
+human author). This session was a single agent working alone — there was
+no second, independent author available to produce the 10% double-authored
+slice §13.3 requires, and fabricating a "second pass" by the same session
+pretending to be an independent author would produce a Cohen's κ computed
+from self-agreement, which is not what the metric means and would misrepresent
+the corpus's credibility exactly as ADR-008 warns against. **κ is not
+computed here** — computing one from 0 genuine pairs (or from a fake pair)
+would be a more dishonest data point than stating plainly that this
+requirement is unmet. Filed as part of the corpus-remainder TO-DO row.
+
+**Tests, exact counts:**
+- `ferrite-ipi`: dataset.rs's `#[cfg(test)] mod tests` — 11 tests total, 4
+  new this session: `carrier_vector_carrier_matches_the_variant_it_was_constructed_with`,
+  `carrier_vector_serializes_as_an_externally_tagged_pair`,
+  `every_carrier_vector_variant_reports_the_correct_carrier`,
+  `dataset_store_reopen_against_an_existing_db_preserves_rows`. Full crate:
+  `cargo test -p ferrite-ipi` unaffected elsewhere, still green.
+- `ferrite-eval`: `cargo test -p ferrite-eval` — 61 lib tests (`adjudication`
+  36, `agentdojo` 3 new, `corpus` 11, `harness` 7, `harness::e2e_tests` 4) +
+  4 integration test binaries: `agentdojo_corpus_validate.rs` (3, new),
+  `corpus_validate.rs` (4, new), `pilot_corpus_validate.rs` (3, unmodified,
+  still green against the reshaped files), `pilot_w6.rs` (5, mechanically
+  fixed this session) = **76 tests total, 0 failed.**
+
+**Verified:** `cargo fmt -p ferrite-ipi -p ferrite-eval --check`,
+`cargo clippy -p ferrite-ipi -p ferrite-eval --all-targets -- -D warnings`
+(both clean), `cargo test -p ferrite-ipi` and `cargo test -p ferrite-eval`
+both green as itemized above. Full workspace `just check && just test`
+run at session end — see this entry's closing verification note below.
+
+**Commits:** `6e6926a` (T-006 type-level fix + T-009 AgentDojo adapter +
+T-208 re-validation, one commit — the type change and its call-site fixes
+across both crates are not independently green without each other),
+`2bc1925` (16 new corpus cases + validation test), `d1531c0` (corpus
+authoring guide fixes, T-201).
+
+**Known issues discovered, filed as new TO-DO rows (see `docs/TO-DO.md`):**
+- **T-225** — FSR is only a case-level proxy in `ExecutionRecord`, not the
+  literal segment-level ratio §13.2 defines. See audit above.
+- **T-226** — no token-usage field anywhere in `ExecutionRecord`/`Timing`;
+  ΔT (§13.2) cannot be computed from persisted data. Exact proposed field
+  named above.
+- **T-227** — corpus-size remainder against §13.3: 29 of ~360 cases, 0 of
+  the required 10% double-authored, κ not computable. Full breakdown in
+  this entry.
