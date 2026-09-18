@@ -20,12 +20,12 @@
 //! Budget<Throttle<Cache<Ollama>>>
 //! ```
 //!
-//! - `Cache` — content-addressed on disk at `~/.cache/ferrite-model/`.
-//!   Sound because `SamplingOptions`'s default `temperature = 0` makes a
+//! - [`Cache`] — content-addressed on disk at `~/.cache/ferrite-model/`.
+//!   Sound because [`SamplingOptions`]'s default `temperature = 0` makes a
 //!   response a pure function of its key.
-//! - `Throttle` — in-flight semaphore, token bucket, exponential backoff
+//! - [`Throttle`] — in-flight semaphore, token bucket, exponential backoff
 //!   with full jitter on 429/5xx, per-request timeout, `Retry-After`.
-//! - `Budget` — a hard per-process call ceiling that aborts with a
+//! - [`Budget`] — a hard per-process call ceiling that aborts with a
 //!   partial-results artifact rather than quietly spending the rest of a
 //!   quota.
 //!
@@ -56,15 +56,18 @@
 pub mod backends;
 pub mod cache_key;
 pub mod config;
+pub mod decorators;
 pub mod error;
 mod guard;
 pub mod provider;
 pub mod request;
 pub mod response;
+pub mod testing;
 
 pub use backends::{MockProvider, MockStep};
 pub use cache_key::CacheKey;
 pub use config::{EnvSource, MapEnv, ModelConfig, SystemEnv};
+pub use decorators::{Budget, Cache, Throttle, ThrottleConfig};
 pub use error::ModelError;
 pub use provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
 pub use request::{CompletionRequest, Message, Role, SamplingOptions};
