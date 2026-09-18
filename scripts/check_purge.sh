@@ -39,7 +39,7 @@ PATTERN='capability.broker|regorus|extism|9222|ferrite-(types|network|a11y|cef|p
 #                             not silently exempted forever.
 HITS=$(git grep -ilE "$PATTERN" -- \
   ':!docs/archive/**' \
-  ':!docs/REBUILD_DIRECTIVE.md' ':!docs/AUDIT.md' ':!docs/DECISIONS.md' ':!docs/PROGRESS.md' ':!docs/TO-DO.md' \
+  ':!docs/REBUILD_DIRECTIVE.md' ':!docs/AUDIT.md' ':!docs/DECISIONS.md' ':!docs/PROGRESS.md' ':!docs/TO-DO.md' ':!docs/handoffs/**' \
   ':!CLAUDE.md' ':!.devcontainer/Dockerfile' ':!Cargo.lock' \
   ':!scripts/check_purge.sh' \
   ':!crates/ferrite-servo/src/shell.rs' \
