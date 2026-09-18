@@ -475,3 +475,82 @@ licenses/sources all `ok`). `cargo machete` clean. `just check` and
   are not proof Ollama/Gemini's actual current API matches this crate's
   assumptions — only a live `just probe`/`just record` run can confirm
   that.
+
+## 2026-09-18 — coordinator — live verification: A3's exit gate actually met, plus a real infra bug found and fixed
+
+**Landed:**
+- The user provided a real `OLLAMA_API_KEY` and (after the first was
+  tried) a real `FERRITE_GEMINI_API_KEY` directly in chat. Neither was
+  echoed back or written to any tracked file: both were stored in the
+  macOS Keychain under service `ferrite` with account names matching
+  `ferrite-model::secret`'s `KEYRING_SERVICE`/env-var-name convention
+  exactly (`OLLAMA_API_KEY`, `FERRITE_GEMINI_API_KEY`), so
+  `ferrite_model::OsKeyring` — the project's own designed fallback path
+  — picks them up with no code change and no env var needing to be set
+  in any persisted shell config.
+- **`just models` run for real, live, against Ollama Cloud** — returned
+  20 real current tags (`gemma4:31b`, `gpt-oss:120b`, `qwen3.5:397b`,
+  etc.).
+- **`just probe` run for real, live** — one full completion round trip
+  (`gemma4:31b`, "Reply with exactly one word: hello" → "hello", 20
+  prompt + 2 completion tokens). This is A3's exit-gate line item that
+  was explicitly left unverified at merge time; it's now genuinely met,
+  not just built-and-assumed.
+- **`just record` run for real against both providers**, producing two
+  additional genuinely-live fixtures (as distinct from the two
+  hand-authored ones from A3's own session):
+  - Ollama, `gemma4:31b` — clean round trip.
+  - Gemini: the first live call **failed with a real 404** —
+    `gemini-2.0-flash` (used in A3's own hand-authored fixture and
+    examples as an illustrative tag) is retired; the API's own error
+    named the replacement (`gemini-3.6-flash`), which then worked. This
+    is a live, unplanned demonstration of exactly the failure mode
+    §10.2 designed the whole no-hardcoded-tag-in-source rule around —
+    worth citing as evidence the design decision was correct, not just
+    defensive.
+- Found and fixed a second justfile bug while recording: the `record`
+  recipe's `{{prompt}}` was interpolated unquoted into the shell
+  command, so a multi-word prompt (`"Reply with exactly one word:
+  hello"`) silently truncated to its first word (`"Reply"`) before
+  reaching the API — confirmed by inspecting the first recorded
+  fixture's `request.messages[0].content`. Fixed by quoting
+  `"{{prompt}}"` in the recipe body; re-recorded cleanly afterward.
+- **Found, root-caused, and fixed a real, reproducible false-CI-failure
+  bug — filed as T-214 (process/infra, not a crate defect):**
+  `ferrite-core`'s `golden_*` schema-stability tests started failing
+  with `missing schema fixture
+  .../.claude/worktrees/agent-a6d3ac111d042019a/.../schema/*.json: No
+  such file or directory` — naming a path inside the A3 worktree this
+  session had already `git worktree remove`d. Root cause: `env!
+  ("CARGO_MANIFEST_DIR")` (the same mechanism this session's earlier
+  `fixture_dir()` fix in `ferrite-model` relies on) is baked into a
+  crate's compiled incremental codegen units at compile time; because
+  `CARGO_TARGET_DIR` is shared across the main checkout and every
+  worktree (by the justfile's own design, to avoid rebuilding the world
+  per agent), a binary compiled once from inside a worktree can have its
+  incremental cache entries reused later for a compile from the main
+  checkout, even after the worktree is gone. Reproduced 100% via `just
+  ci` (3/3); `cargo clean -p ferrite-core` did **not** fix it (4/4 still
+  failing — the stale cache wasn't scoped to that command); a full `rm
+  -rf ~/.cache/ferrite-target` did (10/10 clean afterward, across two
+  separate rounds of repeated `just ci`/`just test` runs). Full
+  investigation trail and the recommended mitigation (clean the shared
+  target dir after removing a worktree, before trusting the next test
+  run) are in `docs/TO-DO.md` T-214 — not fixed in any crate's source
+  because there is no crate-level bug to fix.
+
+**Commits:** none yet from this entry at write time — the fixture files
+and justfile fix are staged for a commit immediately following this
+entry; see the next `git log` for the actual SHA once written to keep
+this citation accurate (R2 — not backfilling a SHA before it exists).
+
+**Tests:** `just ci` (fmt-check + clippy --all-targets + machete + full
+`cargo test --workspace`) — 10 consecutive clean runs after the
+target-dir wipe, 0 failures, across two separate rounds of repeated
+verification. `cargo deny check` exits 0.
+
+**Known limitation, stated plainly:** the second Gemini key the user
+provided was never tried — the first one worked, so trying the second
+would have been pointless exposure of an unused credential. It was not
+stored anywhere. If the first key is ever revoked, the user has the
+second one to provide again.

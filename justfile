@@ -90,7 +90,7 @@ cache-stats:
 # check/test/CI — a fixture this writes is reviewed and committed by hand,
 # like any other change to the test tree.
 record provider prompt="":
-    cargo run -p ferrite-model --example record -- {{provider}} {{prompt}}
+    cargo run -p ferrite-model --example record -- {{provider}} "{{prompt}}"
 
 # Run the shell binary (launches the Iced UI by default — see
 # ferrite-shell/src/main.rs's CLI dispatch for the other subcommands:
