@@ -2695,6 +2695,7 @@ dependencies = [
  "iced",
  "iced_widget",
  "tokio",
+ "url",
  "urlencoding",
 ]
 

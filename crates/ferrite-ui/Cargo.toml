@@ -16,3 +16,4 @@ ferrite-ipi = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 urlencoding = { workspace = true }
+url = { workspace = true }

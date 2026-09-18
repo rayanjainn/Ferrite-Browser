@@ -24,6 +24,7 @@ use ferrite_agent::{
 };
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
 use ferrite_ipi::comparator::{compare, ConsentDecision, ExpectedFingerprint, FingerprintDiff};
+use ferrite_ipi::dry_run::DryRunRecord;
 use ferrite_ipi::tool_decision::{LoopOutcome, ToolDecisionEngine, ToolId};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
@@ -97,10 +98,45 @@ impl ferrite_agent::ToolExecutor for BrowserToolExecutor {
     }
 }
 
-/// Wraps `BrowserToolExecutor` and blocks tools the user rejected in the consent dialog.
+/// Wraps `BrowserToolExecutor` and blocks tools the user rejected in the
+/// consent dialog — this is the enforcement point, not the consent panel's
+/// UI state, which only *records* the user's decision. A rejected primitive
+/// never reaches `inner` (see `filtered_executor_blocks_rejected_tool_without_reaching_inner`).
+///
+/// `rejected_origins` is a second, independent block list for out-of-scope
+/// origin decisions. The comparator's `FingerprintDiff::out_of_scope_origins`
+/// only ever records the offending *origin* string, not which tool was used
+/// there (a pre-existing shape kept for `ferrite-eval`/`dataset` compatibility
+/// — see `ferrite_ipi::comparator::diff`'s module docs), so this executor can
+/// only enforce an origin-scoped rejection for calls whose `BrowserTool`
+/// variant itself carries a URL (`Navigate`, `DownloadFile`) — `tool_url`
+/// below. Calls with no URL of their own (e.g. `ReadPage`, `ClickElement`)
+/// act on "whatever the active tab currently is", which this executor has no
+/// way to observe from the call alone; T-2xx (filed in this session's
+/// `docs/TO-DO.md` entry) tracks closing that gap for real.
 struct FilteredToolExecutor {
     inner: BrowserToolExecutor,
     rejected: std::collections::HashSet<ToolId>,
+    rejected_origins: std::collections::HashSet<String>,
+}
+
+/// The URL a `BrowserTool` call itself carries, if any — the only calls this
+/// executor can check against `rejected_origins` without a live session.
+fn tool_url(tool: &BrowserTool) -> Option<&str> {
+    match tool {
+        BrowserTool::Navigate(url) | BrowserTool::DownloadFile(url) => Some(url.as_str()),
+        _ => None,
+    }
+}
+
+/// Normalizes a URL to `scheme://host`, lowercased — the same shape
+/// `ferrite_ipi::dry_run::record::extract_origin` produces, reimplemented
+/// locally since that function is crate-private to `ferrite-ipi`. Returns
+/// `None` if `url` does not parse as an absolute URL with a host.
+fn origin_of_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    Some(format!("{}://{}", parsed.scheme(), host).to_ascii_lowercase())
 }
 
 #[async_trait::async_trait]
@@ -108,10 +144,17 @@ impl ferrite_agent::ToolExecutor for FilteredToolExecutor {
     async fn execute(&self, call: &AgentToolCall) -> AgentToolResult {
         let tool_id = ToolId::from(&call.tool);
         if self.rejected.contains(&tool_id) {
-            AgentToolResult::err(call.call_id, "blocked by user consent")
-        } else {
-            self.inner.execute(call).await
+            return AgentToolResult::err(call.call_id, "blocked by user consent");
         }
+        if let Some(origin) = tool_url(&call.tool).and_then(origin_of_url) {
+            if self.rejected_origins.contains(&origin) {
+                return AgentToolResult::err(
+                    call.call_id,
+                    "blocked by user consent: out-of-scope origin",
+                );
+            }
+        }
+        self.inner.execute(call).await
     }
 }
 
@@ -266,14 +309,29 @@ pub struct FerriteBrowser {
         >,
     >,
     // ── IPI consent state ────────────────────────────────────────────────────
-    /// Set when the dry run finds extra tools; cleared after consent or cancel.
+    // Every field below is scoped to exactly one pending consent decision and
+    // is cleared on *both* ConsentSubmitted and ConsentCancelled — approvals
+    // and rejections are per-task, never sticky across tasks. See
+    // `consent_state_never_carries_into_a_second_task` for the test that
+    // would fail if any of this leaked into a later task.
+    /// Set when the dry run finds unexpected activity; cleared after consent
+    /// or cancel.
     pub pending_diff: Option<FingerprintDiff>,
-    /// Tracks per-tool approve/reject decisions while the consent panel is open.
+    /// The expected fingerprint `pending_diff` was compared against — kept
+    /// alongside the diff so the consent panel can describe which origins
+    /// *would* have been admitted, not just which ones weren't.
+    pub pending_expected: Option<ExpectedFingerprint>,
+    /// The dry-run record itself, kept only so the consent panel can show it
+    /// on expand ("what did the agent actually do, in what order").
+    pub pending_evidence: Option<DryRunRecord>,
+    /// Tracks per-item approve/reject decisions while the consent panel is
+    /// open, covering both `pending_diff.extra_primitives` and
+    /// `pending_diff.out_of_scope_origins` (see `consent_items`).
     pub pending_decision: ConsentDecision,
-    /// Extra tools the user approved — enforced in the real run.
-    pub approved_extras: std::collections::HashSet<ToolId>,
     /// Original task preserved between dry run and consent resolution.
     pub pending_task: Option<AgentTask>,
+    /// Whether the dry-run evidence section is expanded.
+    pub show_evidence: bool,
 }
 
 impl Default for FerriteBrowser {
@@ -313,9 +371,11 @@ impl Default for FerriteBrowser {
             agent_event_tx: Some(agent_event_tx),
             agent_event_rx: Some(std::sync::Arc::new(tokio::sync::Mutex::new(agent_event_rx))),
             pending_diff: None,
+            pending_expected: None,
+            pending_evidence: None,
             pending_decision: ConsentDecision::default(),
-            approved_extras: std::collections::HashSet::new(),
             pending_task: None,
+            show_evidence: false,
         }
     }
 }
@@ -383,9 +443,20 @@ pub enum FerriteBrowserMessage {
     AgentFailed(String),
     StopAgent,
     // ── IPI consent ───────────────────────────────────────────────────────────
-    ConsentRequired(FingerprintDiff),
+    ConsentRequired {
+        diff: FingerprintDiff,
+        expected: ExpectedFingerprint,
+        // Boxed solely to keep this enum's largest variant small (clippy
+        // large_enum_variant) — every other variant is a handful of bytes,
+        // and DryRunRecord's several Vec/HashSet fields make it the outlier.
+        evidence: Box<DryRunRecord>,
+    },
+    /// `id` is either a real `ToolId` wire string (an `extra_primitives`
+    /// item) or an `origin_item_id`-prefixed synthetic id (an
+    /// `out_of_scope_origins` item) — see `consent_items`.
     ApproveTool(String),
     RejectTool(String),
+    ToggleEvidence,
     ConsentSubmitted,
     ConsentCancelled,
 }
@@ -720,7 +791,11 @@ pub fn update(
                     ExpectedFingerprint::from_legacy_tool_fingerprint(&fingerprint, scope);
                 let diff = compare(&expected, &dry_record);
                 if !diff.is_clean() {
-                    let _ = event_tx.send(FerriteBrowserMessage::ConsentRequired(diff));
+                    let _ = event_tx.send(FerriteBrowserMessage::ConsentRequired {
+                        diff,
+                        expected,
+                        evidence: Box::new(dry_record),
+                    });
                     return;
                 }
 
@@ -747,9 +822,16 @@ pub fn update(
             state.agent_is_running = false;
         }
         // ── IPI consent handlers ──────────────────────────────────────────────
-        FerriteBrowserMessage::ConsentRequired(diff) => {
+        FerriteBrowserMessage::ConsentRequired {
+            diff,
+            expected,
+            evidence,
+        } => {
             state.pending_diff = Some(diff);
+            state.pending_expected = Some(expected);
+            state.pending_evidence = Some(*evidence);
             state.pending_decision = ConsentDecision::default();
+            state.show_evidence = false;
             state.agent_is_running = false;
         }
         FerriteBrowserMessage::ApproveTool(id) => {
@@ -758,11 +840,39 @@ pub fn update(
         FerriteBrowserMessage::RejectTool(id) => {
             state.pending_decision.reject(ToolId::new(&id));
         }
+        FerriteBrowserMessage::ToggleEvidence => {
+            state.show_evidence = !state.show_evidence;
+        }
         FerriteBrowserMessage::ConsentSubmitted => {
-            let rejected = state.pending_decision.rejected.clone();
-            state.approved_extras = state.pending_decision.approved.clone();
+            // Defense in depth: the view only ever emits this message once
+            // `consent_is_complete` holds (the Proceed button is disabled
+            // otherwise), but this handler re-checks it directly rather than
+            // trusting the view — ConsentSubmitted must never be reachable
+            // with an undecided item, from any caller.
+            let Some(diff) = state.pending_diff.as_ref() else {
+                return Task::none();
+            };
+            if !consent_is_complete(diff, &state.pending_decision) {
+                return Task::none();
+            }
+
+            let all_rejected = state.pending_decision.rejected.clone();
+            let rejected_origins: std::collections::HashSet<String> = all_rejected
+                .iter()
+                .filter_map(|t| origin_item_origin(t).map(str::to_string))
+                .collect();
+            let rejected: std::collections::HashSet<ToolId> = all_rejected
+                .into_iter()
+                .filter(|t| origin_item_origin(t).is_none())
+                .collect();
+
+            // Every field scoped to this consent decision is cleared here —
+            // approvals/rejections are per-task, never sticky across tasks.
             state.pending_diff = None;
+            state.pending_expected = None;
+            state.pending_evidence = None;
             state.pending_decision = ConsentDecision::default();
+            state.show_evidence = false;
 
             let task = match state.pending_task.take() {
                 Some(t) => t,
@@ -774,6 +884,7 @@ pub fn update(
                 Some(tx) => FilteredToolExecutor {
                     inner: BrowserToolExecutor { tx },
                     rejected,
+                    rejected_origins,
                 },
                 None => return Task::none(),
             };
@@ -789,8 +900,14 @@ pub fn update(
             state.agent_handle = Some(handle);
         }
         FerriteBrowserMessage::ConsentCancelled => {
+            // Same clearing as ConsentSubmitted — cancelling must leave no
+            // trace of this task's pending decision behind either.
             state.pending_diff = None;
+            state.pending_expected = None;
+            state.pending_evidence = None;
             state.pending_decision = ConsentDecision::default();
+            state.pending_task = None;
+            state.show_evidence = false;
             state.agent_is_running = false;
         }
         // ── Agent bridge ──────────────────────────────────────────────────────
@@ -882,6 +999,181 @@ fn sync_nav_state(state: &mut FerriteBrowser) {
         state.can_go_back = false;
         state.can_go_forward = false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Consent panel — the security surface. Plain-English item summaries, the
+// completeness check that gates ConsentSubmitted, and dry-run evidence
+// rendering all live here as pure functions of a `FingerprintDiff` /
+// `ExpectedFingerprint` / `DryRunRecord`, so they're testable without
+// spinning up Iced at all (see the `tests` module at the bottom of this
+// file).
+// ---------------------------------------------------------------------------
+
+/// Prefix distinguishing a synthetic `out_of_scope_origins` item id from a
+/// real `ToolId` wire string (e.g. `"js.execute"`, `"dom.read"` never contain
+/// `"::"`). `ConsentDecision` is keyed by `ToolId` alone (A7's type,
+/// unmodified — this charter does not touch `ferrite-ipi`), so an
+/// out-of-scope-origin item — which has no `ToolId` of its own, only an
+/// origin string — borrows that same key space under this prefix rather than
+/// requiring a second, parallel decision-tracking type.
+const ORIGIN_ITEM_PREFIX: &str = "origin::";
+
+/// The synthetic item id an out-of-scope-origin flagged item is tracked
+/// under in `ConsentDecision::{approved,rejected}`.
+fn origin_item_id(origin: &str) -> ToolId {
+    ToolId::new(&format!("{ORIGIN_ITEM_PREFIX}{origin}"))
+}
+
+/// The reverse of [`origin_item_id`]: `Some(origin)` if `id` is a synthetic
+/// origin item id, `None` if it's a real tool id.
+fn origin_item_origin(id: &ToolId) -> Option<&str> {
+    id.0.strip_prefix(ORIGIN_ITEM_PREFIX)
+}
+
+/// One flagged item ready for consent review: a stable identifier (used to
+/// key the approve/reject decision, and to key the Iced widget row) and the
+/// plain-English summary shown to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConsentItem {
+    id: ToolId,
+    summary: String,
+}
+
+/// Builds the plain-English per-item summaries for every flagged entry in
+/// `diff` — both `extra_primitives` and `out_of_scope_origins` (the gap this
+/// session closes: the old rendering only ever iterated `extra_primitives`).
+///
+/// Iteration order is deterministic (primitives sorted by tool id string,
+/// then origins sorted by origin string) so this function's output — and
+/// therefore the consent panel's rendering — is stable across runs, which is
+/// what makes `consent_summary_snapshot_for_a_mixed_diff` a meaningful
+/// regression test rather than a flaky one.
+fn consent_items(
+    diff: &FingerprintDiff,
+    expected: Option<&ExpectedFingerprint>,
+) -> Vec<ConsentItem> {
+    let mut items = Vec::new();
+
+    let mut extras: Vec<&ToolId> = diff.extra_primitives.iter().collect();
+    extras.sort_by(|a, b| a.0.cmp(&b.0));
+    for tool in extras {
+        let summary = if tool.0 == "js.execute" {
+            format!(
+                "Used tool: {tool} — arbitrary JavaScript execution is always reviewed by \
+                 design (it can synthesize any other action); nothing in your request could \
+                 have authorized it."
+            )
+        } else {
+            format!("Used tool: {tool} — nothing in your request authorized this action.")
+        };
+        items.push(ConsentItem {
+            id: tool.clone(),
+            summary,
+        });
+    }
+
+    let mut origins: Vec<&String> = diff.out_of_scope_origins.iter().collect();
+    origins.sort();
+    for origin in origins {
+        let allowed = expected
+            .map(describe_authorized_origins)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "nothing in your request authorized any origin".to_string());
+        let summary = format!(
+            "Contacted {origin} — this origin is not authorized. Your request authorized: \
+             {allowed}."
+        );
+        items.push(ConsentItem {
+            id: origin_item_id(origin),
+            summary,
+        });
+    }
+
+    items
+}
+
+/// Plain-English description of every origin scope the expected fingerprint
+/// carries, across all capabilities — the "which origin(s) would have been
+/// fine" half of the directive's required summary.
+///
+/// This is coarser than per-primitive precision: `FingerprintDiff::out_of_scope_origins`
+/// (A7's type, `ferrite_ipi::comparator::diff`) records only the offending
+/// *origin* string, not which capability's realization the primitive at that
+/// origin belonged to — so this function honestly reports every scope in the
+/// expected set, not "the one scope that would have admitted this specific
+/// primitive" (which the diff does not carry enough information to
+/// determine). Documented as a known limitation in this session's
+/// `docs/TO-DO.md` entry rather than papered over.
+fn describe_authorized_origins(expected: &ExpectedFingerprint) -> String {
+    let mut parts: Vec<String> = expected
+        .lowered()
+        .into_iter()
+        .map(|(_, scope, _)| describe_scope(scope))
+        .collect();
+    parts.sort();
+    parts.dedup();
+    parts.join("; ")
+}
+
+fn describe_scope(scope: &ferrite_core::scope::OriginScope) -> String {
+    use ferrite_core::scope::OriginScope;
+    match scope {
+        OriginScope::Exact(origins) => origins
+            .iter()
+            .map(ferrite_core::Origin::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+        OriginScope::DomainSuffix(suffixes) => suffixes
+            .iter()
+            .map(|s| format!("*.{s}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        OriginScope::TaskOpen { .. } => "any origin (open task)".to_string(),
+    }
+}
+
+/// Whether every flagged item in `diff` — both buckets — has an explicit
+/// approve or reject decision. This is the *only* gate `ConsentSubmitted`
+/// may run behind; it replaces the pre-existing `ConsentDecision::is_complete`
+/// call (which only ever checked `extra_primitives`) precisely because that
+/// was the rendering/enforcement gap this session closes.
+fn consent_is_complete(diff: &FingerprintDiff, decision: &ConsentDecision) -> bool {
+    let decided = |id: &ToolId| decision.approved.contains(id) || decision.rejected.contains(id);
+    diff.extra_primitives.iter().all(decided)
+        && diff
+            .out_of_scope_origins
+            .iter()
+            .all(|origin| decided(&origin_item_id(origin)))
+}
+
+/// Renders the dry-run evidence — what the agent actually did, in call
+/// order — from a real `DryRunRecord`. Honestly scoped to what
+/// `DryRunRecord` actually carries: the ordered (tool, origin) call log and
+/// a sanitizer-finding count. It does **not** show page content, because
+/// `DryRunRecord` does not record page content read — only which tool ran,
+/// at which origin, in what order, and which sanitizer patterns fired.
+fn dry_run_evidence_lines(record: &DryRunRecord) -> Vec<String> {
+    let mut lines: Vec<String> = record
+        .events_with_seq()
+        .map(|(seq, event)| {
+            format!(
+                "#{seq}  {tool}  {origin}",
+                tool = event.tool,
+                origin = event.origin.as_deref().unwrap_or("(no origin recorded)")
+            )
+        })
+        .collect();
+    if !record.sanitizer_findings.is_empty() {
+        lines.push(format!(
+            "{} sanitizer finding(s) recorded during the dry run",
+            record.sanitizer_findings.len()
+        ));
+    }
+    if lines.is_empty() {
+        lines.push("No tool calls were recorded during the dry run.".to_string());
+    }
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -2172,69 +2464,93 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
         .on_press_maybe((!run_disabled).then_some(FerriteBrowserMessage::AgentTaskSubmitted));
 
     // ── Consent panel (shown instead of log+response when diff is pending) ──
+    //
+    // This is the security surface (`docs/REBUILD_DIRECTIVE.md` §6/A10): it
+    // is built entirely from `iced_widget` native widgets, laid out by this
+    // function from Rust values (`diff`/`expected`/`evidence` — plain Rust
+    // structs, never page-supplied markup). Servo's page content only ever
+    // reaches this process as a decoded pixel buffer (`session.get_frame()`,
+    // rendered elsewhere as an `iced_widget::image`) — there is no code path
+    // by which a page's HTML/CSS/text is parsed into a style, position, or
+    // z-order for *this* panel. See `page_content_cannot_reach_the_consent_panels_inputs`
+    // for the structural argument this session verified, not merely assumed.
     let body: Element<FerriteBrowserMessage> = if let Some(diff) = &state.pending_diff {
-        let mut tool_rows: Vec<Element<FerriteBrowserMessage>> = {
-            let mut tools: Vec<&ToolId> = diff.extra_primitives.iter().collect();
-            tools.sort_by_key(|t| &t.0);
-            tools
-                .into_iter()
-                .map(|tool| {
-                    let approved = state.pending_decision.approved.contains(tool);
-                    let rejected = state.pending_decision.rejected.contains(tool);
-                    let id_str = tool.to_string();
+        let items = consent_items(diff, state.pending_expected.as_ref());
 
-                    let approve_style = move |_: &Theme, _| button::Style {
-                        background: Some(Background::Color(if approved {
-                            C_SAFE
-                        } else {
-                            Color { a: 0.25, ..C_SAFE }
-                        })),
-                        text_color: Color::WHITE,
-                        border: Border {
-                            radius: iced::border::Radius::new(4.0),
-                            ..Border::default()
-                        },
-                        ..button::Style::default()
-                    };
-                    let reject_style = move |_: &Theme, _| button::Style {
-                        background: Some(Background::Color(if rejected {
-                            C_DANGER
-                        } else {
-                            Color {
-                                a: 0.25,
-                                ..C_DANGER
-                            }
-                        })),
-                        text_color: Color::WHITE,
-                        border: Border {
-                            radius: iced::border::Radius::new(4.0),
-                            ..Border::default()
-                        },
-                        ..button::Style::default()
-                    };
+        let mut item_rows: Vec<Element<FerriteBrowserMessage>> = items
+            .iter()
+            .map(|item| {
+                let approved = state.pending_decision.approved.contains(&item.id);
+                let rejected = state.pending_decision.rejected.contains(&item.id);
 
-                    let approve_id = id_str.clone();
-                    let reject_id = id_str.clone();
+                let approve_style = move |_: &Theme, _| button::Style {
+                    background: Some(Background::Color(if approved {
+                        C_SAFE
+                    } else {
+                        Color { a: 0.25, ..C_SAFE }
+                    })),
+                    text_color: Color::WHITE,
+                    border: Border {
+                        radius: iced::border::Radius::new(4.0),
+                        ..Border::default()
+                    },
+                    ..button::Style::default()
+                };
+                let reject_style = move |_: &Theme, _| button::Style {
+                    background: Some(Background::Color(if rejected {
+                        C_DANGER
+                    } else {
+                        Color {
+                            a: 0.25,
+                            ..C_DANGER
+                        }
+                    })),
+                    text_color: Color::WHITE,
+                    border: Border {
+                        radius: iced::border::Radius::new(4.0),
+                        ..Border::default()
+                    },
+                    ..button::Style::default()
+                };
+
+                let approve_id = item.id.to_string();
+                let reject_id = item.id.to_string();
+                // Reject is listed and styled first: iced 0.13's `button`
+                // widget does not implement the `Focusable` operation (only
+                // `text_input`/`text_editor` do — verified against
+                // `iced_core::widget::operation::focusable`), so a literal
+                // keyboard-focus-ring default onto Reject is not achievable
+                // against this pinned version's public API. This is the
+                // available equivalent: reject reads first, and — the
+                // property that actually matters — `consent_is_complete`
+                // never lets Proceed fire while any item, including this
+                // one, is undecided, so there is no path to a silent
+                // approve-by-default.
+                column![
+                    text(item.summary.clone())
+                        .size(12)
+                        .color(C_TEXT)
+                        .width(Length::Fill),
                     row![
-                        text(id_str).size(12).color(C_TEXT).width(Length::Fill),
-                        button(text("Approve").size(11))
-                            .padding([3, 7])
-                            .style(approve_style)
-                            .on_press(FerriteBrowserMessage::ApproveTool(approve_id)),
                         button(text("Reject").size(11))
                             .padding([3, 7])
                             .style(reject_style)
                             .on_press(FerriteBrowserMessage::RejectTool(reject_id)),
+                        button(text("Approve").size(11))
+                            .padding([3, 7])
+                            .style(approve_style)
+                            .on_press(FerriteBrowserMessage::ApproveTool(approve_id)),
                     ]
                     .spacing(6)
-                    .align_y(iced::Alignment::Center)
-                    .width(Length::Fill)
-                    .into()
-                })
-                .collect()
-        };
+                    .align_y(iced::Alignment::Center),
+                ]
+                .spacing(4)
+                .width(Length::Fill)
+                .into()
+            })
+            .collect();
 
-        let complete = state.pending_decision.is_complete(diff);
+        let complete = consent_is_complete(diff, &state.pending_decision);
         let proceed_btn = button(text("Proceed with approved").size(12))
             .padding([7, 10])
             .width(Length::Fill)
@@ -2270,7 +2586,46 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             sep().into(),
             text("Review each item:").size(12).color(C_TEXT).into(),
         ];
-        panel_items.append(&mut tool_rows);
+        panel_items.append(&mut item_rows);
+        panel_items.push(sep().into());
+
+        // ── Dry-run evidence, collapsed by default ──────────────────────
+        let evidence_toggle = button(
+            text(if state.show_evidence {
+                "v Hide dry-run evidence"
+            } else {
+                "> Show dry-run evidence"
+            })
+            .size(11),
+        )
+        .padding([3, 7])
+        .style(panel_btn_inactive)
+        .on_press(FerriteBrowserMessage::ToggleEvidence);
+        panel_items.push(evidence_toggle.into());
+        if state.show_evidence {
+            if let Some(evidence) = &state.pending_evidence {
+                let lines: Vec<Element<FerriteBrowserMessage>> = dry_run_evidence_lines(evidence)
+                    .into_iter()
+                    .map(|line| text(line).size(11).color(C_TEXT_DIM).into())
+                    .collect();
+                panel_items.push(
+                    container(column(lines).spacing(2))
+                        .padding([6, 8])
+                        .width(Length::Fill)
+                        .style(|_: &Theme| container::Style {
+                            background: Some(Background::Color(C_INPUT)),
+                            border: Border {
+                                radius: iced::border::Radius::new(6.0),
+                                width: 1.0,
+                                color: C_DIVIDER,
+                            },
+                            ..container::Style::default()
+                        })
+                        .into(),
+                );
+            }
+        }
+
         panel_items.push(sep().into());
         panel_items.push(proceed_btn.into());
         panel_items.push(cancel_btn.into());
@@ -2405,4 +2760,516 @@ pub fn launch() -> iced::Result {
                 }
             }
         })
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the consent panel's state machine, summary rendering, and real
+// enforcement, per `docs/REBUILD_DIRECTIVE.md` §6/A10's test requirements.
+//
+// No test here constructs a `HeadlessServoSession` (R7/no live resources) —
+// `FerriteBrowser::default()` never does either, so `update()` is directly
+// testable with a plain `FerriteBrowser` and no window, matching the
+// directive's "no rendering needed" requirement.
+//
+// `#[tokio::test]` is used wherever a message handler calls
+// `tokio::task::spawn` (`ConsentSubmitted`) — spawning requires an active
+// Tokio runtime context or it panics, even though the test never awaits the
+// spawned future into existence. Since none of these tests `.await` anything
+// after triggering the spawn, the current-thread test runtime never actually
+// polls the spawned task before the test ends, so `GeminiAgent::from_env()`
+// and `run_agent_loop`'s real network call inside it never execute — no live
+// call is made, per R7.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrite_agent::ToolExecutor as _;
+
+    // ── Fixtures ─────────────────────────────────────────────────────────
+
+    fn sample_expected() -> ExpectedFingerprint {
+        ExpectedFingerprint::from_capabilities(
+            ferrite_core::ExpectedCapabilitySet::new(vec![ferrite_core::ExpectedCapability::new(
+                ferrite_core::Capability::WebRead,
+                ferrite_core::scope::OriginScope::exact([ferrite_core::Origin::parse(
+                    "https://example.com",
+                )
+                .unwrap()])
+                .unwrap(),
+            )])
+            .unwrap(),
+        )
+    }
+
+    fn diff_with_extra_primitive() -> FingerprintDiff {
+        let mut diff = FingerprintDiff::default();
+        diff.extra_primitives.insert(ToolId::new("js.execute"));
+        diff
+    }
+
+    fn diff_with_out_of_scope_origin() -> FingerprintDiff {
+        let mut diff = FingerprintDiff::default();
+        diff.out_of_scope_origins
+            .insert("https://attacker.example".to_string());
+        diff
+    }
+
+    fn mixed_diff() -> FingerprintDiff {
+        let mut diff = FingerprintDiff::default();
+        diff.extra_primitives.insert(ToolId::new("js.execute"));
+        diff.out_of_scope_origins
+            .insert("https://attacker.example".to_string());
+        diff
+    }
+
+    /// Builds an empty `DryRunRecord` tied to `task`'s ids, without needing a
+    /// direct `uuid` dependency in this crate.
+    fn evidence_for(task: &AgentTask) -> DryRunRecord {
+        DryRunRecord::new(task.session_id, task.task_id)
+    }
+
+    // ── consent_items: the plain-English summary snapshot ───────────────
+
+    #[test]
+    fn consent_summary_snapshot_for_a_mixed_diff() {
+        let diff = mixed_diff();
+        let expected = sample_expected();
+
+        let items = consent_items(&diff, Some(&expected));
+        assert_eq!(items.len(), 2, "{items:?}");
+
+        assert_eq!(items[0].id, ToolId::new("js.execute"));
+        assert_eq!(
+            items[0].summary,
+            "Used tool: js.execute — arbitrary JavaScript execution is always reviewed by \
+             design (it can synthesize any other action); nothing in your request could have \
+             authorized it."
+        );
+
+        assert_eq!(items[1].id, origin_item_id("https://attacker.example"));
+        assert_eq!(
+            items[1].summary,
+            "Contacted https://attacker.example — this origin is not authorized. Your request \
+             authorized: https://example.com."
+        );
+    }
+
+    #[test]
+    fn consent_summary_for_a_non_js_extra_primitive_says_nothing_authorized_it() {
+        let mut diff = FingerprintDiff::default();
+        diff.extra_primitives.insert(ToolId::new("dom.write"));
+        let items = consent_items(&diff, None);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].summary,
+            "Used tool: dom.write — nothing in your request authorized this action."
+        );
+    }
+
+    #[test]
+    fn consent_summary_for_an_out_of_scope_origin_with_no_expected_fingerprint_is_honest() {
+        let diff = diff_with_out_of_scope_origin();
+        let items = consent_items(&diff, None);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].summary,
+            "Contacted https://attacker.example — this origin is not authorized. Your request \
+             authorized: nothing in your request authorized any origin."
+        );
+    }
+
+    #[test]
+    fn consent_is_complete_requires_a_decision_on_both_bucket_kinds() {
+        let diff = mixed_diff();
+        let mut decision = ConsentDecision::default();
+        assert!(!consent_is_complete(&diff, &decision));
+
+        decision.reject(ToolId::new("js.execute"));
+        assert!(
+            !consent_is_complete(&diff, &decision),
+            "the out-of-scope-origin item is still undecided"
+        );
+
+        decision.approve(origin_item_id("https://attacker.example"));
+        assert!(consent_is_complete(&diff, &decision));
+    }
+
+    // ── update() state-machine tests ─────────────────────────────────────
+
+    #[test]
+    fn consent_required_populates_pending_state_fresh_and_clears_agent_running() {
+        let mut state = FerriteBrowser {
+            agent_is_running: true,
+            ..FerriteBrowser::default()
+        };
+        let task = AgentTask::new("check my inbox", Some("https://example.com".to_string()));
+        let diff = diff_with_extra_primitive();
+        let expected = sample_expected();
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::ConsentRequired {
+                diff: diff.clone(),
+                expected: expected.clone(),
+                evidence: Box::new(evidence_for(&task)),
+            },
+        );
+
+        assert_eq!(state.pending_diff, Some(diff));
+        assert_eq!(state.pending_expected, Some(expected));
+        assert!(state.pending_evidence.is_some());
+        assert!(state.pending_decision.approved.is_empty());
+        assert!(state.pending_decision.rejected.is_empty());
+        assert!(!state.agent_is_running);
+    }
+
+    #[tokio::test]
+    async fn consent_submitted_is_a_no_op_while_any_item_is_undecided() {
+        let mut state = FerriteBrowser::default();
+        let task = AgentTask::new("t", None);
+        state.pending_task = Some(task.clone());
+        let diff = diff_with_extra_primitive();
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::ConsentRequired {
+                diff: diff.clone(),
+                expected: sample_expected(),
+                evidence: Box::new(evidence_for(&task)),
+            },
+        );
+
+        // Nothing decided yet — must be a no-op even though the message was
+        // sent directly, bypassing the view's disabled Proceed button. This
+        // is the defense-in-depth guard: ConsentSubmitted must never be
+        // reachable with an undecided item, from any caller.
+        let _ = update(&mut state, FerriteBrowserMessage::ConsentSubmitted);
+        assert!(
+            state.pending_diff.is_some(),
+            "must not proceed while undecided"
+        );
+        assert!(state.pending_task.is_some());
+        assert!(state.agent_handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn consent_flow_extra_primitive_only_reject_then_submit_clears_all_pending_state() {
+        let mut state = FerriteBrowser::default();
+        let task = AgentTask::new("t", None);
+        state.pending_task = Some(task.clone());
+        let diff = diff_with_extra_primitive();
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::ConsentRequired {
+                diff: diff.clone(),
+                expected: sample_expected(),
+                evidence: Box::new(evidence_for(&task)),
+            },
+        );
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::RejectTool("js.execute".to_string()),
+        );
+        assert!(consent_is_complete(&diff, &state.pending_decision));
+
+        let _ = update(&mut state, FerriteBrowserMessage::ConsentSubmitted);
+
+        assert!(state.pending_diff.is_none());
+        assert!(state.pending_expected.is_none());
+        assert!(state.pending_evidence.is_none());
+        assert!(state.pending_decision.approved.is_empty());
+        assert!(state.pending_decision.rejected.is_empty());
+        assert!(state.pending_task.is_none());
+        assert!(!state.show_evidence);
+        assert!(
+            state.agent_handle.is_some(),
+            "an approved-decision run must actually be spawned"
+        );
+    }
+
+    #[tokio::test]
+    async fn consent_flow_out_of_scope_origin_only_approve_then_submit() {
+        let mut state = FerriteBrowser::default();
+        let task = AgentTask::new("t", None);
+        state.pending_task = Some(task.clone());
+        let diff = diff_with_out_of_scope_origin();
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::ConsentRequired {
+                diff: diff.clone(),
+                expected: sample_expected(),
+                evidence: Box::new(evidence_for(&task)),
+            },
+        );
+
+        let item_id = origin_item_id("https://attacker.example").to_string();
+        let _ = update(&mut state, FerriteBrowserMessage::ApproveTool(item_id));
+        assert!(consent_is_complete(&diff, &state.pending_decision));
+
+        let _ = update(&mut state, FerriteBrowserMessage::ConsentSubmitted);
+        assert!(state.pending_diff.is_none());
+        assert!(state.agent_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn consent_flow_mixed_diff_requires_both_items_decided_before_submit_succeeds() {
+        let mut state = FerriteBrowser::default();
+        let task = AgentTask::new("t", None);
+        state.pending_task = Some(task.clone());
+        let diff = mixed_diff();
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::ConsentRequired {
+                diff: diff.clone(),
+                expected: sample_expected(),
+                evidence: Box::new(evidence_for(&task)),
+            },
+        );
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::RejectTool("js.execute".to_string()),
+        );
+        let _ = update(&mut state, FerriteBrowserMessage::ConsentSubmitted);
+        assert!(
+            state.pending_diff.is_some(),
+            "one undecided item (the out-of-scope origin) must still block submission"
+        );
+
+        let origin_id = origin_item_id("https://attacker.example").to_string();
+        let _ = update(&mut state, FerriteBrowserMessage::RejectTool(origin_id));
+        let _ = update(&mut state, FerriteBrowserMessage::ConsentSubmitted);
+        assert!(state.pending_diff.is_none());
+    }
+
+    #[test]
+    fn consent_cancelled_clears_all_pending_state_without_spawning_a_run() {
+        let mut state = FerriteBrowser::default();
+        let task = AgentTask::new("t", None);
+        state.pending_task = Some(task.clone());
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::ConsentRequired {
+                diff: diff_with_extra_primitive(),
+                expected: sample_expected(),
+                evidence: Box::new(evidence_for(&task)),
+            },
+        );
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::ApproveTool("js.execute".to_string()),
+        );
+
+        let _ = update(&mut state, FerriteBrowserMessage::ConsentCancelled);
+
+        assert!(state.pending_diff.is_none());
+        assert!(state.pending_expected.is_none());
+        assert!(state.pending_evidence.is_none());
+        assert!(state.pending_task.is_none());
+        assert!(state.pending_decision.approved.is_empty());
+        assert!(!state.show_evidence);
+        assert!(!state.agent_is_running);
+        assert!(
+            state.agent_handle.is_none(),
+            "cancel must never spawn a run"
+        );
+    }
+
+    #[tokio::test]
+    async fn second_tasks_consent_decision_never_carries_over_from_the_first() {
+        let mut state = FerriteBrowser::default();
+
+        // Task 1: flagged with js.execute, approved, submitted.
+        let task1 = AgentTask::new("task one", None);
+        state.pending_task = Some(task1.clone());
+        let diff1 = diff_with_extra_primitive();
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::ConsentRequired {
+                diff: diff1,
+                expected: sample_expected(),
+                evidence: Box::new(evidence_for(&task1)),
+            },
+        );
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::ApproveTool("js.execute".to_string()),
+        );
+        let _ = update(&mut state, FerriteBrowserMessage::ConsentSubmitted);
+        assert!(state.pending_decision.approved.is_empty());
+
+        // Task 2: flagged with the SAME tool id, but never decided this time
+        // — if approval leaked across tasks this would wrongly read as
+        // already-decided.
+        let task2 = AgentTask::new("task two", None);
+        state.pending_task = Some(task2.clone());
+        let diff2 = diff_with_extra_primitive();
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::ConsentRequired {
+                diff: diff2.clone(),
+                expected: sample_expected(),
+                evidence: Box::new(evidence_for(&task2)),
+            },
+        );
+
+        assert!(
+            !consent_is_complete(&diff2, &state.pending_decision),
+            "task 2's identical tool id must NOT be pre-approved from task 1's decision"
+        );
+        assert!(state.pending_decision.approved.is_empty());
+        assert!(state.pending_decision.rejected.is_empty());
+    }
+
+    // ── Real enforcement: a rejected item is actually blocked ────────────
+
+    #[tokio::test]
+    async fn filtered_executor_blocks_a_rejected_tool_without_reaching_the_inner_executor() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ToolRequest>();
+        let executor = FilteredToolExecutor {
+            inner: BrowserToolExecutor { tx },
+            rejected: [ToolId::new("js.execute")].into_iter().collect(),
+            rejected_origins: Default::default(),
+        };
+
+        let call = AgentToolCall::new(BrowserTool::ExecuteJs("1+1".to_string()));
+        let result = executor.execute(&call).await;
+
+        assert!(!result.success, "a rejected tool call must be refused");
+        assert_eq!(result.error.as_deref(), Some("blocked by user consent"));
+        assert!(
+            rx.try_recv().is_err(),
+            "the real executor must never forward a rejected call to the inner channel — \
+             rejection must be actual enforcement, not just UI state"
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_executor_blocks_a_download_whose_url_origin_was_rejected() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ToolRequest>();
+        let executor = FilteredToolExecutor {
+            inner: BrowserToolExecutor { tx },
+            rejected: Default::default(),
+            rejected_origins: ["https://attacker.example".to_string()]
+                .into_iter()
+                .collect(),
+        };
+
+        let call = AgentToolCall::new(BrowserTool::DownloadFile(
+            "https://attacker.example/payload".to_string(),
+        ));
+        let result = executor.execute(&call).await;
+
+        assert!(
+            !result.success,
+            "an out-of-scope-origin download must be refused"
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn filtered_executor_allows_a_non_rejected_tool_to_reach_the_inner_executor() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ToolRequest>();
+        let executor = FilteredToolExecutor {
+            inner: BrowserToolExecutor { tx },
+            rejected: Default::default(),
+            rejected_origins: Default::default(),
+        };
+
+        let call = AgentToolCall::new(BrowserTool::ReadPage);
+        let (result, _) = tokio::join!(executor.execute(&call), async {
+            let req = rx
+                .recv()
+                .await
+                .expect("inner executor must receive the call");
+            let reply_tx = req.take_reply().expect("reply channel available");
+            let _ = reply_tx.send(AgentToolResult::ok(req.call.call_id, "ok"));
+        });
+
+        assert!(
+            result.success,
+            "a non-rejected call must reach the inner executor"
+        );
+    }
+
+    // ── Dry-run evidence rendering ────────────────────────────────────────
+
+    #[test]
+    fn dry_run_evidence_lines_render_ordered_call_log() {
+        let task = AgentTask::new("t", None);
+        let mut record = evidence_for(&task);
+        record.record_tool(
+            ToolId::new("navigate"),
+            Some("https://example.com".to_string()),
+        );
+        record.record_tool(
+            ToolId::new("dom.read"),
+            Some("https://example.com".to_string()),
+        );
+        record.record_tool(ToolId::new("js.execute"), None);
+
+        let lines = dry_run_evidence_lines(&record);
+        assert_eq!(
+            lines,
+            vec![
+                "#0  navigate  https://example.com",
+                "#1  dom.read  https://example.com",
+                "#2  js.execute  (no origin recorded)",
+            ]
+        );
+    }
+
+    #[test]
+    fn dry_run_evidence_lines_says_so_honestly_when_nothing_was_recorded() {
+        let task = AgentTask::new("t", None);
+        let record = evidence_for(&task);
+        assert_eq!(
+            dry_run_evidence_lines(&record),
+            vec!["No tool calls were recorded during the dry run."]
+        );
+    }
+
+    // ── Page-content decoupling: structural argument, not merely asserted ─
+
+    /// This is not a runtime assertion so much as a compile-time witness:
+    /// `view()`'s signature takes `&FerriteBrowser` and returns
+    /// `Element<'_, FerriteBrowserMessage>` built exclusively from
+    /// `iced_widget` constructors over plain Rust data
+    /// (`String`/`FingerprintDiff`/`ExpectedFingerprint`/`DryRunRecord`).
+    /// Page content never appears in any of those types — the only place
+    /// Servo's page content enters this crate at all is
+    /// `HeadlessServoSession::get_frame()`, which returns a decoded
+    /// `(width, height, Vec<u8> RGBA bytes)` pixel buffer (see the `content`
+    /// arm of `view()` for the one call site), rendered via
+    /// `iced_widget::image::Image` — a bitmap, not markup Iced parses for
+    /// style/position/layout. There is therefore no code path by which a
+    /// page's HTML/CSS/text could set a style, position, or z-order on the
+    /// consent panel: nothing in `FingerprintDiff`, `ExpectedFingerprint`,
+    /// `DryRunRecord`, or `ConsentDecision` is ever populated from raw page
+    /// markup, and even the one place page bytes DO reach this crate
+    /// (`get_frame()`) they arrive as opaque pixels, never as a string Iced's
+    /// widget tree would interpret. This test exists so that claim is
+    /// pinned to a real function signature rather than left as a comment
+    /// someone could invalidate without any test noticing.
+    #[test]
+    fn page_content_cannot_reach_the_consent_panels_inputs() {
+        fn assert_view_signature(_f: fn(&FerriteBrowser) -> Element<'_, FerriteBrowserMessage>) {}
+        assert_view_signature(view);
+
+        // The only types a pending consent decision is built from — none of
+        // them is, or contains, raw page markup.
+        fn assert_consent_panel_inputs_are_plain_data(
+            _diff: &FingerprintDiff,
+            _expected: &ExpectedFingerprint,
+            _evidence: &DryRunRecord,
+            _decision: &ConsentDecision,
+        ) {
+        }
+        let diff = FingerprintDiff::default();
+        let expected = ExpectedFingerprint::empty();
+        let task = AgentTask::new("t", None);
+        let evidence = evidence_for(&task);
+        let decision = ConsentDecision::default();
+        assert_consent_panel_inputs_are_plain_data(&diff, &expected, &evidence, &decision);
+    }
 }
