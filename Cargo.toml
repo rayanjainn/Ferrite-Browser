@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/ferrite-core",
   "crates/ferrite-shell",
   "crates/ferrite-audit-log",
   "crates/ferrite-servo",
@@ -62,6 +63,7 @@ urlencoding = "2"
 # ── path deps (in-workspace crates) ──────────────────────────────────────
 ferrite-agent = { path = "crates/ferrite-agent" }
 ferrite-audit-log = { path = "crates/ferrite-audit-log" }
+ferrite-core = { path = "crates/ferrite-core" }
 ferrite-ipi = { path = "crates/ferrite-ipi" }
 ferrite-servo = { path = "crates/ferrite-servo" }
 ferrite-ui = { path = "crates/ferrite-ui" }
