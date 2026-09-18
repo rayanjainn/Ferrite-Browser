@@ -8,10 +8,10 @@
 //! # Shape
 //!
 //! Backends speak one wire format each and do nothing else:
-//! [`MockProvider`] (scripted, for unit tests), `ReplayProvider`
-//! (committed fixtures, for integration tests and CI), `OllamaProvider`
+//! [`MockProvider`] (scripted, for unit tests), [`ReplayProvider`]
+//! (committed fixtures, for integration tests and CI), [`OllamaProvider`]
 //! (cloud *and* local — one struct, one wire protocol, two base URLs) and
-//! `GeminiProvider`.
+//! [`GeminiProvider`].
 //!
 //! Everything cross-cutting is a decorator wrapping any provider, so a new
 //! backend inherits all of it:
@@ -58,13 +58,15 @@ pub mod cache_key;
 pub mod config;
 pub mod decorators;
 pub mod error;
+pub mod fixtures;
 mod guard;
 pub mod provider;
 pub mod request;
 pub mod response;
+pub mod secret;
 pub mod testing;
 
-pub use backends::{MockProvider, MockStep};
+pub use backends::{GeminiProvider, MockProvider, MockStep, OllamaProvider, ReplayProvider};
 pub use cache_key::CacheKey;
 pub use config::{EnvSource, MapEnv, ModelConfig, SystemEnv};
 pub use decorators::{Budget, Cache, Throttle, ThrottleConfig};
@@ -72,3 +74,4 @@ pub use error::ModelError;
 pub use provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
 pub use request::{CompletionRequest, Message, Role, SamplingOptions};
 pub use response::{CompletionResponse, Provenance, TokenUsage};
+pub use secret::{OsKeyring, SecretStore, Token};

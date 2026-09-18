@@ -59,6 +59,39 @@ test-fast:
 test-live:
     cargo test --workspace -- --ignored
 
+# Lists every tag the configured Ollama endpoint actually serves
+# (docs/REBUILD_DIRECTIVE.md §10.2's startup preflight target). Networked;
+# needs OLLAMA_API_KEY (or the OS keyring) unless FERRITE_OLLAMA_BASE_URL
+# points at a local endpoint, and FERRITE_MODEL_SMALL/FERRITE_MODEL_MAIN
+# set (T-213: no model name is ever a default). Not part of check/test/CI.
+models:
+    cargo run -p ferrite-model --example models
+
+# One live Ollama Cloud round-trip, by hand — A3's exit gate. Same
+# credentials/config as `models`. Not part of check/test/CI; this is the
+# one target the directive explicitly asks a human to run once, not a
+# thing `just test` should ever do (R7).
+probe:
+    cargo run -p ferrite-model --example probe
+
+# Reports the on-disk response cache's size and the hit rate flushed by the
+# last run (§10.3: "a low hit rate is a bug, investigate it"). Offline —
+# only reads ~/.cache/ferrite-model/ (or $FERRITE_MODEL_CACHE_DIR), no
+# network, no model config required. Safe to run anywhere, including CI.
+cache-stats:
+    cargo run -p ferrite-model --example cache_stats
+
+# Records one live response into the committed fixture directory
+# (crates/ferrite-model/tests/fixtures/model/) for ReplayProvider to serve
+# in offline tests — §10.3: "these are committed." Usage:
+#   just record ollama "your prompt"
+#   just record gemini "your prompt"
+# Networked; same config/credentials as `models`/`probe`. Not part of
+# check/test/CI — a fixture this writes is reviewed and committed by hand,
+# like any other change to the test tree.
+record provider prompt="":
+    cargo run -p ferrite-model --example record -- {{provider}} {{prompt}}
+
 # Run the shell binary (launches the Iced UI by default — see
 # ferrite-shell/src/main.rs's CLI dispatch for the other subcommands:
 # window, jstest, agent-smoke, smoke).

@@ -242,7 +242,17 @@ where
 
 /// `~/.cache/ferrite-model`, matching the justfile's `~/.cache/ferrite-target`
 /// convention for the build cache.
-fn default_cache_dir() -> Result<PathBuf, ModelError> {
+///
+/// Public (not just used internally by [`ModelConfig::load`]) so `just
+/// cache-stats` can resolve the default cache location without first
+/// needing a full [`ModelConfig`] — which would otherwise force the two
+/// required model tags to be set just to look at a directory that has
+/// nothing to do with them.
+///
+/// # Errors
+///
+/// [`ModelError::Config`] if the home directory cannot be resolved.
+pub fn default_cache_dir() -> Result<PathBuf, ModelError> {
     let home = dirs::home_dir().ok_or_else(|| {
         ModelError::Config(
             "cannot resolve the home directory for the response cache; \

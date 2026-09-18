@@ -6,6 +6,13 @@
 //! backend gets all three for free and cannot accidentally implement one of
 //! them slightly differently.
 
+mod gemini;
+mod http;
 mod mock;
+mod ollama;
+mod replay;
 
+pub use gemini::{GEMINI_API_KEY_VAR, GeminiProvider};
 pub use mock::{MockProvider, MockStep};
+pub use ollama::{OLLAMA_API_KEY_VAR, OllamaProvider, shared as shared_ollama, validate_tag};
+pub use replay::ReplayProvider;
