@@ -539,10 +539,7 @@ licenses/sources all `ok`). `cargo machete` clean. `just check` and
   run) are in `docs/TO-DO.md` T-214 — not fixed in any crate's source
   because there is no crate-level bug to fix.
 
-**Commits:** none yet from this entry at write time — the fixture files
-and justfile fix are staged for a commit immediately following this
-entry; see the next `git log` for the actual SHA once written to keep
-this citation accurate (R2 — not backfilling a SHA before it exists).
+**Commits:** `26bd2da` (justfile quoting fix + the two live fixtures).
 
 **Tests:** `just ci` (fmt-check + clippy --all-targets + machete + full
 `cargo test --workspace`) — 10 consecutive clean runs after the
