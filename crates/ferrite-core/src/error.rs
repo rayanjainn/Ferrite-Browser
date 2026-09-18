@@ -7,6 +7,26 @@
 
 use thiserror::Error;
 
+use crate::taxonomy::Capability;
+
+/// An expected-capability set violated the taxonomy's invariants.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum TaxonomyError {
+    /// The same capability was listed twice. Each capability carries exactly
+    /// one [`OriginScope`](crate::scope::OriginScope) per task, so two
+    /// entries for one capability would make attribution ambiguous — which of
+    /// the two scopes justified the action? — and that ambiguity is precisely
+    /// what D1's per-capability scoping exists to remove.
+    #[error(
+        "capability {capability} appears more than once in an expected set; \
+         each capability carries exactly one origin scope per task"
+    )]
+    DuplicateCapability {
+        /// The capability that was listed twice.
+        capability: Capability,
+    },
+}
+
 /// An [`OriginScope`](crate::scope::OriginScope) or
 /// [`DomainSuffix`](crate::scope::DomainSuffix) was handed a value that
 /// violates ADR-004's authoring rules.

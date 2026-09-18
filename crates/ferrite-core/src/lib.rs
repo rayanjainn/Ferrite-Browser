@@ -14,7 +14,12 @@
 pub mod error;
 pub mod ids;
 pub mod scope;
+pub mod taxonomy;
 
-pub use error::{IdError, ScopeError};
+pub use error::{IdError, ScopeError, TaxonomyError};
 pub use ids::{CaseId, ExecId, Origin, PrincipalId};
 pub use scope::{DomainSuffix, OriginScope, Specificity};
+pub use taxonomy::{
+    ActionClass, Capability, ExpectedCapability, ExpectedCapabilitySet, Primitive,
+    ScopablePrimitive,
+};
