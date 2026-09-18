@@ -249,3 +249,119 @@ the `MIT OR Apache-2.0` license choice (inherited from the archived
 release-cadence change (every push → weekly + manual). Nothing has
 shipped to a remote yet — 17 commits sit local on `main`, unpushed
 (verified via `git log --oneline origin/main..HEAD | wc -l` at write time).
+
+---
+
+## 2026-09-18 — A2 (Core contracts) — `ferrite-core`: taxonomy, per-capability `OriginScope`, IDs, `Clock`
+
+**Landed:**
+- New workspace member `crates/ferrite-core`, wired into `[workspace]`
+  `members` and `[workspace.dependencies]` as a path dep so A3 onward can
+  take it with `dep.workspace = true`. `license = "MIT OR Apache-2.0"`,
+  `publish = false`, matching the other 7 crates (the choice itself is still
+  T-209, not re-decided here). No new third-party dependency was added —
+  `serde`/`thiserror`/`uuid`/`chrono`/`url`/`serde_json` were all already in
+  `[workspace.dependencies]`.
+- **Capability/primitive taxonomy** (directive §8, ADR-001): the closed
+  7-capability allowlist and 17 observed primitives, of which 16 are
+  scopable. The capability→primitive lowering is the `const LOWERING` table;
+  `Capability::realization()` is a lookup into it rather than a second copy.
+- **`js.execute` is now structurally unrepresentable as an expected
+  primitive** (ADR-003, directive §8/A4). Pre-rebuild this was
+  `const UNSCOPABLE: &[&str] = &["js.execute"]` checked at runtime in the
+  comparator. It is now three agreeing layers: `ActionClass::Execute` is the
+  only unscopable class (so the rule is the general one ADR-003 states, not a
+  name comparison); `ScopablePrimitive` is a separate 16-variant enum with no
+  `JsExecute` variant, and every expected-side type is built from it;
+  `Primitive` (the observed vocabulary) keeps the variant because a dry-run
+  must be able to record it, with `Primitive::as_scopable()` the only bridge
+  back, returning `None` for exactly that variant.
+- **`OriginScope` with per-capability scoping** (ADR-004; the type A7 needs
+  to close T-001/T-002). Three variants with a `Specificity` ordering
+  (`Exact > DomainSuffix > TaskOpen`) exposed as
+  `OriginScope::admits(&Origin) -> Option<Specificity>`. `ExpectedCapability`
+  carries its own scope and `ExpectedCapabilitySet::lowered()` yields
+  `(ScopablePrimitive, &OriginScope, Capability)` triples — the shape §6/A7
+  specifies, and the reason the mixed narrow-`scoped.read` /
+  wide-`web.read` fixture is now expressible at all.
+- Newtype IDs `CaseId`/`ExecId`/`PrincipalId`/`Origin`, validating on
+  construction with no unvalidated public constructor; `Clock` trait with
+  `SystemClock` and a `cfg(test)`/`test-util`-gated `FixedClock`; error enums
+  via `thiserror`.
+
+**Commits:** `1c01a3e` (IDs) `2a19b00` (OriginScope) `01e392e` (taxonomy)
+`eb80812` (Clock) `9679904` (serde + golden fixtures) — on branch
+`rebuild/a02-core-contracts`, not merged to `main` (R10: that is the
+coordinating session's call, after review).
+
+**Tests:** 45 unit + 9 integration + 2 doctests in `ferrite-core`, all green;
+`cargo test --workspace` green (no test in this crate touches the network,
+the filesystem outside `tests/fixtures/`, or the wall clock).
+The load-bearing ones, by name:
+- `js_execute_is_the_only_unscopable_primitive`,
+  `a_primitive_is_convertible_exactly_when_its_action_class_is_scopable`,
+  `no_capabilitys_expected_realization_can_contain_js_execute`,
+  `an_expected_capability_set_can_never_lower_to_js_execute`,
+  `js_execute_is_admitted_by_nothing_because_it_cannot_be_asked_about`, plus
+  a `compile_fail` doctest on `ScopablePrimitive` proving
+  `ScopablePrimitive::JsExecute` does not compile, paired with a compiling
+  doctest on the same path so the failure cannot be a mistyped path.
+- `lowering_table_covers_every_scopable_primitive_exactly_once`,
+  `lowering_table_covers_every_capability_exactly_once`,
+  `realization_lookup_agrees_with_the_lowering_table`,
+  `reverse_index_agrees_with_the_lowering_table`,
+  `a_capabilitys_realization_shares_its_action_class`.
+- `prop_widening_a_scope_never_revokes_an_admission`,
+  `prop_widening_a_scope_never_raises_the_admission_rank`,
+  `prop_admission_is_deterministic`,
+  `domain_suffix_matches_on_label_boundaries_only`,
+  `exact_scope_admits_only_the_listed_origins`.
+- `expected_capability_set_lowers_to_per_capability_scopes`,
+  `expected_capability_set_rejects_a_duplicate_capability`,
+  `expected_capability_set_is_deterministically_ordered`,
+  `the_empty_expected_set_lowers_to_nothing`.
+- `round_trip_*` and `golden_*` in `tests/schema_stability.rs`, plus
+  `json_authored_values_go_through_the_same_validation_as_rust_built_ones`.
+
+**Verified by experiment, not asserted:**
+- The directive §8 compile-time gate is real: temporarily adding a
+  `ScopablePrimitive` variant without assigning it to a capability produced
+  `error[E0004]: non-exhaustive patterns: ScopablePrimitive::Unassigned not
+  covered` at `ScopablePrimitive::capability()`. Reverted after checking.
+- The tests that were written alongside their data (the ID validators, the
+  lowering table, the golden fixtures) were mutation-checked rather than
+  trusted: dropping `screenshot` from `web.read`'s realization, misclassing
+  `js.execute` as `ActionClass::Read`, removing `Origin` normalization,
+  removing the `CaseId` alphabet check, and renaming `scoped.read`'s wire
+  string each turned the expected tests red. Reverted after checking.
+- `FixedClock` really is absent from a default build: `cargo doc` failed on
+  an intra-doc link to it until the link was removed. `cargo doc -D warnings`
+  is now clean both with and without `test-util`, and `cargo clippy
+  --all-targets` is clean in both feature states.
+- `just check`, `just test`, `cargo deny check` (exit 0), `scripts/check_purge.sh`
+  and `scripts/check_no_archive_links.sh` all run clean at this branch's HEAD.
+
+**Known issues discovered, filed rather than dropped:**
+- **T-211** — `Origin` accepts only `http`/`https`, so an action recorded on
+  an opaque origin (`about:blank`, `data:`, `blob:`) has no representation.
+  A6's recorder will hit this first.
+- **T-212** — `DomainSuffix` does not reject public suffixes: a scope
+  authored as `domain_suffix: ["com"]` normalizes cleanly and admits the
+  entire TLD. This is the one way the scope algebra can fail *open*. Needs a
+  public-suffix list or an authoring-time lint; ADR-004's weak-scope
+  stratified reporting does not cover it, because such a scope reports as
+  `domain_suffix`, not `task_open`.
+- **T-213** — config loading with env overrides was in A2's charter line but
+  nothing in this crate needs a config value, so none was built (R9: machinery
+  with no caller is the dead code the rule exists to prevent). Deferred to A3,
+  which has the first real values (`FERRITE_MODEL_SMALL`/`_MAIN`).
+- Not a defect, a reconciliation: directive §8 lists **17** primitives. The
+  A2 charter brief said "16", which is the scopable count. Both are now
+  explicit in the types (`Primitive::ALL` = 17, `ScopablePrimitive::ALL` = 16)
+  and pinned by `primitive_vocabulary_is_the_seventeen_of_directive_section_8`
+  and `scopable_vocabulary_is_the_observed_one_minus_js_execute`.
+- Residual gap, stated rather than hidden: the `ALL` lists are complete by
+  construction (a macro generates the variants and the list from one
+  declaration, so a variant cannot exist without appearing in `ALL`), but
+  Rust has no stable way to assert an enum's variant *count*, so that
+  guarantee rests on the macro being the only way these enums are declared.
