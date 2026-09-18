@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ferrite-audit-log = { path = "../ferrite-audit-log" }
-ferrite-servo = { path = "../ferrite-servo" }
-ferrite-ui = { path = "../ferrite-ui" }
-ferrite-agent = { path = "../ferrite-agent" }
-tokio = { version = "1", features = ["full"] }
-async-trait = "0.1"
-uuid = { version = "1", features = ["v4"] }
+ferrite-audit-log = { workspace = true }
+ferrite-servo = { workspace = true }
+ferrite-ui = { workspace = true }
+ferrite-agent = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }

@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 members = [
   "crates/ferrite-shell",
   "crates/ferrite-audit-log",
@@ -10,3 +10,83 @@ members = [
 ]
 resolver = "2"
 
+# Single version source (docs/REBUILD_DIRECTIVE.md §7.3/T-101): every crate
+# uses `dep.workspace = true` for every dependency it needs, even one used
+# by only itself — the point is that a version bump happens in exactly one
+# place, ever, so a duplicate/drifted version can't reappear by a crate
+# quietly pinning its own. Verified against every crate's actual pre-A1
+# Cargo.toml (docs/handoffs/a1.md cites this).
+[workspace.dependencies]
+# ── Cross-crate shared ──────────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "1"
+async-trait = "0.1"
+# Trimmed from "full" (docs/TO-DO.md T-207 finding: grepped every
+# `tokio::` call site in the workspace — runtime::Runtime::new(),
+# sync::{mpsc,oneshot}, task::spawn, time::{sleep,timeout}, and the
+# `#[tokio::test]` macro — none of `fs`/`net`/`io-util`/`process`/`signal`
+# are used anywhere. "full" was pulling in all of them unused.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# Trimmed to what's actually used: DateTime::<Utc>::now() (needs "clock")
+# and #[derive(Serialize/Deserialize)] on structs holding chrono types
+# (needs "serde"). Default features pull in more (e.g. "wasmbind") that
+# nothing here touches.
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+url = "2"
+
+# ── ferrite-ipi ──────────────────────────────────────────────────────────
+ammonia = "3"
+regex = "1"
+aes-gcm = "0.10"
+rand = "0.8"
+nix = { version = "0.28", features = ["net", "user"] }
+
+# ── ferrite-servo ────────────────────────────────────────────────────────
+raw-window-handle = "0.6"
+winit = "0.30"
+log = "0.4"
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
+libservo = { git = "https://github.com/servo/servo", tag = "v0.0.5" }
+
+# ── ferrite-ui ───────────────────────────────────────────────────────────
+iced = { version = "0.13", features = ["tokio"] }
+iced_widget = { version = "0.13", features = ["image"] }
+urlencoding = "2"
+
+# ── path deps (in-workspace crates) ──────────────────────────────────────
+ferrite-agent = { path = "crates/ferrite-agent" }
+ferrite-audit-log = { path = "crates/ferrite-audit-log" }
+ferrite-ipi = { path = "crates/ferrite-ipi" }
+ferrite-servo = { path = "crates/ferrite-servo" }
+ferrite-ui = { path = "crates/ferrite-ui" }
+
+# ── Build profiles (docs/REBUILD_DIRECTIVE.md §7.2) ──────────────────────
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+incremental = true
+codegen-units = 256
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.test]
+inherits = "dev"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "unwind"
+
+[profile.bench]
+inherits = "release"
+debug = "line-tables-only"

@@ -712,9 +712,16 @@ mod e2e_tests {
     }
 
     // Guards FERRITE_GEMINI_API_KEY so the engine is deterministically rules-only
-    // (no Gemini key -> CI-safe, no network calls).
+    // (no Gemini key -> CI-safe, no network calls). Held across .await by
+    // design: each #[tokio::test] gets its own single-threaded runtime, so
+    // there's no shared executor for a std Mutex to deadlock — the guard's
+    // job is serializing the env-var mutation across parallel *test
+    // threads*, which requires holding it for the whole async body
+    // (dropping it before the await would let a parallel test flip the
+    // var mid-run). docs/TO-DO.md T-207.
     static ENV_GUARD: StdMutex<()> = StdMutex::new(());
 
+    #[allow(clippy::await_holding_lock)] // see ENV_GUARD's doc comment above
     #[tokio::test]
     async fn attack_t1a_runs_full_pipeline_across_all_four_modes() {
         let _guard = ENV_GUARD.lock().unwrap();
@@ -776,6 +783,7 @@ mod e2e_tests {
         assert!(audit.log.verify_chain());
     }
 
+    #[allow(clippy::await_holding_lock)] // see ENV_GUARD's doc comment above
     #[tokio::test]
     async fn benign_runs_in_on_and_sanitizer_only() {
         let _guard = ENV_GUARD.lock().unwrap();
@@ -816,6 +824,7 @@ mod e2e_tests {
         assert_eq!(a5.consent_gated, ConsentOutcome::NotApplicable);
     }
 
+    #[allow(clippy::await_holding_lock)] // see ENV_GUARD's doc comment above
     #[tokio::test]
     async fn benign_security_tutorial_false_flags_only_in_sanitizer_only() {
         let _guard = ENV_GUARD.lock().unwrap();
@@ -877,6 +886,7 @@ mod e2e_tests {
         assert_eq!(a5.final_outcome, FinalOutcome::BenignFalseFlag);
     }
 
+    #[allow(clippy::await_holding_lock)] // see ENV_GUARD's doc comment above
     #[tokio::test]
     async fn attack_t1b_runs_full_pipeline_across_all_four_modes() {
         let _guard = ENV_GUARD.lock().unwrap();

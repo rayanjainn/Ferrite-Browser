@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-iced = { version = "0.13", features = ["tokio"] }
-iced_widget = { version = "0.13", features = ["image"] }
-ferrite-audit-log = { path = "../ferrite-audit-log" }
-ferrite-servo = { path = "../ferrite-servo" }
-ferrite-agent = { path = "../ferrite-agent" }
-ferrite-ipi = { path = "../ferrite-ipi" }
-tokio = { version = "1", features = ["full"] }
-async-trait = "0.1"
-uuid = { version = "1", features = ["v4"] }
-urlencoding = "2"
+iced = { workspace = true }
+iced_widget = { workspace = true }
+ferrite-audit-log = { workspace = true }
+ferrite-servo = { workspace = true }
+ferrite-agent = { workspace = true }
+ferrite-ipi = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+urlencoding = { workspace = true }

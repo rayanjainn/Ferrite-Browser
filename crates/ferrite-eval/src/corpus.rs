@@ -755,9 +755,16 @@ mod tests {
     }
 
     // Guards FERRITE_GEMINI_API_KEY so the engine is deterministically
-    // rules-only (no Gemini key -> CI-safe, no network calls).
+    // rules-only (no Gemini key -> CI-safe, no network calls). Held across
+    // .await by design: each #[tokio::test] gets its own single-threaded
+    // runtime, so there's no shared executor for a std Mutex to deadlock —
+    // the guard's job is serializing the env-var mutation across parallel
+    // *test threads*, which requires holding it for the whole async body
+    // (dropping it before the await would let a parallel test flip the
+    // var mid-run). docs/TO-DO.md T-207.
     static ENV_GUARD: StdMutex<()> = StdMutex::new(());
 
+    #[allow(clippy::await_holding_lock)] // see ENV_GUARD's doc comment above
     #[tokio::test]
     async fn loaded_case_runs_through_the_full_pipeline() {
         let _guard = ENV_GUARD.lock().unwrap();

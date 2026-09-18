@@ -76,7 +76,11 @@ fn pilot_corpus_batch_load() {
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
                 .join("\n  ");
-            panic!("batch load reported {} error(s):\n  {}", errors.len(), joined);
+            panic!(
+                "batch load reported {} error(s):\n  {}",
+                errors.len(),
+                joined
+            );
         }
     }
 }

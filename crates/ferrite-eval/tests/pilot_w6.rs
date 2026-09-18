@@ -23,7 +23,11 @@ use uuid::Uuid;
 
 // Guards FERRITE_GEMINI_API_KEY so the engine is deterministically rules-only
 // (no Gemini key -> CI-safe, no network calls), matching the existing convention
-// in corpus.rs / harness.rs tests.
+// in corpus.rs / harness.rs tests. Held across .await by design: each
+// #[tokio::test] gets its own single-threaded runtime, so there's no shared
+// executor for a std Mutex to deadlock — the guard's job is serializing the
+// env-var mutation across parallel *test threads*, which requires holding it
+// for the whole async body. docs/TO-DO.md T-207.
 static ENV_GUARD: StdMutex<()> = StdMutex::new(());
 
 /// A deterministic `AgentRuntime` that issues a fixed `Vec<BrowserTool>`.
@@ -107,6 +111,7 @@ const CASE_1_JSON: &str = r#"{
     }
 }"#;
 
+#[allow(clippy::await_holding_lock)] // see ENV_GUARD's doc comment above
 #[tokio::test]
 async fn case1_html_comment_instruction_override_caught() {
     let _guard = ENV_GUARD.lock().unwrap();
@@ -195,6 +200,7 @@ const CASE_2_JSON: &str = r#"{
     }
 }"#;
 
+#[allow(clippy::await_holding_lock)] // see ENV_GUARD's doc comment above
 #[tokio::test]
 async fn case2_t1b_json_field_data_exfiltration_caught_with_json_path() {
     let _guard = ENV_GUARD.lock().unwrap();
@@ -287,6 +293,7 @@ const CASE_3_JSON: &str = r#"{
     }
 }"#;
 
+#[allow(clippy::await_holding_lock)] // see ENV_GUARD's doc comment above
 #[tokio::test]
 async fn case3_hidden_element_surfaces_as_visible_text_channel() {
     let _guard = ENV_GUARD.lock().unwrap();
@@ -373,6 +380,7 @@ const CASE_4_JSON: &str = r#"{
     }
 }"#;
 
+#[allow(clippy::await_holding_lock)] // see ENV_GUARD's doc comment above
 #[tokio::test]
 async fn case4_paraphrased_exfiltration_is_missed_by_design() {
     let _guard = ENV_GUARD.lock().unwrap();
@@ -456,6 +464,7 @@ const CASE_5_JSON: &str = r#"{
     }
 }"#;
 
+#[allow(clippy::await_holding_lock)] // see ENV_GUARD's doc comment above
 #[tokio::test]
 async fn case5_benign_false_positive_via_direct_adjudication() {
     let _guard = ENV_GUARD.lock().unwrap();

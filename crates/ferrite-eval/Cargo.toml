@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ferrite-ipi = { path = "../ferrite-ipi" }
-ferrite-audit-log = { path = "../ferrite-audit-log" }
-ferrite-agent = { path = "../ferrite-agent" }
-uuid = { version = "1", features = ["v4"] }
-chrono = "0.4"
-tokio = { version = "1", features = ["full"] }
-async-trait = "0.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "1"
+ferrite-ipi = { workspace = true }
+ferrite-audit-log = { workspace = true }
+ferrite-agent = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
