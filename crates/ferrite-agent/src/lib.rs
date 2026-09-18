@@ -1,3 +1,4 @@
+pub mod browser_loop;
 pub mod gemini;
 pub use gemini::GeminiAgent;
 

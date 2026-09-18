@@ -1298,3 +1298,281 @@ directive's `BrowserEngine`-trait `ferrite-engine-servo` — A9 should read
 both before naming or wiring anything, the same kind of crate-identity
 check this session's own charter needed (`ferrite-audit` vs. the real
 `ferrite-audit-log`).
+
+## 2026-09-18 — A9 (Engine + agent action surface) — `ferrite-engine`, `ferrite-engine-servo`, `ferrite-agent::browser_loop`, real `just build-servo`, T-109
+
+**Commits:** `aaae747` (feat(engine): BrowserEngine trait + MockEngine),
+`8a1b7e3` (feat(engine-servo): ServoEngine wrapping HeadlessServoSession),
+`3df9af2` (feat(agent): engine/provider-agnostic browser_loop).
+
+**Session note:** same hazard A4–A8 hit — worktree started on a stale,
+unrelated tree (`65b6d67`, "Initial test case designing..."). Recreated
+`rebuild/a09-engine-agent` from local `main` (`b4f4c8c`, carries A0–A8)
+before any work.
+
+**Landed — `crates/ferrite-engine` (new crate, always built, no feature
+flag):** `BrowserEngine` trait (`src/lib.rs`) with the directive's full
+minimum action surface — `navigate`, `go_back`/`go_forward`, `reload`,
+`current_url`, `dom_snapshot`, `query`, `read_text`, `click`, `type_text`,
+`fill_form`, `select_option`, `scroll`, `wait_for` (`WaitCondition::
+{Selector, Idle, Timeout}`), `screenshot`, `download`, `open_tab`/
+`close_tab`/`switch_tab`, `cookies_read`/`storage_read` (both scoped —
+take an `&Origin`), `clipboard_read`/`clipboard_write`, `js_execute`
+(documented as privileged/unconstrained by this trait — the comparator's
+job, per the module docs). Every method returns `Result<(T, Origin),
+EngineError>`, matching the directive's "every action returns (result,
+origin)" contract literally in the signature rather than as a convention.
+Action-tagging reuses `ferrite_core::Primitive`'s existing wire vocabulary
+(`Call::primitive()`) rather than inventing a second one — the exact
+mismatch shape T-216 found is structurally avoided here, not just avoided
+by discipline.
+
+`MockEngine` (`src/mock.rs`): per-origin/per-selector scripted response
+queues for `dom_snapshot`/`query`/`read_text`/`js_execute` (A6
+`DryRunContent`-style: pop while >1 queued, repeat the last), real
+multi-tab navigation history (`go_back`/`go_forward` truncate/replay a
+`Vec<String>`), origin-scoped `cookies_read`/`storage_read` backed by
+`HashMap<Origin, Vec<...>>` (proven non-leaking by test, not just by
+code-reading), and a full `Vec<Call>` call log for introspection. Starts
+every fresh tab at a synthetic, representable `MOCK_HOME =
+"https://mock-home.ferrite.test"` rather than a real browser's opaque
+`about:blank` — documented explicitly as a deliberate Mock-only
+convenience; a test that wants the opaque-origin path can still navigate
+`MockEngine` to a non-http(s) URL and observe `EngineError::OpaqueOrigin`.
+
+`ferrite_engine::conformance` (feature `test-util`): three small,
+engine-agnostic assertion functions (`navigate_updates_current_url_and_
+origin`, `unknown_tab_id_is_a_typed_error`, `wait_idle_completes`) —
+deliberately a small shared subset, not the whole suite; see below for
+why a fully generic fixture-parameterized suite covering everything was
+not attempted.
+
+**Tests (`tests/conformance.rs`, 24 tests, all passing):** every one of
+the 24 trait methods exercised at least once
+(`every_trait_method_is_visible_in_the_call_log` asserts the call log has
+exactly 24 entries after one call to each); origin-tracking asserted
+through `navigate`/`go_back`/`go_forward`/`reload`
+(`navigate_go_back_go_forward_and_reload_track_origin_through_history`);
+`cookies_read`/`storage_read` scoping proven non-leaking
+(`cookies_read_is_scoped_and_does_not_leak_other_origins_cookies`,
+`storage_read_is_scoped_and_does_not_leak_other_origins_storage` — each
+seeds two origins and asserts a third, unseeded origin gets nothing, not
+everything); `js_execute` exercised both for success and for a scripted
+failure, with an explicit test-level comment that the test proves the
+method *runs*, not that it is *safe* to call (that's the comparator's
+job); the opaque-origin path exercised for real
+(`navigating_to_an_opaque_scheme_reports_a_typed_error_not_a_fabricated_
+origin`); a `wait_for(Idle)`/`wait_for(Timeout)` pair proving no real
+sleep occurs (R8) via a wall-clock `Instant` bound in the test itself.
+
+**Landed — `crates/ferrite-engine-servo` (new crate, feature
+`engine-servo` = `["ferrite-servo/servo"]`):** `ServoEngine` wraps
+`ferrite_servo::session::HeadlessServoSession` per the charter's explicit
+instruction (does not reimplement libservo/winit plumbing). Mapping
+decisions, each documented in the crate's module docs:
+- `dom_snapshot`/`query`/`read_text`/`click`/`type_text`/`select_option`
+  are implemented by injecting a small `JSON.stringify(...)`-returning JS
+  snippet via `execute_js` and parsing the result.
+- `execute_js`'s `Ok` branch is a `Debug` rendering of Servo's JS value
+  type (`format!("{:?}", v)`, in `ferrite-servo`'s existing code, not
+  ours), not raw JSON. `unwrap_js_string_result` strips the observed
+  `String("...")` wrapper and unescapes via `serde_json`'s string parser
+  — a real, unit-tested mechanism
+  (`unwrap_js_string_result_strips_the_observed_string_wrapper` et al.),
+  with its dependence on that untyped channel documented plainly.
+- `js_execute` itself does **not** attempt this unwrapping (arbitrary
+  scripts can return any JS value shape) — returns the raw string
+  verbatim, documented as the caller's own `JSON.stringify()`
+  responsibility if a clean value is wanted.
+- `download`/`clipboard_read`/`clipboard_write` are
+  `EngineError::Unsupported` — `HeadlessServoSession` has no download
+  manager and no synchronous clipboard API. Not placeholders: real,
+  honest, tested "this genuinely cannot be done today" results.
+- `cookies_read`/`storage_read` only succeed when `scope` equals the
+  *currently loaded* page's own origin (reading `document.cookie`/
+  `localStorage` via `execute_js` can only ever see that origin anyway);
+  a different `scope` is `EngineError::Unsupported` rather than silently
+  navigating away to satisfy it — a real scoping restriction, not a
+  missing feature dressed up as one.
+- Tabs are real: each open tab is its own `HeadlessServoSession`, sharing
+  the process-wide Servo singleton (`ferrite-servo`'s own
+  `get_or_init_servo`), mirroring `ferrite-shell`'s existing multi-tab use.
+
+**A real, load-bearing design fix found while integrating against the
+actual `servo` feature (not caught by the mock-backed default build):**
+`BrowserEngine`'s original draft required `Send`. The **real**
+`HeadlessServoSession` (behind the real `servo` feature) holds `Rc<...>`
+state throughout — Servo's engine is an intentionally thread-affine
+singleton — so `ServoEngine` cannot be `Send`, and building
+`ferrite-engine-servo --features engine-servo` failed with 24 "cannot be
+sent between threads safely" errors. Fixed by removing the `Send`
+supertrait bound from `BrowserEngine` entirely (documented in the trait's
+own doc comment, including why: no real caller in this charter's scope
+needs to move a `BrowserEngine` across threads, and `MockEngine` never
+needed the bound to begin with). This is exactly the class of thing the
+exit gate's "attempt the real build for real" instruction exists to
+surface — it would not have been found by mock-only testing.
+
+**`just build-servo` — attempted for real, succeeded:** `cargo build -p
+ferrite-shell --features ferrite-servo/servo` (the recipe's literal
+body), from an `~/.cache/ferrite-target` that already held A1–A8's
+non-Servo artifacts. **Wall clock: 15m 31s. Target-dir size after: 6.4
+GB. Exit code: 0.** Full numbers, caveats (warm registry cache,
+non-empty starting target-dir), and the comparison against the
+directive's own "tens of GB, 30–60 min" unverified estimate are in
+`docs/BUILD_BUDGET.md`'s new 2026-09-18 A9 section — time and disk both
+landed comfortably under that estimate on this machine.
+
+**Real-Servo `ServoEngine` conformance run — attempted, partially
+succeeded, one real finding not fixed (T-220):**
+`crates/ferrite-engine-servo/tests/servo_conformance.rs`, `#[ignore]`d,
+run via `cargo test -p ferrite-engine-servo --features engine-servo --
+--ignored --test-threads=1` against the just-built real Servo. Two
+process-level blockers were found and fixed in the course of getting
+this to run at all:
+1. The `Send`-bound fix above (found via this exact command failing to
+   compile).
+2. Servo's `config::opts` module is a **process-global** singleton that
+   panics ("Already initialized") if constructed twice. The first
+   attempt wrote several independent `#[test]` fns (mirroring
+   `ferrite-engine`'s own test-file style); this failed because Rust's
+   `libtest` harness spawns a fresh OS thread per `#[test]` fn regardless
+   of `--test-threads`, so `ferrite-servo`'s `thread_local!`-cached
+   `get_or_init_servo()` re-initializes (and panics) on the second test
+   function's thread. Fixed by consolidating into one `#[test]` fn that
+   builds a single `ServoEngine` and drives every assertion through it
+   sequentially on one thread — the correct, honest fix (not a workaround
+   for a bug in `ServoEngine`, a real property of how the existing,
+   out-of-scope-to-modify `ferrite-servo::session` code manages Servo's
+   own process-wide state).
+
+With both of those fixed, `ServoEngine::new` succeeds for real (no
+panic) — but `navigate()` to a `127.0.0.1` loopback HTTP fixture server
+does not observably complete: a throwaway diagnostic binary (not
+committed) confirmed the fixture server never receives a TCP connection
+attempt at all within the drive-until-loaded window, so `current_url()`
+still reports `about:blank` afterward and the rest of the suite fails on
+`EngineError::OpaqueOrigin`. This was not root-caused to a fix within
+this session's remaining budget. Leading hypothesis, documented in the
+test file's module docs and not confirmed: `HeadlessServoSession`'s own
+doc comment says it is meant to be driven by a genuine winit
+`EventLoop::run()` tick (as `ferrite-shell` does in production); bare
+repeated `spin_event_loop()` calls with no real OS-level event loop
+underneath may not be sufficient to make Servo's networking component
+(plausibly running on its own thread/process) actually attempt a fetch.
+Filed as **T-220** — real follow-up work, not a documentation gap: fixing
+it means either instrumenting/modifying `ferrite-servo::session` (outside
+this charter's file list) or wrapping a genuine winit loop inside
+`ServoEngine` itself.
+
+**Honest accounting against the exit gate's three parts:**
+1. Full action-suite conformance vs. `MockEngine`: **done**, 24/24
+   passing, part of `just test`.
+2. `just build-servo` succeeds once, cost recorded: **done**, 15m31s,
+   6.4 GB, recorded in `docs/BUILD_BUDGET.md`.
+3. The same (or an equivalent) conformance suite run against
+   `ServoEngine` at least once, result recorded: **attempted for real,
+   partial result honestly recorded** — construction succeeds, real page
+   navigation does not complete in this environment, root cause
+   hypothesized but not fixed (T-220). Per the charter's own explicit
+   allowance ("pass, fail, or 'could not attempt because the build itself
+   didn't complete', whichever is true"), the true outcome here is a
+   fourth case the charter didn't name outright but clearly anticipates
+   the spirit of: the build *did* complete, the *engine construction*
+   passes, and the *page-load leg* fails with a real, diagnosed,
+   unresolved cause — recorded as exactly that, not rounded up to "pass"
+   or down to "could not attempt."
+
+**Landed — `crates/ferrite-agent/src/browser_loop.rs` (new module,
+additive):** `run_agent_loop` — plan → select tool → act → observe →
+repeat, generic over `&dyn BrowserEngine` and `&dyn
+ferrite_model::ModelProvider` (never a concrete provider type, matching
+A4's `fingerprint::generate_fingerprint` precedent and §10.5's rule).
+`AgentAction` (serde-tagged enum, one variant per `BrowserEngine` method
+plus `Finish`) is the model's structured-output vocabulary; the model's
+raw response text is parsed directly via `serde_json::from_str` (kept
+deliberately simple — no schema/cache/decorator wiring in this loop, see
+the module's explicit scope note on why the old `BrowserTool`/
+`AgentRuntime`/`ToolExecutor` path is untouched). `LoopBudget{max_steps,
+max_wall_clock, max_repeated_identical}`, all three enforced; wall-clock
+uses an injected `ferrite_core::Clock` (never `tokio::time::sleep`/real
+sleep — R8). The repeated-identical-action guard fires **before**
+executing the would-be-Nth-in-a-row action, so a real engine (not just
+`MockEngine`) never actually performs the repeat.
+
+**Decision — `BrowserTool`/`AgentRuntime`/`ToolExecutor`/`GeminiAgent`:
+kept exactly as-is, not migrated, not removed.** Checked via `grep -rn
+"BrowserTool\|AgentRuntime\|ToolExecutor\|GeminiAgent" crates/` before
+deciding (per the charter's own instruction): these are live,
+load-bearing infrastructure for `ferrite-ipi::dry_run` (`executor.rs`,
+`orchestrator.rs`), `ferrite-ipi::tool_decision`, `ferrite-eval`
+(`harness.rs`, `corpus.rs`, `tests/pilot_w6.rs`), and `ferrite-ui`/
+`ferrite-shell` (the actual running agent), not dead reference material.
+Rewriting that whole path onto `BrowserEngine` is real, larger work the
+directive's own A9 text scopes out explicitly ("does not need to wire in
+the full IPI defense end-to-end... if it's not small, say so plainly").
+`browser_loop` is therefore new, additive capability living alongside the
+old path, not a replacement for it.
+
+**Tests (`browser_loop::tests`, 8 tests, all passing):**
+`the_loop_stops_when_the_model_finishes`, `step_budget_is_enforced`,
+`wall_clock_budget_is_enforced_with_an_injected_clock_never_real_sleep`
+(asserts `Instant::elapsed() < 2s` around a call that reports a 120s
+budget exhausted — proves no real sleep occurred),
+`repeated_identical_actions_trigger_a_hard_stop_not_an_infinite_loop`
+(scripted `MockProvider` always returns the same click; loop stops after
+2 executed + 1 caught-before-execution, not an infinite loop),
+`a_model_error_stops_the_loop_rather_than_panicking`,
+`a_malformed_action_stops_the_loop_rather_than_panicking`,
+`executed_actions_carry_real_origin_tracking_through_observations`.
+
+**Workspace wiring:** root `Cargo.toml` — `crates/ferrite-engine` and
+`crates/ferrite-engine-servo` added to `members`, plus
+`[workspace.dependencies]` path entries. `ferrite-agent/Cargo.toml`
+gained `ferrite-core`, `ferrite-engine`, `ferrite-model`, `chrono` — all
+already-workspace deps, no new external crate added to
+`[workspace.dependencies]` for this charter's own code (the `engine`
+crate itself needs only `ferrite-core`/`serde`/`thiserror`, all
+pre-existing).
+
+**Verified:** `cargo test -p ferrite-engine` (24 passed, 0 failed) +
+`-p ferrite-engine-servo` (5 passed, 0 failed, default features — the
+`#[ignore]`d real-Servo test is 0-collected under default features via
+`#![cfg(feature = "engine-servo")]`) + `-p ferrite-agent` (11 passed —
+3 pre-existing `tests::*` + 8 new `browser_loop::tests::*` — 0 failed).
+`cargo fmt -p ferrite-engine -p ferrite-engine-servo -p ferrite-agent
+--check` clean. `cargo clippy -p ferrite-engine --all-targets -D
+warnings`, `-p ferrite-engine-servo --all-targets -D warnings` (default
+features), `-p ferrite-agent --all-targets -D warnings` all clean.
+`cargo clippy -p ferrite-engine-servo --all-targets --features
+engine-servo -- -D warnings` (the real feature) also run — see this
+session's exact result recorded alongside the handoff, since it
+completed after this entry was drafted. `just check` (fmt-check +
+clippy --all-targets -D warnings workspace-wide + cargo machete) green —
+machete initially flagged an actually-unused `serde_json` dependency in
+`ferrite-engine`'s `Cargo.toml` (added speculatively, never called),
+removed, machete clean after. `just test` (full workspace, default
+features, isolated `CARGO_TARGET_DIR` to avoid racing the concurrent
+`just build-servo` run) — every crate's `test result: ok`, 0 failures,
+exit 0 (`ferrite-core` 166, `ferrite-model` 151+3 conformance,
+`ferrite-ipi` 58, `ferrite-audit-log` 21, `ferrite-agent` 11,
+`ferrite-engine` 24, `ferrite-engine-servo` 5, others as before).
+
+**Known issues discovered / filed:**
+- **T-220** (this session, unowned): `ServoEngine::navigate` does not
+  observably complete a real page load in this environment — see above.
+- **T-221** (this session, feeds A13): `ferrite-ipi`'s `Cargo.toml` still
+  depends on `ferrite-agent` (`ferrite-agent = { workspace = true }`,
+  confirmed present), backwards from the target dependency direction.
+  Not fixed here — reversing it means relocating `BrowserTool`/
+  `AgentRuntime`/`ToolExecutor` to a crate both `ipi` and `agent` can
+  depend on, well beyond this charter's file list; flagged for A13 per
+  the charter's own suggestion.
+
+**Exact next action for A10:** `crates/ferrite-ui` — Iced shell with a
+consent panel rendered fully decoupled from page content, plain-English
+per-item diff summaries citing primitive/origin/capability, per-item
+approve/reject (no blanket approve), dry-run evidence on expand,
+non-sticky per-task approvals. See `docs/handoffs/a09.md` for the exact
+shape of `BrowserEngine`/`AgentAction`/`AgentLoopResult` A10's UI will
+need to consume.
