@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+ferrite-core = { workspace = true }
 ferrite-ipi = { workspace = true }
 ferrite-audit-log = { workspace = true }
 ferrite-agent = { workspace = true }

@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 iced = { workspace = true }
 iced_widget = { workspace = true }
+ferrite-core = { workspace = true }
 ferrite-audit-log = { workspace = true }
 ferrite-servo = { workspace = true }
 ferrite-agent = { workspace = true }

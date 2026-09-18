@@ -973,3 +973,181 @@ build.
   variant. `ferrite-core` is out of this session's scope; T-211's row in
   `docs/TO-DO.md` is updated with this note but stays `open`, owned by
   A7/whoever next touches `ferrite-core::Origin`.
+
+## 2026-09-18 — A7 (Comparator + origin model) — per-capability `compare()`, admission-rank attribution, T-001/T-002/T-206/T-211/T-216
+
+**Session note:** same hazard A4/A5/A6 hit — worktree started on a stale,
+unrelated tree (`65b6d67`, "Initial test case designing..."/Git-LFS
+history unrelated to Ferrite). Recreated
+`rebuild/a07-comparator-origin-model` from local `main` (`69f4268`,
+carries A0–A6) before doing any work.
+
+**Landed:** `crates/ferrite-ipi/src/comparator/{mod,expected,diff,consent,
+legacy}.rs` replace the flat `comparator.rs`. `compare()`'s new contract:
+`fn compare(expected: &ExpectedFingerprint, actual: &DryRunRecord) ->
+FingerprintDiff`. `ExpectedFingerprint` wraps
+`ferrite_core::ExpectedCapabilitySet` (A2) — capabilities, each carrying
+its own `OriginScope` — and lowers through
+`ExpectedCapabilitySet::lowered()` directly rather than re-deriving the
+capability→primitive table. The old file's local `OriginScope`/
+`ScopeType` duplicate types are gone entirely; every scope-typed value in
+this module is `ferrite_core::scope::OriginScope`/`Specificity`.
+
+**T-001/D1 (closed, `6cb4c70`):** a fingerprint mixing a narrow
+`scoped.read` on `mail.example.com` with a wide `web.read` on
+`task_open`/a domain suffix is now expressible and attributes correctly
+per event — proven directly in
+`comparator::tests::narrow_scoped_read_and_wide_web_read_in_the_same_fingerprint_attribute_independently`
+and the exhaustive 2×3×4 enumeration
+(`comparator::tests::exhaustive_two_capability_three_origin_four_primitive_enumeration`).
+
+**T-002/D2 (closed, `6cb4c70`):** `OriginScope::admits`'s `Specificity` is
+consumed, not just computed — `compare` scans every admitting candidate
+for a matching primitive and keeps the one with the *maximum* rank
+(`exact > domain_suffix > task_open`), recording it on the `Attribution`.
+`comparator::tests::admission_rank_is_actually_consumed_not_just_computed`
+and `comparator::tests::admission_rank_picks_the_tighter_of_two_admitting_capabilities`
+are written to fail if `compare` reverted to "first match wins" instead
+of "highest-`Specificity`-wins".
+
+**T-206 (closed, `6cb4c70`):** the double-flag bug (an event landing in
+both `extra_primitives` and `out_of_scope_origins`) is fixed by
+construction: "primitive named by some capability" and "primitive named
+by no capability" partition the whole primitive space independently of
+origin, so `compare`'s classification is an `if`/`else`, not two
+independent checks.
+`comparator::tests::t206_regression_primitive_not_expected_and_origin_not_admitted_lands_in_exactly_one_bucket`
+is the direct regression test. No `Both` variant was added — see
+`comparator`'s module docs ("Why there is no `Both` variant") for why
+that would either duplicate `ExtraPrimitive` or resurrect the bug under a
+new name.
+
+**T-211 (ratified, `6cb4c70` — not "resolved by adding a variant"):**
+after reading `ferrite_core::ids::Origin`'s doc comment together with
+ADR-004 and A6's handoff, this session concludes the existing behavior
+(`Origin::parse` accepts only `http`/`https`, so an opaque-scheme URL
+fails to parse, which is the correct "unadmittable by any scope" signal)
+*is* the intended design, not a gap — adding an `Origin::Opaque` variant
+would need to be unconditionally unadmittable to mean anything, which
+"fails to parse" already achieves with less surface area. `compare`
+treats a recorded-but-unparseable origin string as `out_of_scope_origins`
+(there is a string to report) and a wholly-missing origin (`None`) as
+`extra_primitives` (nothing to report). Tests:
+`comparator::tests::an_opaque_scheme_origin_is_out_of_scope_under_its_literal_string`,
+`comparator::tests::an_event_with_no_recorded_origin_is_an_extra_primitive`.
+`docs/TO-DO.md`'s T-211 row is updated to `done` (ratified), not left
+open as an unresolved question.
+
+**T-216 (closed, `6cb4c70`):** `download.file` (`ferrite-agent`'s
+`BrowserTool::DownloadFile::tool_id()`) vs. `Primitive::Download`'s wire
+string `"download"` is resolved with a one-entry mapping local to
+`comparator::resolve_primitive`, not by changing `BrowserTool::tool_id()`
+— that string is key material for `dry_run::content::DryRunContent::
+by_tool_id`'s per-tool reply queues (A6's file, off-limits) and is
+embedded literally in `ferrite-eval`'s corpus fixtures/tests, so changing
+it would ripple far outside this charter for no benefit over a targeted
+mapping. Test:
+`comparator::tests::download_file_attributes_to_web_download_at_an_admitted_origin`.
+
+**The design gap (A4's `Fingerprint`/legacy `ToolFingerprint` carry no
+per-capability scope) — resolved, not papered over:**
+`ExpectedFingerprint::from_fingerprint`/`from_legacy_tool_fingerprint`
+apply one scope to every capability in a fingerprint that has none of its
+own, sourced from the task's context URL: `exact([context_url])` when
+present, `task_open` with a stated provisional rationale when absent —
+**never an unconditional `task_open`**, which would silently readmit
+everything and make this whole rewrite pointless.
+`comparator::expected::tests::from_fingerprint_with_a_context_url_still_flags_a_different_origin`
+is the regression test that would fail if this default were ever widened
+to ignore `context_url`. `ExpectedFingerprint::from_capabilities` is the
+direct, no-defaulting constructor for a caller with a genuine
+per-capability scope of its own — reasoning at length in
+`comparator`'s module docs ("Where a per-capability `OriginScope` comes
+from"). As a direct consequence, the live `ferrite-ui` agent-task path's
+`compare()` call site — previously a hardcoded, unconditional
+`OriginScope::task_open()` behind a `TODO(Task 19)` comment — now derives
+a real exact-scope from `agent_task.context_url` when one exists
+(`ferrite-ui/src/lib.rs`, commit `40221de`).
+
+**Cross-crate compile fixes (minimal, `40221de`), all required by the new
+`compare()` signature and the deletion of the old local `OriginScope`:**
+- `ferrite-eval/src/harness.rs::run_one` — context_url now extracted from
+  `OriginScope::Exact`'s variant instead of a removed `.exact` field;
+  builds an `ExpectedFingerprint::from_legacy_tool_fingerprint` before
+  calling `compare`.
+- `ferrite-eval/src/adjudication.rs`, `harness.rs` test fixtures —
+  migrated off the deleted `comparator::OriginScope` to
+  `ferrite_core::scope::OriginScope`'s fallible `exact`/`task_open` API
+  (mechanical, test-only call sites).
+- `ferrite-eval/src/corpus.rs`, `tests/pilot_w6.rs`,
+  `tests/pilot_corpus/*.json` (10 files) — `expected_origins` JSON
+  literals updated to `ferrite_core::OriginScope`'s externally-tagged
+  wire shape (`{"exact": [...]}` / `{"domain_suffix": [...]}` /
+  `{"task_open": {"rationale": ...}}`) in place of the old four-key flat
+  struct; these are authored test fixtures, not corpus/ or dataset.rs
+  schema, so within this session's scope to fix mechanically.
+- `ferrite-eval` and `ferrite-ui` both gained a direct `ferrite-core`
+  dependency (confirmed present in the workspace root `Cargo.toml`
+  first) — a downward edge only, `cargo machete` confirms no unused
+  dependency resulted.
+- `dataset.rs`'s `CaseDefinition::expected_origins`/
+  `ExpectedRealization::origin_scope` fields are now typed
+  `ferrite_core::scope::OriginScope` (three call sites plus an import;
+  the struct shapes themselves are untouched — no feature work in A11's
+  schema beyond what compiling required).
+
+**`FingerprintDiff`'s shape:** `extra_primitives: HashSet<ToolId>` and
+`out_of_scope_origins: HashSet<String>` keep their pre-rebuild names/types
+verbatim (read directly by `dataset::unscopable_primitive_invoked` and
+extensively by `ferrite-eval`/`ferrite-ui`, none of which this charter's
+"minimal mechanical" mandate permitted renaming). New:
+`attributions: Vec<Attribution>` (`#[serde(default)]`, so pre-A7 JSON
+still deserializes), each entry naming the tool, origin, admitting
+`Capability`, and winning `Specificity` — the shape A8's audit log needs
+to cite "which capability justified this action" per entry.
+
+**Tests:** 37 new tests in `crates/ferrite-ipi/src/comparator/` (mod.rs:
+20, expected.rs: 6, diff.rs: 6, consent.rs: 3, legacy.rs: 2), including
+property tests for monotonicity
+(`comparator::tests::prop_widening_a_capabilitys_scope_never_turns_an_admitted_event_into_a_flagged_one`)
+and determinism (`comparator::tests::prop_compare_is_deterministic`), the
+js.execute-no-exceptions test
+(`comparator::tests::js_execute_is_flagged_even_under_a_scope_that_would_admit_any_origin`),
+and the exhaustive small-case enumeration named above.
+
+**Verified:** `cargo test -p ferrite-ipi` — 166 unit tests + 2 doctests
+(1 ignored — the module-doc `compare()` signature snippet is
+`` ```ignore ``` ``), 0 failures. `cargo fmt -p ferrite-ipi --check` and
+`cargo clippy -p ferrite-ipi --all-targets -- -D warnings` clean. `cargo
+build --workspace` and `cargo test --workspace` green (0 failed, verified
+via `grep -E "FAILED|error\["` over the full run — no matches). `cargo
+fmt --all --check` and `cargo clippy --workspace --all-targets -- -D
+warnings` clean. `just check` (fmt-check + clippy + `cargo machete`)
+green — machete confirms no unused dependency from the two new
+`ferrite-core` deps. `just test` (full workspace suite) green. `cargo
+deny check`: `advisories ok, bans ok, licenses ok, sources ok`, only the
+pre-existing Servo-git-source warning (same one A3–A6 logged).
+
+**Commits:** `6cb4c70` (comparator rebuild), `40221de` (cross-crate
+compile fixes).
+
+**Known issues discovered / left for later agents:**
+- `ExpectedFingerprint::from_fingerprint`/`from_legacy_tool_fingerprint`'s
+  scope-sourcing policy is explicitly provisional: it applies one scope
+  (derived from a single context URL) uniformly to every capability in a
+  fingerprint, because neither `fingerprint::Fingerprint` nor the legacy
+  `tool_decision::ToolFingerprint` distinguishes which capability wants
+  which origin. A real per-task authoring mechanism (e.g. wiring
+  `dataset::CaseDefinition`'s `scope_rationale` into a genuine
+  per-capability scope, or a UI for authoring one) would let
+  `ExpectedFingerprint::from_capabilities` express real
+  precision — filed as new `T-217` in `docs/TO-DO.md`.
+- `ferrite-ui`'s `run_agent_loop`/consent path (`ConsentDecision`,
+  `FingerprintDiff::summary()`) is unchanged by this session beyond the
+  one call site fixed to compile — A10's UI charter is the next place
+  that surface gets real attention (e.g. showing `Attribution`'s
+  capability/specificity in the consent panel, not just the flagged
+  sets).
+- A8 (audit log) is the next consumer of this module's output: see
+  `docs/handoffs/a07.md` for exactly what shape `FingerprintDiff`/
+  `Attribution` now hand it.

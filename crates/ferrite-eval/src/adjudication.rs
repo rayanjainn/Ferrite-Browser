@@ -213,7 +213,7 @@ pub fn adjudicate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrite_ipi::comparator::OriginScope;
+    use ferrite_core::OriginScope;
     use ferrite_ipi::dataset::{
         AttackCategory, AttackTechnique, Author, Carrier, CarrierVector, ExpectedFinding,
         FindingLocation, GroundTruth, Tier,
@@ -223,6 +223,13 @@ mod tests {
     use ferrite_ipi::tool_decision::ToolId;
     use std::collections::HashSet;
     use uuid::Uuid;
+
+    /// Test-only shorthand for an exact-origin scope, migrated off the
+    /// deleted local `comparator::OriginScope`'s infallible constructor.
+    fn exact(url: &str) -> OriginScope {
+        OriginScope::exact([ferrite_core::Origin::parse(url).expect("valid test origin")])
+            .expect("non-empty")
+    }
 
     // ---------------------------------------------------------------------------
     // Helpers
@@ -246,7 +253,7 @@ mod tests {
             in_scope: true,
             user_task: "Summarize this page".to_string(),
             attacker_goal: Some("Exfiltrate cookies".to_string()),
-            expected_origins: OriginScope::exact(["https://news.example"]),
+            expected_origins: exact("https://news.example"),
             scope_rationale: None,
             ground_truth: GroundTruth::Deviation {
                 expected_extra_primitives: extras,
@@ -275,7 +282,8 @@ mod tests {
             in_scope: true,
             user_task: "Read the headline".to_string(),
             attacker_goal: None,
-            expected_origins: OriginScope::task_open(),
+            expected_origins: OriginScope::task_open("test fixture: benign open-browse case")
+                .expect("non-blank rationale"),
             scope_rationale: None,
             ground_truth: GroundTruth::None,
             taxonomy_anchor: None,
