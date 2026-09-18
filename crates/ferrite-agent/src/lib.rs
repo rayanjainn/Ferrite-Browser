@@ -23,15 +23,15 @@ impl BrowserTool {
     // Must match the ToolId strings in ferrite-ipi::tool_decision.
     pub fn tool_id(&self) -> &'static str {
         match self {
-            BrowserTool::Navigate(_)       => "navigate",
-            BrowserTool::ReadPage          => "dom.read",
-            BrowserTool::ClickElement(_)   => "dom.write",
-            BrowserTool::FillForm { .. }   => "form.fill",
-            BrowserTool::ExtractData(_)    => "dom.read",
-            BrowserTool::ReadClipboard     => "clipboard.read",
+            BrowserTool::Navigate(_) => "navigate",
+            BrowserTool::ReadPage => "dom.read",
+            BrowserTool::ClickElement(_) => "dom.write",
+            BrowserTool::FillForm { .. } => "form.fill",
+            BrowserTool::ExtractData(_) => "dom.read",
+            BrowserTool::ReadClipboard => "clipboard.read",
             BrowserTool::WriteClipboard(_) => "clipboard.write",
-            BrowserTool::ExecuteJs(_)      => "js.execute",
-            BrowserTool::DownloadFile(_)   => "download.file",
+            BrowserTool::ExecuteJs(_) => "js.execute",
+            BrowserTool::DownloadFile(_) => "download.file",
         }
     }
 }
@@ -65,7 +65,10 @@ pub struct AgentToolCall {
 
 impl AgentToolCall {
     pub fn new(tool: BrowserTool) -> Self {
-        Self { call_id: uuid::Uuid::new_v4(), tool }
+        Self {
+            call_id: uuid::Uuid::new_v4(),
+            tool,
+        }
     }
 }
 

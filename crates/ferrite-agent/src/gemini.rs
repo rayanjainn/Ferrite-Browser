@@ -1,6 +1,6 @@
 use crate::{
-    AgentError, AgentTask, AgentToolCall, AgentToolResult, AgentTurn, BrowserTool,
-    AgentRuntime, RateLimiter, ToolExecutor,
+    AgentError, AgentRuntime, AgentTask, AgentToolCall, AgentToolResult, AgentTurn, BrowserTool,
+    RateLimiter, ToolExecutor,
 };
 
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -63,8 +63,7 @@ impl GeminiAgent {
     }
 
     pub fn from_env() -> Self {
-        let api_key = read_api_key()
-            .expect("Gemini API key not found — see error above");
+        let api_key = read_api_key().expect("Gemini API key not found — see error above");
         Self::from_key(api_key)
     }
 
@@ -171,7 +170,10 @@ impl GeminiAgent {
     fn parse_function_call(part: &serde_json::Value) -> Option<AgentToolCall> {
         let fc = part.get("functionCall")?;
         let name = fc.get("name")?.as_str()?;
-        let args = fc.get("args").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
+        let args = fc
+            .get("args")
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(Default::default()));
 
         let tool = match name {
             "browser_navigate" => {
@@ -220,15 +222,15 @@ impl GeminiAgent {
             .zip(calls.iter())
             .map(|(result, call)| {
                 let fn_name = match &call.tool {
-                    BrowserTool::Navigate(_)       => "browser_navigate",
-                    BrowserTool::ReadPage          => "browser_read_page",
-                    BrowserTool::ClickElement(_)   => "browser_click",
-                    BrowserTool::FillForm { .. }   => "browser_fill_form",
-                    BrowserTool::ExtractData(_)    => "browser_extract_data",
-                    BrowserTool::ExecuteJs(_)      => "browser_execute_js",
-                    BrowserTool::ReadClipboard     => "browser_read_clipboard",
+                    BrowserTool::Navigate(_) => "browser_navigate",
+                    BrowserTool::ReadPage => "browser_read_page",
+                    BrowserTool::ClickElement(_) => "browser_click",
+                    BrowserTool::FillForm { .. } => "browser_fill_form",
+                    BrowserTool::ExtractData(_) => "browser_extract_data",
+                    BrowserTool::ExecuteJs(_) => "browser_execute_js",
+                    BrowserTool::ReadClipboard => "browser_read_clipboard",
                     BrowserTool::WriteClipboard(_) => "browser_write_clipboard",
-                    BrowserTool::DownloadFile(_)   => "browser_download_file",
+                    BrowserTool::DownloadFile(_) => "browser_download_file",
                 };
                 serde_json::json!({
                     "functionResponse": {
@@ -313,17 +315,17 @@ impl AgentRuntime for GeminiAgent {
             });
 
             let request = self.client.post(&url).json(&body).send();
-            let response = tokio::time::timeout(
-                std::time::Duration::from_secs(TURN_TIMEOUT_SECS),
-                request,
-            )
-            .await
-            .map_err(|_| AgentError::Timeout(TURN_TIMEOUT_SECS))?
-            .map_err(|e| AgentError::ApiError(e.to_string()))?;
+            let response =
+                tokio::time::timeout(std::time::Duration::from_secs(TURN_TIMEOUT_SECS), request)
+                    .await
+                    .map_err(|_| AgentError::Timeout(TURN_TIMEOUT_SECS))?
+                    .map_err(|e| AgentError::ApiError(e.to_string()))?;
 
             // d. 429 rate limit
             if response.status().as_u16() == 429 {
-                return Err(AgentError::RateLimit { retry_after_secs: 60 });
+                return Err(AgentError::RateLimit {
+                    retry_after_secs: 60,
+                });
             }
 
             // e. Other non-2xx
@@ -377,10 +379,8 @@ impl AgentRuntime for GeminiAgent {
             turn.tool_results.extend(new_results.clone());
 
             // i. Append model's function call parts + tool results to contents
-            let model_parts: Vec<serde_json::Value> = fn_call_parts
-                .iter()
-                .map(|p| (*p).clone())
-                .collect();
+            let model_parts: Vec<serde_json::Value> =
+                fn_call_parts.iter().map(|p| (*p).clone()).collect();
             contents.push(serde_json::json!({
                 "role": "model",
                 "parts": model_parts

@@ -47,10 +47,7 @@ fn run_js_compat_test() {
 
     // ── Print results table ────────────────────────────────────────────────
     println!();
-    println!(
-        "{:<42} {:<12} {:<40} Errors",
-        "URL", "JS Executed", "Title"
-    );
+    println!("{:<42} {:<12} {:<40} Errors", "URL", "JS Executed", "Title");
     println!("{}", "-".repeat(110));
     for r in &results {
         let title = r.page_title.as_deref().unwrap_or("—");
@@ -62,7 +59,11 @@ fn run_js_compat_test() {
         let errors_summary = if r.console_errors.is_empty() {
             "none".to_string()
         } else {
-            format!("{}: {}", r.console_errors.len(), r.console_errors[0].chars().take(40).collect::<String>())
+            format!(
+                "{}: {}",
+                r.console_errors.len(),
+                r.console_errors[0].chars().take(40).collect::<String>()
+            )
         };
         println!(
             "{:<42} {:<12} {:<40} {}",
@@ -78,7 +79,11 @@ fn run_js_compat_test() {
     // ── Save CSV ───────────────────────────────────────────────────────────
     let csv_dir = std::path::Path::new("../paper/data");
     if let Err(e) = std::fs::create_dir_all(csv_dir) {
-        eprintln!("[jstest] Warning: could not create {}: {}", csv_dir.display(), e);
+        eprintln!(
+            "[jstest] Warning: could not create {}: {}",
+            csv_dir.display(),
+            e
+        );
         return;
     }
     let csv_path = csv_dir.join("js_compat_baseline.csv");
@@ -106,7 +111,9 @@ fn run_js_compat_test() {
 }
 
 fn run_agent_smoke() {
-    use ferrite_agent::{AgentTask, AgentToolCall, AgentToolResult, GeminiAgent, AgentRuntime, ToolExecutor};
+    use ferrite_agent::{
+        AgentRuntime, AgentTask, AgentToolCall, AgentToolResult, GeminiAgent, ToolExecutor,
+    };
 
     if std::env::var("FERRITE_GEMINI_API_KEY").is_err() {
         eprintln!("[agent-smoke] FERRITE_GEMINI_API_KEY is not set — skipping");
@@ -157,8 +164,7 @@ fn run_smoke_test() {
         .to_string_lossy()
         .into_owned();
 
-    let mut audit_log =
-        PersistentAuditLog::new(&db_path).expect("failed to open audit log");
+    let mut audit_log = PersistentAuditLog::new(&db_path).expect("failed to open audit log");
 
     let principal_id = Uuid::new_v4();
 

@@ -229,7 +229,8 @@ mod inner {
                 } else if let Some(s) = payload.downcast_ref::<String>() {
                     format!("Servo init panic: {}", s)
                 } else {
-                    "Servo init panic: EGL not available (ANGLE DLLs missing on Windows?)".to_string()
+                    "Servo init panic: EGL not available (ANGLE DLLs missing on Windows?)"
+                        .to_string()
                 };
                 Err(msg)
             })
@@ -472,11 +473,7 @@ mod inner {
                     script.len(),
                     &v[..50.min(v.len())]
                 ),
-                Err(e) => println!(
-                    "[ferrite-js] execute: {} chars, error: {}",
-                    script.len(),
-                    e
-                ),
+                Err(e) => println!("[ferrite-js] execute: {} chars, error: {}", script.len(), e),
             }
 
             result
@@ -506,7 +503,10 @@ mod inner {
             loop {
                 self.spin();
 
-                if matches!(self.last_load_status, LoadStatus::Complete | LoadStatus::Failed(_)) {
+                if matches!(
+                    self.last_load_status,
+                    LoadStatus::Complete | LoadStatus::Failed(_)
+                ) {
                     break;
                 }
                 if started.elapsed() >= timeout {
@@ -548,23 +548,35 @@ mod inner {
         /// Send a mouse-button down+up (click) at pixel coordinates `(x, y)`.
         pub fn send_mouse_click(&self, x: f32, y: f32) {
             let point = WebViewPoint::Device(DevicePoint::new(x, y));
-            self.webview.notify_input_event(InputEvent::MouseButton(
-                MouseButtonEvent::new(MouseButtonAction::Down, MouseButton::Left, point),
-            ));
-            self.webview.notify_input_event(InputEvent::MouseButton(
-                MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Left, point),
-            ));
+            self.webview
+                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                    MouseButtonAction::Down,
+                    MouseButton::Left,
+                    point,
+                )));
+            self.webview
+                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                    MouseButtonAction::Up,
+                    MouseButton::Left,
+                    point,
+                )));
         }
 
         /// Send a right mouse-button click at pixel coordinates `(x, y)`.
         pub fn send_right_click(&self, x: f32, y: f32) {
             let point = WebViewPoint::Device(DevicePoint::new(x, y));
-            self.webview.notify_input_event(InputEvent::MouseButton(
-                MouseButtonEvent::new(MouseButtonAction::Down, MouseButton::Right, point),
-            ));
-            self.webview.notify_input_event(InputEvent::MouseButton(
-                MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Right, point),
-            ));
+            self.webview
+                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                    MouseButtonAction::Down,
+                    MouseButton::Right,
+                    point,
+                )));
+            self.webview
+                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                    MouseButtonAction::Up,
+                    MouseButton::Right,
+                    point,
+                )));
         }
 
         /// Send a scroll (wheel) event at pixel coordinates `(x, y)`.
@@ -572,15 +584,16 @@ mod inner {
         /// `delta_x` and `delta_y` are in CSS pixels; positive `delta_y` scrolls down.
         pub fn send_scroll(&self, x: f32, y: f32, delta_x: f64, delta_y: f64) {
             let point = WebViewPoint::Device(DevicePoint::new(x, y));
-            self.webview.notify_input_event(InputEvent::Wheel(WheelEvent::new(
-                WheelDelta {
-                    x: delta_x,
-                    y: delta_y,
-                    z: 0.0,
-                    mode: WheelMode::DeltaPixel,
-                },
-                point,
-            )));
+            self.webview
+                .notify_input_event(InputEvent::Wheel(WheelEvent::new(
+                    WheelDelta {
+                        x: delta_x,
+                        y: delta_y,
+                        z: 0.0,
+                        mode: WheelMode::DeltaPixel,
+                    },
+                    point,
+                )));
             // Also drive the scroll via the legacy Scroll API so Servo's
             // compositor can recomposite the page without waiting for a paint.
             let scroll_vec = DeviceVector2D::new(-delta_x as f32, -delta_y as f32);
@@ -591,17 +604,23 @@ mod inner {
         /// Send a mouse-down event (without the subsequent up) — for drag start.
         pub fn send_mouse_down(&self, x: f32, y: f32) {
             let point = WebViewPoint::Device(DevicePoint::new(x, y));
-            self.webview.notify_input_event(InputEvent::MouseButton(
-                MouseButtonEvent::new(MouseButtonAction::Down, MouseButton::Left, point),
-            ));
+            self.webview
+                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                    MouseButtonAction::Down,
+                    MouseButton::Left,
+                    point,
+                )));
         }
 
         /// Send a mouse-up event — for drag end.
         pub fn send_mouse_up(&self, x: f32, y: f32) {
             let point = WebViewPoint::Device(DevicePoint::new(x, y));
-            self.webview.notify_input_event(InputEvent::MouseButton(
-                MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Left, point),
-            ));
+            self.webview
+                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                    MouseButtonAction::Up,
+                    MouseButton::Left,
+                    point,
+                )));
         }
     }
 }
