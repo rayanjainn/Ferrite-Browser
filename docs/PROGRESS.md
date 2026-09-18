@@ -810,3 +810,166 @@ itself dependent on T-003). Full detail in `crates/ferrite-ipi/src/sanitizer/mod
 `RecordingExecutor.strip_enabled` and its two production-shaped callers
 never set it `true`; this is the literal field D3/T-003 names, and it
 remains unwired outside this charter's reach.
+
+## 2026-09-18 — A6 (Dry-run + twin + containment) — versioned modules, DEV_KEY removed, containment deleted
+
+**Session note:** same hazard A4/A5 hit — worktree was initially checked
+out on a stale, unrelated tree (`65b6d67`, "Task 17"/Git-LFS-era commits,
+nothing to do with this rebuild). Recreated
+`rebuild/a06-dry-run-twin-containment` from local `main` (`b229fb1`,
+carries A0–A5) before doing any work.
+
+**Landed:**
+- `crates/ferrite-ipi/src/dry_run/{mod,record,content,executor,orchestrator}.rs`
+  replaces the flat `dry_run.rs`, mirroring `fingerprint/`/`sanitizer/`'s
+  layout. `RecordingExecutor`/`DryRunOrchestrator` are a faithful port of
+  the old logic (ordered event log, per-origin `ReplyChannel` queues,
+  inline detect/strip gating, whole-turn timeout returning a partial
+  record) with three real additions: `DryRunRecord::events_with_seq()`
+  (an explicit 0-based sequence number per event, derived from `Vec`
+  position rather than a stored field — see below for why), a tested
+  `ToolEvent::primitive()` bridge to `ferrite_core::Primitive`, and
+  `DryRunOrchestrator::set_defense_mode(DefenseMode)`, which derives
+  `detect_enabled`/`strip_enabled` together from `DefenseMode` the same
+  way `sanitizer::run`'s config does (T-215, see below).
+- `crates/ferrite-ipi/src/twin/{mod,key,crypto,manager}.rs` replaces the
+  flat `twin.rs`. The compiled-in `DEV_KEY` constant is gone (D8).
+  `key::resolve_twin_key` checks the OS keyring first, then
+  `FERRITE_TWIN_KEY`, reusing `ferrite-model`'s `SecretStore`/`OsKeyring`/
+  `Token`/`EnvSource` rather than reimplementing a keyring wrapper — see
+  that module's doc comment for exactly what is and isn't reused, and why
+  (`ferrite_model::secret::resolve()` itself returns `ModelError`, which
+  would be a type lie for a twin key failure). `crypto::derive_key` turns
+  resolved secret material into a 32-byte AES key via SHA-256 (no KDF —
+  documented as sufficient because the payload is synthetic, not real).
+  `TwinManager::load_or_generate` is now fallible
+  (`Result<SyntheticTwin, TwinKeyError>`), directly tested for both the
+  keyring-then-env order and the no-key-anywhere `Err` path (not a
+  `#[should_panic]` standing in for it).
+- `crates/ferrite-ipi/src/containment.rs` deleted outright (option (a),
+  the directive's stated default for T-007/D7). `intercept_request()` was
+  unreachable outside its own unit test — `RecordingExecutor` never made a
+  real network call for it to intercept, so containment was already
+  achieved by construction, not by an active interceptor. Confirmed
+  `RecordingExecutor`'s own source has no network-capable dependency
+  (`this_modules_source_names_no_network_capable_dependency`, grep-backed
+  against split literals so the test can't trivially match its own
+  prose). Dropped the now-dead `nix` dependency
+  (`[target.'cfg(target_os = "linux")'.dependencies]`) from
+  `ferrite-ipi/Cargo.toml`, verified unused workspace-wide with `cargo
+  machete`, and removed the matching `cargo-deny` skip entry for `nix`
+  (it was the only workspace consumer).
+
+**Deviation from the directive's illustrative `ToolEvent { primitive,
+origin, seq }` shape**, and why: `crate::comparator` (A7's charter,
+explicitly off-limits this session) already pattern-matches
+`event.tool: ToolId` in `compare()` and constructs events via
+`record_tool(ToolId::new(..), ..)` in its own tests; `crate::dataset`
+(A11's charter, also off-limits) constructs a bare `ToolEvent { tool,
+origin }` struct literal directly in a `#[cfg(test)]` fixture. Renaming
+`tool` to `primitive: ferrite_core::Primitive` or adding a mandatory
+`seq: u64` field would not compile without editing both files. Kept
+`ToolEvent { tool: ToolId, origin: Option<String> }` unchanged; added
+`ToolEvent::primitive()` (tested bridge to `ferrite_core::Primitive`,
+`None` for exactly one known mismatch — `BrowserTool::DownloadFile`'s
+`ToolId` wire string is `"download.file"`, `Primitive::Download`'s is
+`"download"`) and `DryRunRecord::events_with_seq()` (derived seq via
+`Vec` position) so A7 gets the forward-compatible shape without a
+compile break today.
+
+**Deviation from a literal "fail loudly, `Result::Err`" reading for the
+twin key**, found empirically, not assumed: making
+`DryRunOrchestrator::run()` hard-propagate a missing-key error broke five
+`ferrite-eval` tests (`harness::e2e_tests::*`, `corpus::loaded_case_runs_through_the_full_pipeline`)
+that call `run_one`/`run_case` with no `FERRITE_TWIN_KEY` configured
+anywhere in the test environment — exactly the R7 "no operator secret
+required for the test suite" expectation the codebase holds for model
+provider keys, which nothing established for the twin key before this
+session. `TwinManager::load_or_generate` still returns the strict,
+directly-tested `Result::Err` (T-008's literal requirement, satisfied at
+that layer). `DryRunOrchestrator::run` — the layer `ferrite-eval`/
+`ferrite-ui` actually call, neither editable this session — instead logs
+a warning and generates an unpersisted twin for that call, mirroring
+`tool_decision`'s existing "no Gemini key configured" fallback pattern
+elsewhere in this crate. Reasoning recorded in
+`DryRunOrchestrator::run`'s doc comment and `docs/handoffs/a06.md`: the
+twin key gates a caching convenience for synthetic data, not any part of
+the containment/sanitizer/consent mechanism, so losing the cache is the
+correct failure mode, not losing the whole dry run.
+
+**T-215, this session's half:** `DryRunOrchestrator::set_defense_mode`
+derives `detect_enabled`/`strip_enabled` together from `DefenseMode` in
+one call, reusing `tool_decision::DefenseMode::sanitizer_detect_enabled`/
+`sanitizer_strip_enabled` (A5). A12's remaining one-line fix in
+`ferrite-eval/src/harness.rs::run_one` (line ~220): replace
+`orch.set_detect_enabled(behavior.detect_enabled);` with
+`orch.set_defense_mode(mode);` — `mode: DefenseMode` is already a
+parameter of `run_one`, and nothing later in that function reads
+`behavior.detect_enabled` again, only `behavior.loop_runs`. `docs/TO-DO.md`
+T-215 updated accordingly; still not fully closed until A12 makes that
+change (this session cannot touch `harness.rs`).
+
+**Verified:** `cargo test -p ferrite-ipi` — 140 unit + 2 doctests, 0
+failures. `cargo fmt -p ferrite-ipi --check` and `cargo clippy -p
+ferrite-ipi --all-targets -- -D warnings` clean. `cargo machete` clean for
+`ferrite-ipi`. `cargo build --workspace` and `cargo test --workspace`
+green (0 failed) after the `Box<dyn EnvSource + Send + Sync>` fix below.
+`just check` (fmt-check + clippy --all-targets -D warnings + cargo
+machete) and `just test` (full workspace suite) both green from the repo
+root. `cargo deny check`: `advisories ok, bans ok, licenses ok, sources
+ok`, only the pre-existing Servo-git-source warning remains (same one
+A3/A4/A5 logged).
+
+**Bug found and fixed mid-session, before the workspace-wide run above
+ever went green:** `TwinManager`'s injectable `Box<dyn EnvSource>` field
+is not `Send`/`Sync` by default (`EnvSource`, in `ferrite-model`, carries
+no such supertrait, unlike `SecretStore`, which already does). `cargo
+build --workspace` failed on `ferrite-ui`, which holds a
+`DryRunOrchestrator` across an `.await` inside a `tokio::spawn`'d agent
+loop task. Fixed by bounding the trait object explicitly at every
+declaration site in this crate (`Box<dyn EnvSource + Send + Sync>`) —
+every concrete source (`SystemEnv`, `MapEnv`) already satisfies it, so
+this costs nothing real. Not filed as a new T-### since it was fully
+fixed within this session and is now covered by the green workspace-wide
+build.
+
+**Commits:** `be891b8`, `f8edef3`.
+
+**Tests:** `dry_run::orchestrator::tests::dry_run_records_navigation_and_updates_origin`,
+`dry_run::orchestrator::tests::origin_updates_across_a_scripted_navigation`,
+`dry_run::orchestrator::tests::same_origin_sequential_reads_get_different_scripted_content`,
+`dry_run::orchestrator::tests::detect_and_strip_gating_actually_gates_content`,
+`dry_run::orchestrator::tests::timeout_returns_a_partial_record_not_an_empty_one`,
+`dry_run::orchestrator::tests::set_defense_mode_derives_both_flags_from_on`,
+`dry_run::orchestrator::tests::missing_twin_key_degrades_the_dry_run_rather_than_failing_it`,
+`dry_run::record::tests::seq_is_monotonic_and_matches_call_order`,
+`dry_run::executor::containment_tests::this_modules_source_names_no_network_capable_dependency`,
+`twin::key::tests::the_keyring_is_consulted_first`,
+`twin::key::tests::neither_source_is_a_typed_error_naming_both_and_never_a_panic`,
+`twin::manager::tests::manager_without_a_resolvable_key_fails_loudly_not_silently`,
+`twin::crypto::tests::encrypt_decrypt_roundtrip_with_a_resolved_key`.
+
+**Known issues discovered:**
+- T-215 updated, not closed — see above; A12 owns the remaining one-line
+  `harness.rs` change.
+- New: `ToolEvent::primitive()` returns `None` for
+  `BrowserTool::DownloadFile` because `BrowserTool::tool_id()`
+  (`ferrite-agent`) emits `"download.file"` while
+  `ferrite_core::Primitive::Download`'s wire string is `"download"` — a
+  pre-existing mismatch between the two crates' vocabularies, predating
+  this session, out of scope for both (neither `ferrite-agent` nor
+  `ferrite-core` is in this charter's file list). Filed as T-216 in
+  `docs/TO-DO.md`, owned by A7 (needs it to consume `ToolEvent::primitive()`
+  cleanly) or whoever next touches `BrowserTool::tool_id()`.
+- New: T-211 (opaque origins) is exercised but not closed by this
+  session. `dry_run::record::extract_origin` records an opaque-scheme URL
+  (`about:blank`, `data:`, ...) as its literal string rather than a
+  normalized origin, since `ferrite_core::Origin::parse` structurally
+  rejects every scheme but `http`/`https`. Documented in
+  `dry_run::record`'s module docs as the deliberate interim behavior: a
+  literal opaque string will also fail `Origin::parse` downstream, which
+  is the *correct* effect (unadmittable by any scope, like `js.execute`)
+  achieved by type mismatch rather than a principled `Origin::Opaque`
+  variant. `ferrite-core` is out of this session's scope; T-211's row in
+  `docs/TO-DO.md` is updated with this note but stays `open`, owned by
+  A7/whoever next touches `ferrite-core::Origin`.
