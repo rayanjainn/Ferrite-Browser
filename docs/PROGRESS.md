@@ -1151,3 +1151,150 @@ compile fixes).
 - A8 (audit log) is the next consumer of this module's output: see
   `docs/handoffs/a07.md` for exactly what shape `FingerprintDiff`/
   `Attribution` now hand it.
+
+## 2026-09-18 — A8 (Audit log) — full-payload hash preimage, tamper matrix, T-005/T-108
+
+**Session note:** same hazard A4–A7 hit — worktree started on a stale,
+unrelated tree (`65b6d67`, "Initial test case designing..."/unrelated
+history, different project entirely). Recreated `rebuild/a08-audit-log`
+from local `main` (`dd5fd71`, carries A0–A7) before doing any work.
+
+**Landed:** `crates/ferrite-audit-log/src/lib.rs` — `compute_entry_hash`
+is now the single function `AuditLog::append` and `AuditLog::verify_chain`
+both call, so the two can never drift apart the way the old duplicated
+`format!("{}{}{:?}{}{}", ...)` strings implicitly could. The preimage now
+covers every persisted field, not just five of nine: `schema_version`
+(new — `AUDIT_SCHEMA_VERSION = 1`, itself hashed), `entry_id`, `sequence`,
+`timestamp` (as its RFC3339 string, not `chrono`'s internal repr),
+`kind`, `principal_id`, `capability`, `url`, `prev_hash`. Serialization is
+`serde_json::to_vec` over a purpose-built `HashPreimage` struct with fixed
+field order (not `Debug` formatting, not a `HashMap`) — this closes the
+two real ambiguity risks named in the charter: `{:?}` on an enum is not a
+stable wire format across derive versions, and JSON distinguishes `null`
+from `""` and length-delimits every string, so `None` vs.
+`Some(String::new())` for `capability`/`url` can never collide the way
+naive concatenation could. The preimage is domain-separated with a fixed
+`b"ferrite-audit-v1"` prefix (`HASH_DOMAIN`).
+
+`PersistentAuditLog` gained a second, small persisted checkpoint —
+`audit_chain_head`, a single-row table holding the next sequence number
+and last entry hash, written in the same SQL transaction as every
+`append` — because the hash chain alone cannot prove *completeness*
+(nothing in entry N's hash can prove entry N+1 once existed and was
+deleted). `load` cross-checks this watermark against the entries actually
+present and returns the new `AuditError::TruncatedChain` variant on
+mismatch. This is a best-effort defense, not a cryptographic guarantee —
+documented plainly in the module docs and in a test
+(`truncation_undetected_if_attacker_also_forges_the_checkpoint_head`)
+that shows exactly where it stops working; filed as **T-218** for whoever
+owns the deployment threat model to decide whether an external anchor is
+worth building.
+
+**Commits:** `6250cb3` (fix(audit-log): cover full canonical payload in
+the hash preimage).
+
+**Tests:** 21 tests in `crates/ferrite-audit-log/src/lib.rs` (0 before
+this session — the crate had no test module at all):
+- Tamper matrix, one test per persisted field, each asserting
+  `verify_chain()` returns `false` (T-005's direct regression, covering
+  every field, not just the two the bug report named):
+  `tamper_matrix_capability`, `tamper_matrix_url`,
+  `tamper_matrix_principal_id`, `tamper_matrix_kind`,
+  `tamper_matrix_timestamp`, `tamper_matrix_sequence`,
+  `tamper_matrix_entry_id`, `tamper_matrix_prev_hash`,
+  `tamper_matrix_schema_version`, `tamper_matrix_entry_hash_rewritten_directly`
+  (10 tests; two more, `tampering_capability_after_the_fact_breaks_verification`
+  and `tampering_url_after_the_fact_breaks_verification`, are the literal
+  pre-fix bug scenario, kept as an explicit named regression).
+- Truncation: `truncation_attack_dropping_the_tail_is_detected_on_load`
+  (positive case) and `truncation_undetected_if_attacker_also_forges_the_checkpoint_head`
+  (the documented limit, asserted as `Ok`, not a false claim of full
+  coverage).
+- Reordering: `reordering_attack_swapping_sequence_values_is_detected_on_load`
+  (swaps two entries' `sequence` column values directly in SQLite,
+  leaving stored hashes untouched — caught because `sequence` is now
+  hashed).
+- Insertion: `insertion_attack_splicing_a_self_consistent_forged_entry_is_detected_on_load`
+  (a forged row whose own hash is internally valid, computed with the
+  real `compute_entry_hash`, chained from a real predecessor but never
+  woven into the successor's `prev_hash` — the chain-link check catches
+  it regardless of where SQLite's tie-broken ordering places it).
+- Golden fixture: `golden_chain_fixture_pins_entry_hashes` — two
+  fixed-input entries (fixed UUIDs, fixed RFC3339 timestamp, fixed
+  capability/url) with pinned expected hex:
+  `c1b4ff371b8ed37e43a3f6fb61a4a88f95c457cfd3219e0214d743929b0de11a`
+  (entry A, `EvalExecutionRecorded`) and
+  `66e21de3ecb7547adc3bcf6a901031fe694b3a3cd73c37e26b4d263e4c282671`
+  (entry B, `CapabilityExercised`, chained from A). An accidental
+  preimage change now fails loudly instead of silently changing what old
+  audit logs mean.
+- Persistence sanity: `persisted_log_round_trips_and_verifies`,
+  `persisted_tamper_of_capability_column_is_detected_on_load` (the exact
+  T-005 SQLite-column-rewrite scenario, now caught on `load`),
+  `append_produces_a_verifying_chain`, `empty_log_verifies`.
+
+**Verified:** `cargo test -p ferrite-audit-log` — 21 passed, 0 failed, 0
+doctests. `cargo fmt -p ferrite-audit-log --check` and
+`cargo clippy -p ferrite-audit-log --all-targets -- -D warnings` clean.
+`cargo build --workspace` and `cargo test --workspace` green (checked via
+`grep -E "FAILED|error\[" ` over the full output — no real matches; the
+only "error" substring hits are test names like
+`only_a_rate_limit_carries_a_retry_after` from `ferrite-model`). `just
+check` (fmt-check + clippy --all-targets -D warnings + cargo machete)
+green — machete reports no unused dependency. `just test` (full workspace
+suite) green. `cargo deny check`: `advisories ok, bans ok, licenses ok,
+sources ok`, only the pre-existing Servo-git-source `unmatched-source`
+warning already logged by A3–A7.
+
+**Cross-crate compile touches:** none. `PersistentAuditLog::new`/
+`append`/`load` and `AuditLog::append`/`verify_chain`'s signatures are
+unchanged; `AuditEntry` gained a `pub schema_version: u8` field, but no
+crate outside `ferrite-audit-log` constructs `AuditEntry` by struct
+literal (confirmed via `grep -rn "AuditEntry\s*{" crates/` — only the two
+in-crate construction sites) or destructures it, so this is source- and
+binary-compatible for every caller (`ferrite-servo`, `ferrite-shell`,
+`ferrite-ui`, `ferrite-eval` — confirmed via
+`grep -rln "ferrite_audit_log" crates/`, all of which only call
+`append`/`verify_chain`/`new`/`load` and read `AuditEntry` fields, never
+construct one).
+
+**On-disk audit databases:** none exist anywhere in this repo —
+confirmed via `git ls-files | grep -iE '\.(db|sqlite|sqlite3)$'` (no
+matches) and a filesystem search excluding `target/`/`.git/` (no
+matches). So the fact that this session's preimage change makes any
+*hypothetical* pre-A8 on-disk audit log fail `verify_chain()`/`load` is a
+real, correct, and now-legible consequence of `schema_version` existing
+(a future verifier can branch on it) — but it invalidates nothing that
+actually exists today.
+
+**Known issues discovered / left for later agents:**
+- **T-218** (filed above, in `docs/TO-DO.md`): the new
+  `audit_chain_head` checkpoint is a best-effort watermark, not a
+  cryptographic completeness guarantee — an attacker with full SQLite
+  read/write access can forge it consistently with a truncated tail.
+  Closing this needs an external anchor; out of this charter's scope.
+- **T-219** (filed above): `AuditError::HashMismatch`/`ChainBroken` were
+  already declared-but-unconstructed before this session (`verify_chain`
+  returns a bare `bool`, never those variants) and remain so — not
+  `dead_code`-lint-visible because they're variants of a `pub` enum, but
+  genuinely unreachable from any current call path. Fixing this properly
+  means changing `verify_chain`'s return type to
+  `Result<(), AuditError>`, a public API change touching 3 external call
+  sites currently using it as a boolean — real, small, but outside this
+  charter's "fix the preimage" scope.
+- No existing on-disk audit databases anywhere in this repo (see above) —
+  confirmed, not assumed.
+
+**Exact next action for A9:** `crates/ferrite-engine`,
+`crates/ferrite-engine-servo`, `crates/ferrite-agent`, per §6/A9
+(T-109). **Checked this session:** `crates/ferrite-engine` and
+`crates/ferrite-engine-servo` do **not** exist yet — absent from root
+`Cargo.toml`'s `members` list and from disk; A9 creates both from
+scratch. `crates/ferrite-agent` already exists as a workspace member
+(`src/lib.rs`, `src/gemini.rs`). Separately, `crates/ferrite-servo`
+already exists too, but it is a *different* thing — the winit/Iced
+shell's own Servo integration behind its `servo` Cargo feature, not the
+directive's `BrowserEngine`-trait `ferrite-engine-servo` — A9 should read
+both before naming or wiring anything, the same kind of crate-identity
+check this session's own charter needed (`ferrite-audit` vs. the real
+`ferrite-audit-log`).
