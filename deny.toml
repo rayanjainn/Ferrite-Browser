@@ -1,0 +1,134 @@
+[graph]
+targets = []
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+  # RUSTSEC-2026-0192: ttf-parser's author has declared it unmaintained.
+  # Pulled in transitively through the iced/cosmic-text font-rendering
+  # stack (iced_glyphon -> cosmic-text -> {fontdb, rustybuzz} -> ttf-parser,
+  # and separately via winit -> sctk-adwaita -> ab_glyph -> owned_ttf_parser
+  # -> ttf-parser). No safe upgrade exists per the advisory; this workspace
+  # has no direct dependency on it and no fix to apply. Re-check when iced
+  # or winit are next bumped — either may have migrated to skrifa by then.
+  "RUSTSEC-2026-0192",
+  # RUSTSEC-2026-0206: rustybuzz is unmaintained (same cosmic-text/iced
+  # font stack as above). No fix available; not a direct dependency.
+  "RUSTSEC-2026-0206",
+  # RUSTSEC-2024-0384: `instant` is unmaintained. Deep transitive-only
+  # (parking_lot's old feature path via the iced/winit stack). No fix.
+  "RUSTSEC-2024-0384",
+  # RUSTSEC-2024-0436: `paste` is unmaintained (proc-macro helper, pulled
+  # in transitively by several crates in the iced/wgpu stack). No fix.
+  "RUSTSEC-2024-0436",
+  # RUSTSEC-2026-0194 / RUSTSEC-2026-0195: quick-xml quadratic-time and
+  # unbounded-allocation DoS advisories. quick-xml here is Servo-only
+  # (feature-gated, not in the default-feature dependency graph any
+  # ferrite-* crate touches — `cargo tree -i quick-xml` prints nothing
+  # without --features servo). No newer version available as of 2026-09
+  # (`cargo update -p quick-xml` finds none). Re-check at the next Servo
+  # bump or when a fixed quick-xml lands.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+  # RUSTSEC-2026-0285: rustls TLS 1.3 handshake-message encryption-level
+  # confusion. UNLIKE the others above, this IS on this workspace's real
+  # network path (ferrite-agent's reqwest -> hyper-rustls -> rustls, used
+  # for actual Gemini API calls) — flagging prominently rather than
+  # burying it: no patched rustls version exists yet as of 2026-09
+  # (`cargo update -p rustls` finds none beyond what's already applied).
+  # Per the advisory text itself, the handshake transcript stays
+  # authenticated and a network attacker cannot use this to alter or
+  # complete a handshake — the practical effect is a protocol-confusion
+  # edge case, not a confidentiality break — but this should be re-checked
+  # for a patch on every future dependency refresh, not forgotten here.
+  "RUSTSEC-2026-0285",
+]
+# unicode-segmentation 1.13.0 (transitive via cosmic-text/iced_graphics/
+# iced_widget/winit) was yanked upstream after this Cargo.lock was last
+# regenerated. `yanked = "deny"` catches it here rather than silently.
+# Not ignored — the fix is a `cargo update -p unicode-segmentation` the
+# next time the lockfile is regenerated (T-### filed in docs/TO-DO.md),
+# since a yanked-but-otherwise-fine version has a real, unblocked upgrade
+# path, unlike the ttf-parser advisory above.
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "BSL-1.0",
+  "CDLA-Permissive-2.0", # webpki-roots' Mozilla root-cert bundle license
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# Our own crates depend on each other via bare path deps (workspace.dependencies'
+# `{ path = "..." }` entries carry no semver requirement), which cargo-deny's
+# wildcard check otherwise flags identically to a real `dep = "*"` on a
+# registry crate. This exempts path/git deps from that check; registry
+# wildcards are still denied.
+allow-wildcard-paths = true
+
+# Every entry below traces to ONE structural cause, not 30 individually
+# unrelated problems: this workspace depends on Servo pinned to an old git
+# tag (v0.0.5, frozen in time) AND on the current iced/winit graphics stack
+# in the same build — two dependency trees from different eras that
+# inevitably disagree on transitive versions of foundational crates
+# (syn, windows-sys, parking_lot, hashbrown, etc.). This is the same
+# situation CLAUDE.md already documents for Servo's inherited Dependabot
+# alerts ("non-actionable until the next Servo bump") — these are that
+# same fact, surfaced by a different tool. NOT individually vetted for a
+# safety implication beyond "which side of the Servo/iced split are you
+# on" — re-run `cargo deny check bans` after any Servo or iced/winit
+# version bump and prune entries that no longer duplicate.
+skip = [
+  { name = "ahash" },
+  { name = "bitflags" },
+  { name = "calloop" },
+  { name = "calloop-wayland-source" },
+  { name = "cfg_aliases" },
+  { name = "getrandom" },
+  { name = "hashbrown" },
+  { name = "jni-sys" },
+  { name = "libloading" },
+  { name = "linux-raw-sys" },
+  { name = "ndk-sys" },
+  { name = "nix" },
+  { name = "objc2" },
+  { name = "objc2-foundation" },
+  { name = "parking_lot" },
+  { name = "parking_lot_core" },
+  { name = "phf" },
+  { name = "phf_generator" },
+  { name = "phf_shared" },
+  { name = "r-efi" },
+  { name = "redox_syscall" },
+  { name = "rustc-hash" },
+  { name = "rustix" },
+  { name = "siphasher" },
+  { name = "smithay-client-toolkit" },
+  { name = "syn" },
+  { name = "thiserror" },
+  { name = "thiserror-impl" },
+  { name = "ttf-parser" },
+  { name = "windows-core" },
+  { name = "windows-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+  "https://github.com/servo/servo",
+]

@@ -2,6 +2,8 @@
 name = "ferrite-servo"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
 
 [features]
 # Enable Servo engine integration:
@@ -25,3 +27,10 @@ url = { workspace = true }
 # Package name in the repo is `libservo`; the lib is named `servo` internally
 # so Rust imports use `use servo::...`.
 libservo = { workspace = true, optional = true }
+
+# cargo-machete can't see the `use servo::...` imports inside
+# #[cfg(feature = "servo")] blocks without building with that feature
+# enabled (it does static analysis without --with-metadata by default) —
+# false-positive "unused dependency" without this.
+[package.metadata.cargo-machete]
+ignored = ["libservo"]
