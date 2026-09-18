@@ -1576,3 +1576,212 @@ approve/reject (no blanket approve), dry-run evidence on expand,
 non-sticky per-task approvals. See `docs/handoffs/a09.md` for the exact
 shape of `BrowserEngine`/`AgentAction`/`AgentLoopResult` A10's UI will
 need to consume.
+
+## 2026-09-18 — A10 (UI/UX) — consent panel security-surface fixes, out-of-scope-origin rendering gap closed, T-110
+
+**Session note:** same hazard A4–A9 hit — stale, unrelated worktree
+(`worktree-agent-a628b7f472979308f` at `65b6d67`, no A9 merge in its
+history). Recreated `rebuild/a10-ui-consent` from local `main`
+(`dbfd27b`, A0–A9) before any work.
+
+**Scope:** `crates/ferrite-ui` only, per charter. Confirmed by reading
+`ferrite-ipi::comparator::{diff,consent}.rs` (A7), `dry_run::record.rs`
+(A6), `ferrite-engine`/`browser_loop` (A9) for their real current shapes
+before writing any UI code against them — no `ferrite-ipi`/
+`ferrite-engine`/`ferrite-agent` files touched.
+
+**The real, live gap — confirmed and fixed.** `view()`'s consent-panel
+row rendering iterated only `FingerprintDiff::extra_primitives`; a
+`FingerprintDiff::out_of_scope_origins` deviation (primitive expected,
+wrong origin — A7's `compare()` produces this bucket correctly) was
+computed, discarded into UI state, and never shown, never consent-gated,
+and never enforced. Confirmed by reading `view()` and
+`ConsentDecision::is_complete()` (`ferrite-ipi`, unmodified): the latter
+*also* only ever checked `extra_primitives`, so even rendering the rows
+without a parallel completeness fix would not have closed the gap — an
+out-of-scope-origin item could be left permanently undecided and the
+Proceed button would still enable.
+
+**Fix, in `crates/ferrite-ui/src/lib.rs`:**
+- `consent_items(diff, expected) -> Vec<ConsentItem>` builds one
+  plain-English summary per flagged item, from **both** buckets, sorted
+  deterministically (primitive strings, then origin strings). An
+  extra-primitive item says "nothing in your request authorized this
+  action" (with a distinct js.execute-specific line: ADR-003 makes it
+  *always* consent-gated by design, not merely unauthorized this time).
+  An out-of-scope-origin item names the contacted origin and lists every
+  origin scope the task's `ExpectedFingerprint` actually carries
+  (`describe_authorized_origins`/`describe_scope`, reading
+  `ExpectedCapabilitySet::lowered()`).
+  - **Honest limitation, documented in the code, not papered over:**
+    `FingerprintDiff::out_of_scope_origins` is a bare
+    `HashSet<String>` of origins — it does not retain which primitive/tool
+    was invoked at the flagged origin (a pre-existing shape A7 kept for
+    `ferrite-eval`/`dataset` compatibility, see that module's own docs).
+    So the summary can say "these origins were authorized somewhere in
+    your task" but not "primitive P specifically needed origin O" for
+    this bucket. Filed as **T-222** rather than fabricated precision the
+    data doesn't support.
+- Out-of-scope-origin items are tracked in `ConsentDecision` (A7's
+  ToolId-keyed type, unmodified) via a synthetic `"origin::<origin>"`
+  item id (`origin_item_id`/`origin_item_origin`) — this closes the gap
+  entirely inside `ferrite-ui` with zero changes to `ferrite-ipi`.
+- `consent_is_complete(diff, decision)` replaces the
+  `ConsentDecision::is_complete()` call as the sole gate on the Proceed
+  button *and* is re-checked directly inside the `ConsentSubmitted`
+  handler itself (defense-in-depth: the message must never proceed with
+  an undecided item even if something other than the view ever sends
+  it — proven by `consent_submitted_is_a_no_op_while_any_item_is_undecided`).
+
+**Real enforcement, not just UI state.** Traced `ConsentDecision::rejected`
+through to `FilteredToolExecutor` (defined in `ferrite-ui`, not
+`ferrite-ipi`): it already blocked a rejected `ToolId` before reaching
+the real `BrowserToolExecutor`, but had no test proving it and no
+handling at all for a rejected origin. Added `rejected_origins:
+HashSet<String>` and a check against any `BrowserTool` call that itself
+carries a URL (`Navigate`, `DownloadFile`) — calls with no URL of their
+own (`ReadPage`, `ClickElement`, ...) act on "whatever the active tab
+currently is", which this executor cannot observe from the call alone;
+filed as **T-222** (same root cause as the rendering-precision limit
+above: the diff loses the (primitive, origin) pairing).
+`filtered_executor_blocks_a_rejected_tool_without_reaching_the_inner_executor`
+and `filtered_executor_blocks_a_download_whose_url_origin_was_rejected`
+assert the inner channel receives nothing when a call is blocked —
+proving refusal, not just a UI-side rejected flag with nothing behind it.
+
+**Never sticky across tasks — verified, and one real bug fixed.** Traced
+`pending_diff`/`pending_decision`/`pending_expected`/`pending_evidence`/
+`pending_task` through `ConsentRequired` → decide → `ConsentSubmitted`/
+`ConsentCancelled`. Found: `pending_task` was **not** cleared on
+`ConsentCancelled` (only `pending_diff`/`pending_decision` were) — dead
+state until the next `AgentTaskSubmitted` overwrote it, not a live bug
+today, but real hygiene debt directly on-point for this verification;
+fixed. Also found and removed **dead state**: `approved_extras` was
+written on every `ConsentSubmitted` (`state.approved_extras =
+state.pending_decision.approved.clone()`) but never read anywhere in the
+crate (`grep -rn "approved_extras"` — 3 hits, all in this file, all
+writes) — removed rather than left as misleading, never-consulted
+per-task carryover.
+`second_tasks_consent_decision_never_carries_over_from_the_first` is the
+regression test: task 1 approves `js.execute`, submits; task 2 is
+flagged with the identical tool id and asserted **not** pre-approved.
+
+**Page-content decoupling — investigated, concluded structural, not
+merely assumed.** Traced every path page content can reach this crate:
+`HeadlessServoSession::get_frame()` is the *only* one, returning a
+decoded `(width, height, Vec<u8> RGBA)` pixel buffer rendered via
+`iced_widget::image::Image` in `view()`'s content arm — a bitmap, never
+parsed as markup. The consent panel (`view()`'s `body` when
+`pending_diff` is `Some`) is built exclusively from
+`FingerprintDiff`/`ExpectedFingerprint`/`DryRunRecord`/`ConsentDecision`
+— plain Rust structs populated from `ferrite-ipi`'s comparator/dry-run
+output, never from raw page HTML/CSS/text, and no page-supplied string is
+ever interpolated into a style, position, or z-order call anywhere in
+this file (checked every `container::Style`/`Border`/`Background`
+closure — all take fixed constants or state-derived plain data, never a
+`String` sourced from Servo). Recorded as a compile-time-pinned witness,
+`page_content_cannot_reach_the_consent_panels_inputs`, rather than left
+as an unchecked comment.
+
+**Reject-default-focus — investigated against the real, pinned iced
+API; partial by an external constraint, not an oversight.** Checked
+`iced_core-0.13.2`'s `widget::operation::focusable::Focusable` trait
+directly: only `text_input`/`text_editor` implement it in this pinned
+version (`grep -rln Focusable iced_widget-0.13.4/src/` — two hits, no
+`button.rs`). A literal keyboard-focus-ring default onto the Reject
+button is therefore not achievable against this iced version's public
+API without a custom focusable widget wrapper (real, non-trivial work,
+not attempted this session — a version bump or custom widget is the real
+fix, filed as **T-223**). Implemented the available, security-relevant
+equivalent instead: Reject is listed and styled first in each item's row
+(closest available "default" signal without real focus support), and —
+the property that actually matters for safety — `consent_is_complete`
+means there is no path to a silent default-approve regardless of which
+button a stray keypress might reach.
+
+**Dry-run evidence on expand — added, honestly scoped.** `DryRunRecord`
+threaded through `ConsentRequired` (boxed: `Box<DryRunRecord>`, to keep
+`FerriteBrowserMessage`'s largest variant small per
+`clippy::large_enum_variant`) and rendered via
+`dry_run_evidence_lines()` behind a `ToggleEvidence`-driven collapse,
+default collapsed. Shows exactly what `DryRunRecord` actually carries —
+the ordered `(tool, origin)` call log via `events_with_seq()`, plus a
+sanitizer-finding count — and says so explicitly in its own doc comment:
+it does **not** show page content, because `DryRunRecord` does not
+record page content read, only which tool ran, at which origin, in what
+order, and which sanitizer patterns fired. No fabricated evidence field.
+
+**Tests — 17 new, all in `crates/ferrite-ui/src/lib.rs`'s `tests`
+module, 0 requiring a real `HeadlessServoSession` (R7):**
+state-machine — `consent_required_populates_pending_state_fresh_and_clears_agent_running`,
+`consent_submitted_is_a_no_op_while_any_item_is_undecided`,
+`consent_flow_extra_primitive_only_reject_then_submit_clears_all_pending_state`,
+`consent_flow_out_of_scope_origin_only_approve_then_submit`,
+`consent_flow_mixed_diff_requires_both_items_decided_before_submit_succeeds`,
+`consent_cancelled_clears_all_pending_state_without_spawning_a_run`,
+`second_tasks_consent_decision_never_carries_over_from_the_first`,
+`consent_is_complete_requires_a_decision_on_both_bucket_kinds`; summary
+snapshot — `consent_summary_snapshot_for_a_mixed_diff`,
+`consent_summary_for_a_non_js_extra_primitive_says_nothing_authorized_it`,
+`consent_summary_for_an_out_of_scope_origin_with_no_expected_fingerprint_is_honest`;
+real enforcement —
+`filtered_executor_blocks_a_rejected_tool_without_reaching_the_inner_executor`,
+`filtered_executor_blocks_a_download_whose_url_origin_was_rejected`,
+`filtered_executor_allows_a_non_rejected_tool_to_reach_the_inner_executor`;
+dry-run evidence — `dry_run_evidence_lines_render_ordered_call_log`,
+`dry_run_evidence_lines_says_so_honestly_when_nothing_was_recorded`;
+page-content decoupling —
+`page_content_cannot_reach_the_consent_panels_inputs`.
+`#[tokio::test]` used only where the handler under test
+(`ConsentSubmitted`) calls `tokio::task::spawn`, which panics outside a
+runtime context; no test `.await`s past the spawn point, so the spawned
+future (which would call `GeminiAgent::from_env()` and a real network
+call) is never polled before the test ends — no live call made, per R7.
+
+**Verified:** `cargo fmt -p ferrite-ui --check` clean.
+`cargo clippy -p ferrite-ui --all-targets -- -D warnings` clean (fixed
+two real findings along the way: `clippy::large_enum_variant` on
+`FerriteBrowserMessage::ConsentRequired` — boxed `evidence`; `clippy::
+field_reassign_with_default` in one test). `cargo test -p ferrite-ui` —
+17/17 passed, isolated `CARGO_TARGET_DIR=/tmp/ferrite-a10-target` (per
+T-214, sharing the default `~/.cache/ferrite-target` across worktrees is
+a known false-failure source). `just check` (fmt-check + clippy
+--all-targets -D warnings workspace-wide + cargo machete) — clean,
+0 unused deps. `just test` (full workspace, same isolated target dir) —
+every crate `test result: ok`, 0 failures, exit 0 (`ferrite-core` 166,
+`ferrite-model` 151+3, `ferrite-ipi` 58, `ferrite-audit-log` 21,
+`ferrite-agent` 11, `ferrite-engine` 24, `ferrite-engine-servo` 5,
+`ferrite-eval` 45, `ferrite-ui` **17** (new), others unchanged). `cargo
+deny check` — advisories/bans/licenses/sources all `ok` (one pre-existing
+`unmatched-source` warning for a Servo git source, unrelated to this
+session).
+
+**Commit:** `aaec147` — `feat(ui): render out-of-scope-origin items in
+the consent panel`.
+
+**Known issues discovered / filed:**
+- **T-222** (this session, feeds a future `ferrite-ipi` comparator
+  session, not A10): `FingerprintDiff::out_of_scope_origins` (and
+  `extra_primitives`) record only a tool id or an origin string, never
+  the `(tool, origin)` pair together, for a bucket that structurally has
+  both. This is why the consent panel's out-of-scope-origin summary can
+  only say "these are the origins your task authorized somewhere", not
+  "primitive P needed origin O", and why `FilteredToolExecutor` can only
+  enforce a rejected origin for the two `BrowserTool` variants that carry
+  their own URL. Fixing this for real means enriching the diff's shape in
+  `ferrite-ipi::comparator` (out of this charter's file scope) —
+  documented rather than worked around with fabricated precision.
+- **T-223** (this session, unowned): iced 0.13's `button` widget does not
+  implement `widget::operation::focusable::Focusable` (only
+  `text_input`/`text_editor` do), so a literal keyboard-focus-ring
+  default onto the consent panel's Reject button is not implementable
+  against the pinned iced version's public API. Mitigated with
+  reading-order + strict completeness-gating (see above); a real fix
+  needs either an iced upgrade (re-check `Focusable` support each major)
+  or a custom focusable button wrapper.
+
+**Exact next action for A11:** `crates/ferrite-eval/src/dataset/`,
+`corpus/` — move the carrier/carrier-vector partition validation into
+the type system (closes T-006), build the real corpus per §13.3, decide
+the AgentDojo mapping-or-delete question (T-009). See
+`docs/handoffs/a10.md`.
