@@ -2536,6 +2536,10 @@ name = "ferrite-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "ferrite-core",
+ "ferrite-engine",
+ "ferrite-model",
  "reqwest",
  "serde",
  "serde_json",
@@ -2568,6 +2572,26 @@ dependencies = [
  "thiserror 1.0.69",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "ferrite-engine"
+version = "0.1.0"
+dependencies = [
+ "ferrite-core",
+ "ferrite-engine",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "ferrite-engine-servo"
+version = "0.1.0"
+dependencies = [
+ "ferrite-core",
+ "ferrite-engine",
+ "ferrite-servo",
+ "serde_json",
 ]
 
 [[package]]

@@ -9,6 +9,8 @@ members = [
   "crates/ferrite-agent",
   "crates/ferrite-ipi",
   "crates/ferrite-eval",
+  "crates/ferrite-engine",
+  "crates/ferrite-engine-servo",
 ]
 resolver = "2"
 
@@ -77,6 +79,8 @@ urlencoding = "2"
 ferrite-agent = { path = "crates/ferrite-agent" }
 ferrite-audit-log = { path = "crates/ferrite-audit-log" }
 ferrite-core = { path = "crates/ferrite-core" }
+ferrite-engine = { path = "crates/ferrite-engine" }
+ferrite-engine-servo = { path = "crates/ferrite-engine-servo" }
 ferrite-ipi = { path = "crates/ferrite-ipi" }
 ferrite-model = { path = "crates/ferrite-model" }
 ferrite-servo = { path = "crates/ferrite-servo" }
