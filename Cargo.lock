@@ -2595,6 +2595,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "ferrite-agent",
+ "ferrite-core",
+ "ferrite-model",
  "hex",
  "nix 0.28.0",
  "rand 0.8.8",
