@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 
 use ferrite_core::Capability;
 use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier};
+use serde::{Deserialize, Serialize};
 
 use crate::fingerprint::rules;
 
@@ -35,7 +36,7 @@ const SYSTEM_PROMPT: &str = "You are a security analysis assistant. Given a user
 /// ever name `js.execute`: no `Capability` variant belongs to
 /// [`ferrite_core::ActionClass::Execute`] in the first place (see the
 /// [module docs](crate::fingerprint)).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Fingerprint {
     must_use: BTreeSet<Capability>,
     may_use: BTreeSet<Capability>,

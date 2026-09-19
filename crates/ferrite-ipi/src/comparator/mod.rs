@@ -28,16 +28,14 @@
 //! is spelled out here at length rather than in a commit message no one
 //! reads later.
 //!
-//! Two fingerprint types exist in this crate today, and **neither** carries
-//! a per-capability scope:
-//!
-//! - `fingerprint::Fingerprint` (A4): `must_use`/`may_use` are
-//!   `BTreeSet<Capability>` — no scope field at all. A4's own module docs
-//!   say so explicitly: an authored `OriginScope` per capability "isn't
-//!   derivable from a prompt... left for A7's comparator integration."
-//! - `tool_decision::ToolFingerprint` (pre-rebuild, still the live path for
-//!   `ferrite-ui` and `ferrite-eval::harness`): stringly `ToolId` sets, also
-//!   no scope.
+//! `fingerprint::Fingerprint` (A4) does not carry a per-capability scope:
+//! `must_use`/`may_use` are plain `BTreeSet<Capability>`. A4's own module
+//! docs say so explicitly: an authored `OriginScope` per capability "isn't
+//! derivable from a prompt... left for A7's comparator integration." (B1,
+//! `docs/TO-DO.md` T-221, deleted the pre-rebuild `tool_decision::ToolFingerprint`
+//! this section used to also name here — every real caller now produces a
+//! [`Fingerprint`] directly, so there is exactly one fingerprint shape to
+//! reason about, not two.)
 //!
 //! Meanwhile every *caller* of the old `compare()` already had exactly
 //! **one** `OriginScope` to give it — `dataset::CaseDefinition::expected_origins`
@@ -47,24 +45,21 @@
 //! "no one authors a *different* scope per capability yet — only ever one
 //! per task."
 //!
-//! Resolution chosen (option (a) from the A7 charter): [`ExpectedFingerprint`]
-//! provides two *bridging* constructors —
-//! [`ExpectedFingerprint::from_fingerprint`] and
-//! [`ExpectedFingerprint::from_legacy_tool_fingerprint`] — that apply a
-//! single scope to every capability in a fingerprint that has none of its
-//! own, sourced from the one piece of context a live task actually carries:
-//! its declared context URL (`exact([context_url])` when present,
-//! `task_open` with a stated rationale when it is not). Both constructors'
-//! doc comments spell out the policy and its honesty limits in full,
-//! **and are explicitly named "provisional"** in their own scope rationale
-//! text — this is a stand-in for a real per-task authoring mechanism that
-//! does not exist yet, not a claim that per-capability precision has been
-//! achieved. [`ExpectedFingerprint::from_capabilities`] is the direct,
-//! no-defaulting constructor for any caller — present or future — that
-//! *does* have a genuine per-capability scope to give, which is what makes
-//! this a real fix rather than a relabeled global scope: the type can
-//! express per-capability precision the moment something upstream starts
-//! authoring it, without another comparator rewrite.
+//! Resolution chosen (option (a) from the A7 charter): [`ExpectedFingerprint::from_fingerprint`]
+//! applies a single scope to every capability in a fingerprint that has none
+//! of its own, sourced from the one piece of context a live task actually
+//! carries: its declared context URL (`exact([context_url])` when present,
+//! `task_open` with a stated rationale when it is not). Its doc comment
+//! spells out the policy and its honesty limits in full, **and names it
+//! "provisional"** in its own scope rationale text — this is a stand-in for
+//! a real per-task authoring mechanism that does not exist yet, not a claim
+//! that per-capability precision has been achieved.
+//! [`ExpectedFingerprint::from_capabilities`] is the direct, no-defaulting
+//! constructor for any caller — present or future — that *does* have a
+//! genuine per-capability scope to give, which is what makes this a real fix
+//! rather than a relabeled global scope: the type can express
+//! per-capability precision the moment something upstream starts authoring
+//! it, without another comparator rewrite.
 //!
 //! **The regression this must never collapse into**: defaulting every
 //! capability to `task_open` unconditionally, which would readmit every
@@ -172,31 +167,25 @@
 //! `docs/TO-DO.md`'s T-211 row is updated to `done` (ratified), not left as
 //! an open design question.
 //!
-//! # T-216 — `download.file` vs. `Primitive::Download`
+//! # T-216 — `download.file` vs. `Primitive::Download`: closed, not patched
 //!
-//! `ferrite-agent::BrowserTool::DownloadFile::tool_id()` emits the wire
-//! string `"download.file"`; `ferrite_core::Primitive::Download::as_str()`
-//! is `"download"` (no dot-suffix) — a pre-existing mismatch
-//! `dry_run::record::ToolEvent::primitive()` already documents and returns
-//! `None` for. Two ways to fix it were weighed:
+//! Pre-B1, `ferrite-agent::BrowserTool::DownloadFile::tool_id()` emitted the
+//! wire string `"download.file"`; `ferrite_core::Primitive::Download::as_str()`
+//! is `"download"` (no dot-suffix) — a real mismatch between two
+//! independently-authored string vocabularies, patched with a one-entry
+//! lookup (`resolve_primitive`) local to this module.
 //!
-//! - Change `BrowserTool::tool_id()`'s string. Rejected: that string is key
-//!   material for `dry_run::content::DryRunContent::by_tool_id` (a case
-//!   author's per-tool reply queues are keyed on it), and is also embedded
-//!   literally in `ferrite-eval`'s corpus fixtures/tests
-//!   (`crates/ferrite-eval/src/corpus.rs`, `crates/ferrite-eval/tests/pilot_w6.rs`).
-//!   Changing it would ripple into `dry_run/content.rs` (A6's off-limits
-//!   file) and multiple `ferrite-eval` fixtures for a fix that belongs to
-//!   this module alone.
-//! - Add an explicit mapping in this module, scoped to exactly the one known
-//!   mismatch. Chosen: [`resolve_primitive`] tries
-//!   `ToolEvent::primitive()` first and falls back to a one-entry match for
-//!   `"download.file"` → [`ferrite_core::Primitive::Download`] only when
-//!   that bridge returns [`None`]. This is strictly additive, touches
-//!   nothing outside `comparator/`, and is exactly as honest about scope as
-//!   the mismatch itself (one string, one primitive).
-//!
-//! `docs/TO-DO.md`'s T-216 row is updated to `done`.
+//! B1 (`docs/TO-DO.md` T-221) removed the mismatch at its source instead of
+//! patching around it: `dry_run::record::ToolEvent` now carries a real
+//! `ferrite_core::Primitive` directly, tagged by
+//! `ferrite_engine::Call::primitive()` at the point the dry-run engine
+//! records the call — there is no second, independently-authored wire
+//! string for `Primitive::Download` (or anything else) to drift out of sync
+//! with. `resolve_primitive` and its one-entry patch table are deleted, not
+//! carried forward: `compare` reads `event.primitive` below with no
+//! intermediate lookup, and `download_file_attributes_to_web_download_at_an_admitted_origin`
+//! (this module's tests) is the compile-level proof the bridge is gone —
+//! the test still passes by construction, not by consulting a patch table.
 //!
 //! # How far this actually reaches
 //!
@@ -225,29 +214,16 @@
 mod consent;
 mod diff;
 mod expected;
-mod legacy;
 
 pub use consent::ConsentDecision;
 pub use diff::{Attribution, FingerprintDiff};
 pub use expected::ExpectedFingerprint;
-pub use legacy::lower_fingerprint;
 
 use ferrite_core::scope::Specificity;
 use ferrite_core::{Capability, Origin};
 
-use crate::dry_run::{DryRunRecord, ToolEvent};
-
-/// Bridges a recorded event's `ToolId` to [`ferrite_core::Primitive`],
-/// including the T-216 mismatch documented in the module docs.
-///
-/// [`ToolEvent::primitive`] is the general, tested bridge; this adds exactly
-/// one more known wire-string correspondence on top of it.
-fn resolve_primitive(event: &ToolEvent) -> Option<ferrite_core::Primitive> {
-    event.primitive().or(match event.tool.0.as_str() {
-        "download.file" => Some(ferrite_core::Primitive::Download),
-        _ => None,
-    })
-}
+use crate::dry_run::DryRunRecord;
+use crate::tool_decision::ToolId;
 
 /// Compares `expected` against what the agent actually did, per the new
 /// contract: per-capability origin scoping, admission-rank attribution, and
@@ -259,21 +235,20 @@ pub fn compare(expected: &ExpectedFingerprint, actual: &DryRunRecord) -> Fingerp
     let mut diff = FingerprintDiff::default();
 
     for event in &actual.tool_events {
-        let primitive = resolve_primitive(event);
+        let primitive = event.primitive;
+        let tool_id = ToolId::new(primitive.as_str());
 
         // ADR-003, first branch, no exceptions: any Execute-class primitive
         // is unconditionally a deviation, before any origin is even parsed.
-        if let Some(p) = primitive {
-            if !p.action_class().is_scopable() {
-                diff.extra_primitives.insert(event.tool.clone());
-                continue;
-            }
+        if !primitive.action_class().is_scopable() {
+            diff.extra_primitives.insert(tool_id);
+            continue;
         }
 
         // T-211: no recorded origin at all — nothing to check any scope
         // against, and nothing reportable as an offending origin either.
         let Some(origin_str) = event.origin.as_deref() else {
-            diff.extra_primitives.insert(event.tool.clone());
+            diff.extra_primitives.insert(tool_id);
             continue;
         };
 
@@ -287,11 +262,12 @@ pub fn compare(expected: &ExpectedFingerprint, actual: &DryRunRecord) -> Fingerp
         };
 
         // A primitive with no expected-side (`ScopablePrimitive`) counterpart
-        // at all — includes js.execute (already handled above) and any wire
-        // string `resolve_primitive` could not map to anything in the closed
-        // taxonomy. Nothing in the expected set could ever have named it.
-        let Some(scopable) = primitive.and_then(ferrite_core::Primitive::as_scopable) else {
-            diff.extra_primitives.insert(event.tool.clone());
+        // at all — js.execute is already handled above (its action class
+        // isn't scopable), so in practice every primitive reaching this line
+        // has one, but the fallible bridge stays explicit rather than
+        // assumed.
+        let Some(scopable) = primitive.as_scopable() else {
+            diff.extra_primitives.insert(tool_id);
             continue;
         };
 
@@ -317,7 +293,7 @@ pub fn compare(expected: &ExpectedFingerprint, actual: &DryRunRecord) -> Fingerp
         match best {
             Some((specificity, capability)) => {
                 diff.attributions.push(Attribution {
-                    tool: event.tool.clone(),
+                    tool: tool_id,
                     origin: origin_str.to_string(),
                     capability,
                     specificity,
@@ -331,7 +307,7 @@ pub fn compare(expected: &ExpectedFingerprint, actual: &DryRunRecord) -> Fingerp
                 diff.out_of_scope_origins.insert(origin_str.to_string());
             }
             None => {
-                diff.extra_primitives.insert(event.tool.clone());
+                diff.extra_primitives.insert(tool_id);
             }
         }
     }
@@ -362,13 +338,20 @@ mod tests {
         ferrite_core::scope::OriginScope::task_open(rationale).expect("valid")
     }
 
+    /// Test-only convenience: `tool` is the primitive's wire string
+    /// (`"dom.read"`, `"js.execute"`, ...) so every existing test literal
+    /// below reads exactly as it did pre-B1 — this is a test-fixture
+    /// lookup, not a production bridge (`compare` itself never does a
+    /// string-to-`Primitive` lookup; see the module docs).
     fn record(events: &[(&str, Option<&str>)]) -> DryRunRecord {
         let mut r = DryRunRecord::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         for (tool, origin) in events {
-            r.record_tool(
-                crate::tool_decision::ToolId::new(tool),
-                origin.map(str::to_string),
-            );
+            let primitive = ferrite_core::Primitive::ALL
+                .iter()
+                .copied()
+                .find(|p| p.as_str() == *tool)
+                .unwrap_or_else(|| panic!("no Primitive with wire string {tool:?}"));
+            r.record_tool(primitive, origin.map(str::to_string));
         }
         r
     }
@@ -597,7 +580,7 @@ mod tests {
             Capability::WebDownload,
             exact("https://files.example"),
         )]);
-        let record = record(&[("download.file", Some("https://files.example"))]);
+        let record = record(&[("download", Some("https://files.example"))]);
         let diff = compare(&expected, &record);
         assert!(diff.is_clean(), "{diff:?}");
         assert_eq!(diff.attributions.len(), 1);
@@ -610,7 +593,7 @@ mod tests {
             Capability::WebDownload,
             exact("https://files.example"),
         )]);
-        let record = record(&[("download.file", Some("https://attacker.example"))]);
+        let record = record(&[("download", Some("https://attacker.example"))]);
         let diff = compare(&expected, &record);
         assert!(diff
             .out_of_scope_origins

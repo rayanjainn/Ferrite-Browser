@@ -8,34 +8,40 @@
 //! `Vec<ToolEvent>`'s own push order (guaranteed by
 //! [`DryRunRecord::record_tool`] appending, never inserting/reordering), and
 //! [`DryRunRecord::events_with_seq`] is a derived view that pairs each event
-//! with its 0-based position — a computed `seq`, not a stored field. This is
-//! a deliberate deviation from a literal `seq: u64` field on `ToolEvent`
-//! itself: `crate::dataset` (A11's charter, off-limits to this session)
-//! constructs a `ToolEvent { tool, origin }` struct literal directly in its
-//! own fixture code, with no `seq`, and that file cannot be edited from this
-//! session. Adding a required field would not compile there. Deriving `seq`
-//! from `Vec` position instead of storing it avoids that break entirely
-//! while still giving every consumer (tests, and eventually the comparator)
-//! an explicit sequence number on request — see
-//! `seq_is_monotonic_and_matches_call_order` below.
+//! with its 0-based position — a computed `seq`, not a stored field.
 //!
-//! # `tool: ToolId`, not `primitive: ferrite_core::Primitive`
+//! # `primitive: ferrite_core::Primitive`, direct — the B1 fix
 //!
-//! The directive's illustrative shape also names the primitive field
-//! `primitive`. This module keeps `tool: ToolId` instead, for the same
-//! reason as above: `crate::comparator` (A7's charter, off-limits to this
-//! session) already pattern-matches `event.tool` typed as `ToolId` in its
-//! `compare()` and in its own tests' `record_tool(ToolId::new(..), ..)`
-//! calls. Renaming or retyping the field now would not compile without also
-//! rewriting `comparator.rs`. [`ToolEvent::primitive`] below is the
-//! forward-compatible bridge: a best-effort, tested conversion to
-//! `ferrite_core::Primitive` that A7 can already call today, so its rewrite
-//! of `compare()` can adopt the real type without this module changing
-//! again. See `docs/handoffs/a06.md` for the exact one down-stream mismatch
-//! this bridge cannot resolve on its own (`download.file` vs.
-//! `Primitive::Download`'s wire string).
+//! Prior to this charter, this struct kept `tool: ToolId` (a stringly wire
+//! id matching `ferrite_agent::BrowserTool::tool_id()`) plus a best-effort,
+//! fallible `ToolEvent::primitive()` bridge to `ferrite_core::Primitive`,
+//! because the dry-run executor was itself typed against
+//! `ferrite_agent::{BrowserTool, ToolExecutor}` (see `docs/TO-DO.md` T-221).
+//! That bridge returned `None` for exactly one case (`"download.file"` vs.
+//! `Primitive::Download`'s `"download"` wire string, T-216) and needed a
+//! second, comparator-local patch table to close.
+//!
+//! B1 replaced the dry-run's executor with [`super::engine::DryRunEngine`],
+//! which implements [`ferrite_engine::BrowserEngine`] directly — every
+//! action is already tagged with its real `ferrite_core::Primitive` via
+//! [`ferrite_engine::Call::primitive`], with no second, independently
+//! authored string vocabulary to drift out of sync (see that trait's own
+//! module docs). So `ToolEvent` now stores the `Primitive` the engine
+//! actually recorded, directly: no bridge, no `Option`, no per-case patch
+//! table. `ferrite_core::Primitive::JsExecute` is representable here (the
+//! *observed* vocabulary always could — see `ferrite_core::taxonomy`'s
+//! module docs) even though no *expected*-side type can ever name it; the
+//! comparator is what enforces that asymmetry, not this struct.
+//!
+//! `crate::dataset` (A11's schema) and `ferrite-eval`/`ferrite-ui` construct
+//! `ToolEvent` literals directly too — `docs/handoffs/b01.md` documents the
+//! exact mechanical fix each of those calls needed (a literal `ToolId::new("dom.read")`
+//! becomes `Primitive::DomRead`, etc. — a 1:1 wire-string correspondence, not
+//! a redesign).
 
 use std::collections::HashSet;
+
+use ferrite_core::Primitive;
 
 use crate::sanitizer::Finding;
 use crate::tool_decision::ToolId;
@@ -56,7 +62,14 @@ pub enum FindingCarrier {
 pub struct RecordedFinding {
     pub finding: Finding,
     pub carrier: FindingCarrier,
-    /// The tool whose result carried this finding.
+    /// The tool whose result carried this finding, as the pre-existing
+    /// `ToolId` wire string — kept as `ToolId` (not retyped to `Primitive`)
+    /// because this field is purely informational/audit (it plays no part
+    /// in `compare()`'s security-relevant classification, unlike
+    /// `ToolEvent::primitive`) and `ferrite-eval::adjudication` constructs it
+    /// directly; retyping it would not be a minimal mechanical fix for a
+    /// field with no comparator role. Built from `ToolId::new(primitive.as_str())`
+    /// at the point of recording — see `super::engine::DryRunEngine`.
     pub tool: ToolId,
     /// The origin the agent was on when this result was produced.
     pub origin: Option<String>,
@@ -68,31 +81,14 @@ pub struct RecordedFinding {
 ///
 /// `origin` is `None` when no origin context has been established yet
 /// (e.g. the very first call before any navigation/context_url).
+///
+/// `primitive` is the real, direct `ferrite_core::Primitive` the engine
+/// recorded — see the [module docs](self) for why this is no longer a
+/// stringly `ToolId` needing a bridge.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolEvent {
-    pub tool: ToolId,
+    pub primitive: Primitive,
     pub origin: Option<String>,
-}
-
-impl ToolEvent {
-    /// Best-effort mapping to `ferrite_core::Primitive` by matching this
-    /// event's `ToolId` wire string against every `Primitive::as_str()`.
-    ///
-    /// Returns `None` for exactly one case today: `BrowserTool::DownloadFile`
-    /// produces the `ToolId` wire string `"download.file"`
-    /// (`BrowserTool::tool_id()`, `ferrite-agent`), which has no exact match
-    /// in `Primitive` (`Primitive::Download`'s wire string is `"download"`,
-    /// no dot-suffix) — a pre-existing mismatch between `ferrite-agent`'s
-    /// tool-id strings and `ferrite-core`'s taxonomy that predates this
-    /// module and is out of this session's scope to fix (neither crate is in
-    /// this charter's file list). Flagged for A7 in `docs/handoffs/a06.md`.
-    #[must_use]
-    pub fn primitive(&self) -> Option<ferrite_core::Primitive> {
-        ferrite_core::Primitive::ALL
-            .iter()
-            .copied()
-            .find(|p| p.as_str() == self.tool.0)
-    }
 }
 
 /// Accumulates everything the agent did during the dry run.
@@ -117,16 +113,17 @@ impl DryRunRecord {
         }
     }
 
-    /// Derives the set of distinct tools called from the ordered event log.
-    /// Convenience for callers that only need set membership, not ordering/origin.
-    pub fn tools_called(&self) -> HashSet<ToolId> {
-        self.tool_events.iter().map(|e| e.tool.clone()).collect()
+    /// Derives the set of distinct primitives called from the ordered event
+    /// log. Convenience for callers that only need set membership, not
+    /// ordering/origin.
+    pub fn tools_called(&self) -> HashSet<Primitive> {
+        self.tool_events.iter().map(|e| e.primitive).collect()
     }
 
     /// Records one tool invocation, appended to the end of `tool_events` —
     /// the sole source of call ordering (see module docs).
-    pub fn record_tool(&mut self, tool: ToolId, origin: Option<String>) {
-        self.tool_events.push(ToolEvent { tool, origin });
+    pub fn record_tool(&mut self, primitive: Primitive, origin: Option<String>) {
+        self.tool_events.push(ToolEvent { primitive, origin });
     }
 
     /// Pairs each recorded event with its 0-based position in call order —
@@ -182,21 +179,21 @@ mod tests {
     #[test]
     fn seq_is_monotonic_and_matches_call_order() {
         let mut rec = DryRunRecord::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-        rec.record_tool(ToolId::new("navigate"), Some("https://a.example".into()));
-        rec.record_tool(ToolId::new("dom.read"), Some("https://a.example".into()));
-        rec.record_tool(ToolId::new("dom.read"), Some("https://a.example".into()));
+        rec.record_tool(Primitive::Navigate, Some("https://a.example".into()));
+        rec.record_tool(Primitive::DomRead, Some("https://a.example".into()));
+        rec.record_tool(Primitive::DomRead, Some("https://a.example".into()));
 
         let seqs: Vec<u64> = rec.events_with_seq().map(|(seq, _)| seq).collect();
         assert_eq!(seqs, vec![0, 1, 2]);
-        assert_eq!(rec.tool_events[0].tool, ToolId::new("navigate"));
-        assert_eq!(rec.tool_events[1].tool, ToolId::new("dom.read"));
+        assert_eq!(rec.tool_events[0].primitive, Primitive::Navigate);
+        assert_eq!(rec.tool_events[1].primitive, Primitive::DomRead);
 
         // seq tracks position even after the record is cloned/filtered
         // elsewhere — it is a view over whatever Vec you call it on, not
         // state that can drift from the Vec it describes.
         let (first_seq, first_event) = rec.events_with_seq().next().unwrap();
         assert_eq!(first_seq, 0);
-        assert_eq!(first_event.tool, ToolId::new("navigate"));
+        assert_eq!(first_event.primitive, Primitive::Navigate);
     }
 
     #[test]
@@ -213,34 +210,32 @@ mod tests {
         assert!(extract_origin("data:text/html,hi").starts_with("data:"));
     }
 
+    /// B1: `ToolEvent.primitive` is a real, direct `ferrite_core::Primitive`
+    /// — no bridge, no `Option`, no per-case patch table. This is the
+    /// concrete proof the T-216 mismatch (`"download.file"` vs.
+    /// `Primitive::Download`'s `"download"` wire string) cannot recur here:
+    /// there is no wire-string comparison in the recording path at all for
+    /// `compare()` to get wrong.
     #[test]
-    fn primitive_maps_known_tool_ids_and_flags_the_one_known_mismatch() {
-        assert_eq!(
-            ToolEvent {
-                tool: ToolId::new("navigate"),
-                origin: None,
-            }
-            .primitive(),
-            Some(ferrite_core::Primitive::Navigate)
-        );
-        assert_eq!(
-            ToolEvent {
-                tool: ToolId::new("js.execute"),
-                origin: None,
-            }
-            .primitive(),
-            Some(ferrite_core::Primitive::JsExecute)
-        );
-        // The one documented mismatch: BrowserTool::tool_id() for
-        // DownloadFile is "download.file"; Primitive::Download's wire
-        // string is "download". No exact match exists yet.
-        assert_eq!(
-            ToolEvent {
-                tool: ToolId::new("download.file"),
-                origin: None,
-            }
-            .primitive(),
-            None
+    fn tool_event_primitive_is_a_real_direct_value_download_included() {
+        let event = ToolEvent {
+            primitive: Primitive::Download,
+            origin: Some("https://files.example".to_string()),
+        };
+        assert_eq!(event.primitive, Primitive::Download);
+
+        // js.execute is representable on the *observed* side (this struct),
+        // even though no *expected*-side type can ever name it — that
+        // asymmetry belongs to the comparator, not to whether this field can
+        // hold the value at all.
+        let js = ToolEvent {
+            primitive: Primitive::JsExecute,
+            origin: None,
+        };
+        assert_eq!(js.primitive, Primitive::JsExecute);
+        assert!(
+            js.primitive.as_scopable().is_none(),
+            "js.execute must still have no ScopablePrimitive counterpart"
         );
     }
 }

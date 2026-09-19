@@ -4,10 +4,19 @@
 //!
 //! `ferrite_core::ExpectedCapabilitySet` (A2) already **is** "capabilities,
 //! each carrying its own `OriginScope`" — the exact shape T-001/D1 asks for.
-//! This type is a thin wrapper around it plus two constructors that answer
-//! the question A2/A4 left open: *where does a live task's per-capability
-//! scope actually come from, today?* See [`ExpectedFingerprint::from_fingerprint`]
+//! This type is a thin wrapper around it plus a constructor that answers the
+//! question A2/A4 left open: *where does a live task's per-capability scope
+//! actually come from, today?* See [`ExpectedFingerprint::from_fingerprint`]
 //! and the module docs for the full reasoning.
+//!
+//! B1 (`docs/TO-DO.md` T-221) deleted the second such bridge,
+//! `from_legacy_tool_fingerprint`, alongside the `tool_decision::ToolFingerprint`
+//! type it existed only to convert — every real caller
+//! (`ferrite-eval::harness::run_one`, `ferrite-ui`) now calls
+//! `tool_decision::ToolDecisionEngine`'s replacement fingerprint method,
+//! which returns [`Fingerprint`] directly, and goes through
+//! [`ExpectedFingerprint::from_fingerprint`] like every other caller of the
+//! real, tested predictor.
 
 use ferrite_core::scope::OriginScope;
 use ferrite_core::{
@@ -15,7 +24,6 @@ use ferrite_core::{
 };
 
 use crate::fingerprint::Fingerprint;
-use crate::tool_decision::ToolFingerprint;
 
 /// The provisional rationale recorded on every `task_open` scope
 /// [`ExpectedFingerprint::from_fingerprint`] has to fall back to, so it is
@@ -137,45 +145,6 @@ impl ExpectedFingerprint {
         Self { capabilities }
     }
 
-    /// Bridges the legacy, stringly [`ToolFingerprint`] (`tool_decision`;
-    /// still the live-agent and eval-harness path, not yet migrated to A4's
-    /// [`Fingerprint`]) into an [`ExpectedFingerprint`], applying `scope` to
-    /// every capability the same way.
-    ///
-    /// `scope` is supplied by the caller rather than defaulted here, because
-    /// every current caller of this bridge (`ferrite-eval`'s harness,
-    /// `ferrite-ui`) already has exactly one [`OriginScope`] on hand — a
-    /// case's authored `expected_origins`, or the live agent task's
-    /// `context_url` — and applying it uniformly reproduces that caller's
-    /// pre-A7 behavior exactly, while now actually routing through
-    /// per-capability admission-rank attribution instead of the deleted
-    /// single-global-scope `compare()`. A caller with a *genuinely*
-    /// per-capability scope should use [`ExpectedFingerprint::from_capabilities`]
-    /// instead.
-    #[must_use]
-    pub fn from_legacy_tool_fingerprint(fp: &ToolFingerprint, scope: OriginScope) -> Self {
-        let entries = fp
-            .must_use
-            .iter()
-            .chain(fp.may_use.iter())
-            .filter_map(|id| {
-                Capability::ALL
-                    .iter()
-                    .find(|capability| capability.as_str() == id.0)
-                    .copied()
-            })
-            .map(|capability| ExpectedCapability::new(capability, scope.clone()));
-
-        // Same defensive fail-to-empty as `from_fingerprint`: the legacy
-        // type's disjointness is a tested convention, not a type-level
-        // guarantee, so a violation degrades safely instead of panicking in
-        // a live agent path.
-        let capabilities =
-            ExpectedCapabilitySet::new(entries).unwrap_or_else(|_| ExpectedCapabilitySet::empty());
-
-        Self { capabilities }
-    }
-
     /// The underlying per-capability-scoped set.
     #[must_use]
     pub fn capabilities(&self) -> &ExpectedCapabilitySet {
@@ -265,38 +234,6 @@ mod tests {
                  task_open regardless of context_url"
             );
         }
-    }
-
-    #[test]
-    fn from_legacy_tool_fingerprint_maps_known_capability_strings() {
-        use crate::tool_decision::{ToolFingerprint, ToolId};
-        let fp = ToolFingerprint {
-            session_id: uuid::Uuid::new_v4(),
-            task_id: uuid::Uuid::new_v4(),
-            must_use: [ToolId::new("web.read")].into_iter().collect(),
-            may_use: [ToolId::new("clipboard.write")].into_iter().collect(),
-        };
-        let scope = OriginScope::exact([origin("https://example.com")]).unwrap();
-        let expected = ExpectedFingerprint::from_legacy_tool_fingerprint(&fp, scope);
-
-        let capabilities: std::collections::BTreeSet<Capability> =
-            expected.lowered().into_iter().map(|(_, _, c)| c).collect();
-        assert!(capabilities.contains(&Capability::WebRead));
-        assert!(capabilities.contains(&Capability::ClipboardWrite));
-    }
-
-    #[test]
-    fn from_legacy_tool_fingerprint_drops_unknown_labels_at_the_boundary() {
-        use crate::tool_decision::{ToolFingerprint, ToolId};
-        let fp = ToolFingerprint {
-            session_id: uuid::Uuid::new_v4(),
-            task_id: uuid::Uuid::new_v4(),
-            must_use: [ToolId::new("shell.exec")].into_iter().collect(),
-            may_use: Default::default(),
-        };
-        let scope = OriginScope::task_open("test").unwrap();
-        let expected = ExpectedFingerprint::from_legacy_tool_fingerprint(&fp, scope);
-        assert!(expected.lowered().is_empty());
     }
 
     #[test]
