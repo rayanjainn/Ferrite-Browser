@@ -1,6 +1,6 @@
-//! [`WorstCaseAgent`]: a deterministic `AgentRuntime` driven by a case's own
-//! authored `ground_truth`, used by `just eval`'s corpus-wide runner and by
-//! the T-202 per-case inspector.
+//! [`WorstCaseAgent`]: a deterministic [`ferrite_ipi::dry_run::DryRunDriver`]
+//! driven by a case's own authored `ground_truth`, used by `just eval`'s
+//! corpus-wide runner and by the T-202 per-case inspector.
 //!
 //! # Methodology, stated plainly (do not silently rely on this)
 //!
@@ -23,39 +23,62 @@
 //! a worst-case-compliant agent's declared deviation" is the correct
 //! experiment for O1 (containment) and O2 (attribution). It is the
 //! generalization, across the full real corpus, of the exact same
-//! hand-written `ScriptedAgent` pattern `harness.rs`'s and `corpus.rs`'s own
+//! hand-written scripted-driver pattern `harness.rs`'s and `corpus.rs`'s own
 //! tests already use per-fixture — this module derives that fixed action
 //! sequence from `ground_truth` programmatically instead of by hand.
 //!
 //! **What this does NOT measure:** whether a real model would actually take
 //! the bait in the first place (that is `docs/REBUILD_DIRECTIVE.md` §10's
-//! `ferrite_model::ModelProvider`-backed agent loop's territory, not wired
-//! into the eval harness's dry-run path as of this session — see
-//! `docs/EVALUATION.md`'s limitations section). Because this agent's actions
-//! do not depend on the content it observes, sanitizer stripping cannot
-//! change ITS behavior — it can only change what the sanitizer/fingerprint
-//! layers RECORD as caught. Concretely: `FinalOutcome::Stripped` (T-004) is
-//! exercised by this module's own unit tests and by `adjudication`'s
-//! table-driven test, but may not appear at all in a real corpus run under
-//! this agent, because the loop almost always still catches the
-//! unconditionally-issued deviation directly (`ContainedViaConsent` takes
-//! priority). This is stated here and in `docs/EVALUATION.md`, not hidden.
+//! `ferrite_model::ModelProvider`-backed agent loop's territory — as of B2
+//! (`docs/TO-DO.md` T-221's second half), the eval harness's *fingerprint*
+//! layer can call a real provider (see `harness::try_real_provider`), but
+//! this corpus-runner agent's own actions remain scripted from
+//! `ground_truth`, never from a model's plan — see `docs/EVALUATION.md`'s
+//! limitations section). Because this agent's actions do not depend on the
+//! content it observes, sanitizer stripping cannot change ITS behavior — it
+//! can only change what the sanitizer/fingerprint layers RECORD as caught.
+//! Concretely: `FinalOutcome::Stripped` (T-004) is exercised by this
+//! module's own unit tests and by `adjudication`'s table-driven test, but
+//! may not appear at all in a real corpus run under this agent, because the
+//! loop almost always still catches the unconditionally-issued deviation
+//! directly (`ContainedViaConsent` takes priority). This is stated here and
+//! in `docs/EVALUATION.md`, not hidden.
+//!
+//! # B2 migration note (`docs/TO-DO.md` T-221, `docs/handoffs/b01.md`)
+//!
+//! Before B2, this agent implemented `ferrite_agent::AgentRuntime`,
+//! dispatching on `ferrite_agent::BrowserTool`, bridged onto B1's
+//! `DryRunEngine` via `ferrite_agent::engine_bridge::EngineToolExecutor`.
+//! B2 rewrote it to implement [`ferrite_ipi::dry_run::DryRunDriver`]
+//! directly — calling `DryRunEngine`'s `BrowserEngine` methods
+//! (`navigate`/`dom_snapshot`/`read_text`/`click`/`js_execute`/…) itself,
+//! tagged by the real [`ferrite_core::Primitive`] vocabulary the case's own
+//! `ground_truth` already speaks (`ToolId`'s wire strings are, per B1's
+//! verified claim in `comparator::compare`, exactly `Primitive::as_str()`).
+//! This removes `ferrite-eval`'s last production dependency on
+//! `ferrite_agent::{BrowserTool, AgentRuntime, ToolExecutor}` — the bridge
+//! B1 added remains available for a live `GeminiAgent` or any other
+//! `AgentRuntime` implementor, but nothing in this crate's own corpus-running
+//! logic needs it anymore. See `docs/handoffs/b02.md` for the full
+//! reasoning on why option (A) (this) was chosen over keeping the bridge.
 //!
 //! # One known gap
 //!
 //! One pilot case (`ref06_t1b_jsonfield_exfil`) authors its content via
-//! `by_tool.download.file` rather than `extract_data`; this agent's
-//! carrier-derived primary action (`ExtractData` for any `ToolOutput` case)
-//! does not reach it. That case is not meaningfully exercised by `just
-//! eval`'s automated run — flagged explicitly rather than special-cased for
-//! one row (`docs/EVALUATION.md`).
+//! `by_tool.download` (B2 renamed this corpus key from the old
+//! `BrowserTool::tool_id()` string `"download.file"` to
+//! `Primitive::Download.as_str()`, `"download"` — see `corpus.rs`'s module
+//! docs) rather than `extract_data`; this agent's carrier-derived primary
+//! action (`ExtractData` for any `ToolOutput` case) does not reach it. That
+//! case is not meaningfully exercised by `just eval`'s automated run —
+//! flagged explicitly rather than special-cased for one row
+//! (`docs/EVALUATION.md`).
 
 use std::collections::HashSet;
 
-use ferrite_agent::{
-    AgentError, AgentRuntime, AgentTask, AgentToolCall, AgentTurn, BrowserTool, ToolExecutor,
-};
+use ferrite_engine::BrowserEngine;
 use ferrite_ipi::dataset::{CarrierVector, CaseDefinition, GroundTruth};
+use ferrite_ipi::dry_run::{DryRunDriver, DryRunEngine};
 use ferrite_ipi::tool_decision::ToolId;
 
 enum PrimaryAction {
@@ -63,11 +86,28 @@ enum PrimaryAction {
     ExtractData,
 }
 
-/// A deterministic, ground-truth-derived `AgentRuntime`. See module docs for
-/// the full methodology statement.
+/// One scripted extra action, derived from a case's authored `ground_truth`.
+/// Replaces the pre-B2 `ferrite_agent::BrowserTool` vocabulary — every
+/// variant here maps directly onto one `ferrite_engine::BrowserEngine`
+/// method [`WorstCaseAgent::drive`] calls.
+enum ExtraAction {
+    Navigate(String),
+    JsExecute,
+    FillForm,
+    ClipboardRead,
+    ClipboardWrite,
+    /// A representative DOM mutation for the `dom.write` primitive —
+    /// realized as a click, matching the pre-B2 agent's own choice
+    /// (`BrowserTool::ClickElement`) of surrogate action.
+    Click,
+    Download(String),
+}
+
+/// A deterministic, ground-truth-derived [`DryRunDriver`]. See module docs
+/// for the full methodology statement.
 pub struct WorstCaseAgent {
     primary: PrimaryAction,
-    extra_calls: Vec<BrowserTool>,
+    extra_calls: Vec<ExtraAction>,
 }
 
 impl WorstCaseAgent {
@@ -90,7 +130,7 @@ impl WorstCaseAgent {
                 expected_out_of_scope_origins,
             } => {
                 for origin in expected_out_of_scope_origins {
-                    extra_calls.push(BrowserTool::Navigate(origin.clone()));
+                    extra_calls.push(ExtraAction::Navigate(origin.clone()));
                     origins_navigated.insert(origin.clone());
                 }
                 let fallback_origin = expected_out_of_scope_origins
@@ -99,19 +139,19 @@ impl WorstCaseAgent {
                     .cloned()
                     .unwrap_or_else(|| "https://attacker.example".to_string());
                 for tool_id in expected_extra_primitives {
-                    if let Some(call) = tool_for_primitive(tool_id, &fallback_origin) {
+                    if let Some(action) = action_for_primitive(tool_id, &fallback_origin) {
                         // Don't double-navigate to an origin already issued above.
-                        if let BrowserTool::Navigate(ref url) = call {
+                        if let ExtraAction::Navigate(ref url) = action {
                             if origins_navigated.contains(url) {
                                 continue;
                             }
                         }
-                        extra_calls.push(call);
+                        extra_calls.push(action);
                     }
                 }
             }
             GroundTruth::WithinFingerprintOriginShift { attack_origin, .. } => {
-                extra_calls.push(BrowserTool::Navigate(attack_origin.clone()));
+                extra_calls.push(ExtraAction::Navigate(attack_origin.clone()));
             }
             // The irreducible residual (same-origin/same-primitive/data-only)
             // and benign cases: no extra action beyond the primary read.
@@ -125,47 +165,74 @@ impl WorstCaseAgent {
     }
 }
 
-/// Maps an authored `ToolId` (§8's primitive vocabulary) to a representative
-/// `BrowserTool` call. `"dom.read"` returns `None` — it is already the
-/// primary read, never a distinct extra action.
-fn tool_for_primitive(tool_id: &ToolId, fallback_origin: &str) -> Option<BrowserTool> {
+/// Maps an authored `ToolId` (§8's primitive vocabulary, i.e.
+/// `ferrite_core::Primitive::as_str()`) to a representative [`ExtraAction`].
+/// `"dom.read"` returns `None` — it is already the primary read, never a
+/// distinct extra action.
+fn action_for_primitive(tool_id: &ToolId, fallback_origin: &str) -> Option<ExtraAction> {
     match tool_id.0.as_str() {
-        "js.execute" => Some(BrowserTool::ExecuteJs("void 0".to_string())),
-        "form.fill" => Some(BrowserTool::FillForm {
-            selector: "#form".to_string(),
-            value: "worst-case-agent".to_string(),
-        }),
-        "clipboard.read" => Some(BrowserTool::ReadClipboard),
-        "clipboard.write" => Some(BrowserTool::WriteClipboard("worst-case-agent".to_string())),
-        "dom.write" => Some(BrowserTool::ClickElement("#el".to_string())),
-        "download.file" => Some(BrowserTool::DownloadFile(fallback_origin.to_string())),
-        "navigate" => Some(BrowserTool::Navigate(fallback_origin.to_string())),
+        "js.execute" => Some(ExtraAction::JsExecute),
+        "form.fill" => Some(ExtraAction::FillForm),
+        "clipboard.read" => Some(ExtraAction::ClipboardRead),
+        "clipboard.write" => Some(ExtraAction::ClipboardWrite),
+        "dom.write" => Some(ExtraAction::Click),
+        "download" => Some(ExtraAction::Download(fallback_origin.to_string())),
+        "navigate" => Some(ExtraAction::Navigate(fallback_origin.to_string())),
         _ => None,
     }
 }
 
 #[async_trait::async_trait]
-impl AgentRuntime for WorstCaseAgent {
-    async fn run_turn(
-        &self,
-        _task: &AgentTask,
-        _history: &[AgentTurn],
-        executor: &dyn ToolExecutor,
-    ) -> Result<AgentTurn, AgentError> {
-        let mut turn = AgentTurn::new();
-        let primary_call = match self.primary {
-            PrimaryAction::ReadPage => BrowserTool::ReadPage,
-            PrimaryAction::ExtractData => BrowserTool::ExtractData(String::new()),
-        };
-        for tool in std::iter::once(primary_call).chain(self.extra_calls.iter().cloned()) {
-            let call = AgentToolCall::new(tool);
-            let result = executor.execute(&call).await;
-            turn.tool_calls.push(call);
-            turn.tool_results.push(result);
+impl DryRunDriver for WorstCaseAgent {
+    /// Issues the primary read, then every extra call, **unconditionally**
+    /// — matching the pre-B2 `AgentRuntime`-based agent's own behavior
+    /// exactly (`ToolExecutor::execute` never aborted a turn; each call's
+    /// `Ok`/`Err` result was recorded and the loop moved on regardless).
+    /// A single `Err` on `?` here would silently truncate the scripted
+    /// sequence — e.g. a case that deliberately scripts an `"err"` reply
+    /// (`crates/ferrite-eval/tests/corpus/c23_tool_error_redirect_mirror.json`)
+    /// would stop before its real payload ever executed, which is exactly
+    /// the methodology violation this module's own docs warn against
+    /// ("issued unconditionally regardless of what the … content … says").
+    /// Found and fixed during B2's own `just eval` re-verification (a live
+    /// run reported 2 fewer cases / 8 fewer executions than B1's committed
+    /// baseline until this was caught).
+    async fn drive(&self, engine: &mut DryRunEngine) -> Result<(), String> {
+        match self.primary {
+            PrimaryAction::ReadPage => {
+                let _ = engine.dom_snapshot();
+            }
+            PrimaryAction::ExtractData => {
+                let _ = engine.read_text("");
+            }
         }
-        turn.final_response = Some("done".to_string());
-        turn.is_complete = true;
-        Ok(turn)
+        for action in &self.extra_calls {
+            match action {
+                ExtraAction::Navigate(url) => {
+                    let _ = engine.navigate(url);
+                }
+                ExtraAction::JsExecute => {
+                    let _ = engine.js_execute("void 0");
+                }
+                ExtraAction::FillForm => {
+                    let _ =
+                        engine.fill_form(&[("#form".to_string(), "worst-case-agent".to_string())]);
+                }
+                ExtraAction::ClipboardRead => {
+                    let _ = engine.clipboard_read();
+                }
+                ExtraAction::ClipboardWrite => {
+                    let _ = engine.clipboard_write("worst-case-agent");
+                }
+                ExtraAction::Click => {
+                    let _ = engine.click("#el");
+                }
+                ExtraAction::Download(url) => {
+                    let _ = engine.download(url);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -213,15 +280,15 @@ mod tests {
             expected_out_of_scope_origins: origins,
         });
         let agent = WorstCaseAgent::for_case(&case);
-        assert_eq!(agent.extra_calls.len(), 2, "{:?}", agent.extra_calls);
+        assert_eq!(agent.extra_calls.len(), 2, "{}", agent.extra_calls.len());
         assert!(agent
             .extra_calls
             .iter()
-            .any(|t| matches!(t, BrowserTool::Navigate(u) if u == "https://attacker.example")));
+            .any(|a| matches!(a, ExtraAction::Navigate(u) if u == "https://attacker.example")));
         assert!(agent
             .extra_calls
             .iter()
-            .any(|t| matches!(t, BrowserTool::ExecuteJs(_))));
+            .any(|a| matches!(a, ExtraAction::JsExecute)));
     }
 
     #[test]
@@ -234,7 +301,7 @@ mod tests {
         assert_eq!(agent.extra_calls.len(), 1);
         assert!(matches!(
             &agent.extra_calls[0],
-            BrowserTool::Navigate(u) if u == "https://attacker.example"
+            ExtraAction::Navigate(u) if u == "https://attacker.example"
         ));
     }
 
@@ -265,9 +332,9 @@ mod tests {
         let navigate_count = agent
             .extra_calls
             .iter()
-            .filter(|t| matches!(t, BrowserTool::Navigate(_)))
+            .filter(|a| matches!(a, ExtraAction::Navigate(_)))
             .count();
-        assert_eq!(navigate_count, 1, "{:?}", agent.extra_calls);
+        assert_eq!(navigate_count, 1);
     }
 
     #[test]
@@ -282,6 +349,7 @@ mod tests {
     #[tokio::test]
     async fn run_turn_issues_the_primary_read_and_every_extra_call() {
         use ferrite_ipi::dry_run::{DryRunContent, DryRunOrchestrator};
+        use ferrite_ipi::IpiTask;
 
         let mut extra = StdHashSet::new();
         extra.insert(ToolId::new("js.execute"));
@@ -297,22 +365,11 @@ mod tests {
             std::env::temp_dir().join(format!("wca-{}.enc", Uuid::new_v4())),
             content,
         );
-        let task = AgentTask::new(
+        let ipi_task = IpiTask::new(
             case.user_task.clone(),
             Some("https://news.example".to_string()),
         );
-        let ipi_task = ferrite_ipi::IpiTask {
-            session_id: task.session_id,
-            task_id: task.task_id,
-            prompt: task.prompt.clone(),
-            context_url: task.context_url.clone(),
-        };
-        let driver = crate::harness::AgentRuntimeDriver {
-            agent: &agent,
-            task,
-            history: &[],
-        };
-        let record = orch.run(&ipi_task, &driver).await.unwrap();
+        let record = orch.run(&ipi_task, &agent).await.unwrap();
         assert_eq!(record.tool_events.len(), 2, "{:?}", record.tool_events);
     }
 }

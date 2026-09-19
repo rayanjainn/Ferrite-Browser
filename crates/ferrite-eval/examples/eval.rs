@@ -3,22 +3,32 @@
 //! defined mode, and writes the metrics report (markdown + CSV) plus a
 //! summary of the audit-chain anchors the run produced.
 //!
-//! **Primary, always-runnable path (this is what this binary does by
-//! default):** `ToolDecisionEngine::new()` reads `FERRITE_GEMINI_API_KEY`;
-//! with it unset (the default in this sandbox and in CI), the fingerprint
+//! **B2 update (`docs/TO-DO.md` T-221's second half):** this binary now
+//! attempts to construct a real, configured `ferrite_model::ModelProvider`
+//! (`harness::try_real_provider` — `ModelConfig::from_env()`, Ollama first,
+//! Gemini as fallback, key resolved from the environment or the OS keyring,
+//! service `"ferrite"`) before falling back to the deterministic,
+//! rules-only `MockProvider` path every prior `just eval` run in this
+//! environment has exercised.
+//!
+//! **Primary, always-runnable path:** with no model config set (the default
+//! in this sandbox and in CI — `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN`
+//! have no source-code default per §10.2), `try_real_provider` returns
+//! `None` and this binary falls back to `MockProvider`, so the fingerprint
 //! layer runs rules-only — deterministic, offline, satisfies R7. The
 //! dry-run agent itself (`ferrite_eval::worst_case_agent::WorstCaseAgent`)
-//! is a scripted, ground-truth-derived runtime that never makes a model
-//! call at all (see that module's docs for the methodology). So a default
-//! `just eval` run makes ZERO live network calls end to end, by
+//! is a scripted, ground-truth-derived driver that never makes a model call
+//! at all (see that module's docs for the methodology). So a default
+//! `just eval` run still makes ZERO live network calls end to end, by
 //! construction, not by a flag someone has to remember to pass.
 //!
-//! **Optional live path:** set `FERRITE_GEMINI_API_KEY` (checked by
-//! `ToolDecisionEngine`/`ferrite_agent::gemini::read_api_key`, which also
-//! checks the OS keyring, service `"ferrite"`) before running this to let
-//! the fingerprint's `may_use` prediction go through a real model call
-//! instead of the rules-only fallback. This binary is never invoked by
-//! `cargo test`/`just test`, so this optional path never violates R7.
+//! **Optional live path:** set `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN`
+//! (and have a real `OLLAMA_API_KEY`/`FERRITE_GEMINI_API_KEY` in the
+//! environment or OS keyring) before running this to let the fingerprint's
+//! `may_use` prediction go through a real model call instead of the
+//! rules-only fallback. This binary is never invoked by `cargo test`/
+//! `just test`, so this optional path never violates R7 (see
+//! `harness::no_automated_test_calls_try_real_provider`).
 //!
 //! Output: `<out_dir>/EVAL_REPORT.md`, `<out_dir>/eval_report.csv`,
 //! `<out_dir>/corpus.db` (SQLite `DatasetStore`), `<out_dir>/audit.db`
@@ -34,6 +44,7 @@ use ferrite_eval::worst_case_agent::WorstCaseAgent;
 use ferrite_eval::{harness, report};
 use ferrite_ipi::dataset::{CaseDefinition, DatasetStore, ExecutionRecord};
 use ferrite_ipi::tool_decision::ToolDecisionEngine;
+use ferrite_model::ModelProvider;
 use uuid::Uuid;
 
 fn out_dir() -> PathBuf {
@@ -110,6 +121,36 @@ async fn main() {
     let engine = ToolDecisionEngine::new();
     let twin_base = out.clone();
 
+    // B2: attempt a real provider first (Ollama, then Gemini — see
+    // `harness::try_real_provider`'s docs), falling back to the
+    // deterministic `MockProvider` this binary has always used when no
+    // model config/key is available. Never a hard error either way — per
+    // `CLAUDE.md`'s fail-to-empty invariant, "no provider" and "a provider
+    // whose call fails" degrade the fingerprint identically.
+    let real_provider = harness::try_real_provider();
+    let (provider, model_tag): (std::sync::Arc<dyn ferrite_model::ModelProvider>, String) =
+        match real_provider {
+            Some((provider, tag)) => {
+                println!(
+                    "eval: real ModelProvider configured ({}), tag={tag} — fingerprint \
+                     may_use will attempt live calls",
+                    provider.id()
+                );
+                (provider, tag)
+            }
+            None => {
+                println!(
+                    "eval: no real ModelProvider configured (FERRITE_MODEL_SMALL/MAIN unset, \
+                     or no key in the environment/OS keyring) — fingerprint may_use runs \
+                     rules-only (fail-to-empty), zero network calls"
+                );
+                (
+                    std::sync::Arc::new(ferrite_model::MockProvider::new()),
+                    "eval-harness".to_string(),
+                )
+            }
+        };
+
     let mut cases: Vec<CaseDefinition> = Vec::new();
     let mut executions: Vec<ExecutionRecord> = Vec::new();
     let mut run_errors = Vec::new();
@@ -117,7 +158,16 @@ async fn main() {
     for (case, content) in &cases_and_content {
         let agent = WorstCaseAgent::for_case(case);
         match harness::run_case(
-            case, content, &engine, &twin_base, &mut audit, principal, &store, &agent,
+            case,
+            content,
+            &engine,
+            &twin_base,
+            &mut audit,
+            principal,
+            &store,
+            &agent,
+            provider.as_ref(),
+            &model_tag,
         )
         .await
         {

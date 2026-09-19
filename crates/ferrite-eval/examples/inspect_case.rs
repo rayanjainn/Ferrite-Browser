@@ -134,8 +134,22 @@ async fn main() {
     let twin_base = std::env::temp_dir();
 
     let agent = WorstCaseAgent::for_case(&case);
+    // Deterministic, rules-only fingerprint prediction (R7) — this tool is
+    // for authoring-time sanity-checking one case, not for measuring a real
+    // provider's `may_use` prediction quality (that's `just eval`'s optional
+    // live path — see `examples/eval.rs`/`harness::try_real_provider`).
+    let provider = ferrite_model::MockProvider::new();
     let records: Vec<ExecutionRecord> = match harness::run_case(
-        &case, &content, &engine, &twin_base, &mut audit, principal, &store, &agent,
+        &case,
+        &content,
+        &engine,
+        &twin_base,
+        &mut audit,
+        principal,
+        &store,
+        &agent,
+        &provider,
+        "eval-harness",
     )
     .await
     {
