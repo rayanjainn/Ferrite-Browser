@@ -2650,19 +2650,46 @@ clippy --workspace --all-targets -- -D warnings`, `cargo deny check` — all
 clean (`cargo deny`'s only output is the same pre-existing Servo-git-source
 `unmatched-source` warning every agent since A3 has logged).
 
-**App launch, confirmed observed this session:** `cargo run -p ferrite-shell
--- ui` (default features, no real Servo) starts, prints
-`[ferrite-ui] no ModelProvider configured/reachable (FERRITE_MODEL_SMALL/
-FERRITE_MODEL_MAIN unset, or no Ollama/Gemini credential found) — ...` (this
-sandbox's shell has no `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN` exported,
-confirmed via `env | grep FERRITE_MODEL` — empty) and
-`[ferrite-ui] Servo unavailable: ferrite-servo compiled without the
-'servo' feature` (expected — default build), then enters the real winit
-event loop and keeps running (`timeout 20 ... ; echo "EXIT: $?"` → `EXIT:
-124`, i.e. killed by the timeout while still alive, not a crash — no panic,
-no non-zero-from-the-process exit). `cargo run -p ferrite-shell --features
-ferrite-servo/servo -- ui` (the real-Servo path) [FILLED IN BELOW ONCE THE
-BUILD IN PROGRESS AT THE TIME OF WRITING COMPLETES].
+**App launch, confirmed observed this session — both build configurations:**
+
+- `cargo run -p ferrite-shell -- ui` (default features, no real Servo)
+  starts, prints `[ferrite-ui] no ModelProvider configured/reachable
+  (FERRITE_MODEL_SMALL/FERRITE_MODEL_MAIN unset, or no Ollama/Gemini
+  credential found) — ...` (this sandbox's shell has no
+  `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN` exported, confirmed via `env |
+  grep FERRITE_MODEL` — empty) and `[ferrite-ui] Servo unavailable:
+  ferrite-servo compiled without the 'servo' feature` (expected — default
+  build), then enters the real winit event loop and keeps running (`timeout
+  20 ... ; echo "EXIT: $?"` → `EXIT: 124`, i.e. killed by the timeout while
+  still alive, not a crash — no panic, no non-zero-from-the-process exit).
+- `cargo build -p ferrite-shell --features ferrite-servo/servo` — attempted
+  and **succeeded**: `Finished \`dev\` profile ... in 26m 06s` (real Servo,
+  pulling in `libservo`/`script`/`layout`/`webrender`/`net`/etc. from
+  `github.com/servo/servo` tag `v0.0.5`, plus `ferrite-servo`,
+  `ferrite-engine-servo`, `ferrite-ui`, `ferrite-shell` all compiling clean
+  against it — comparable to A9's own `just build-servo` precedent,
+  ~15m31s/6.4GB; this run took longer because a second, unrelated `cargo
+  test -p ferrite-ui` was deliberately run concurrently in an isolated
+  `CARGO_TARGET_DIR` to avoid blocking on the main build's lock, competing
+  for the same CPU).
+- `cargo run -p ferrite-shell --features ferrite-servo/servo -- ui` —
+  **launched successfully with the real Servo engine**: no "Servo
+  unavailable" message this time (meaning `HeadlessServoSession::new(1280,
+  700)` — the real, `libservo`-backed constructor — succeeded), only the
+  expected "no ModelProvider configured" line (no model env vars in this
+  shell), then stayed running past a 25s timeout with no crash or panic
+  (`EXIT: 124`).
+- **Re-run with `FERRITE_MODEL_SMALL=gemma3:27b FERRITE_MODEL_MAIN=
+  gemma3:27b` set** (the `"ferrite"`-service OS-keyring credential from an
+  earlier session, confirmed present via `security find-generic-password -s
+  ferrite`) **and** the real Servo feature: the app printed **no warnings
+  at all** — neither the "no ModelProvider" line nor "Servo unavailable" —
+  and stayed running past a 15s timeout with no crash. This is real,
+  observed evidence that `try_real_model_provider()` successfully resolved
+  a real Ollama provider from the OS keyring (§10.1's exact key-resolution
+  path) *and* the real Servo session constructed, together, in the same
+  live process — the strongest verification this session obtained short of
+  an actual interactive click-through.
 
 **Honest remainder — what was not verified, and exactly why:**
 - **The full pipeline was not exercised interactively via a real click.**
@@ -2670,21 +2697,15 @@ BUILD IN PROGRESS AT THE TIME OF WRITING COMPLETES].
   clicked through, and this agent cannot drive a GUI. What *was* checked:
   every state-machine transition the click would trigger is unit-tested
   directly against `update()` (the `AgentStepReady`/`LiveRunReady`/
-  `ConsentSubmitted`/`StopAgent` tests above), and the app is confirmed to
-  launch and stay alive rather than crash.
-- **No real model round trip was exercised, live, through the actual app.**
-  `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN` are not exported in this
-  session's shell even though a `"ferrite"`-service OS-keyring credential
-  exists from an earlier session (`security find-generic-password -s
-  ferrite` finds an entry) — `ModelConfig::from_env()` requires both env
-  vars with no default (§10.2), so `try_real_model_provider()` correctly
-  returns `None` here and the app falls back to the mock, exactly as
-  designed. A human with those two env vars exported (matching B2's own
-  `docs/EVALUATION.md` §2.6 run, `gemma4:31b` on both tiers) could exercise
-  this for real; not attempted further this session because it needs
-  either those vars set in this shell (a real, deliberate environment
-  change to a live-credential-bearing sandbox) or a human with keyboard/
-  mouse access to actually submit a task.
+  `ConsentSubmitted`/`StopAgent` tests above); the app is confirmed to
+  launch and stay alive rather than crash, with the real Servo engine; and
+  a real `ModelProvider` is confirmed constructible from this exact
+  sandbox's stored credential (above) — but nothing exercised an actual
+  `provider.complete(...)` network round trip, nor watched an agent task
+  actually navigate a real page live. A human with a display (and, ideally,
+  the same env vars set for the session, matching B2's own
+  `docs/EVALUATION.md` §2.6 run, `gemma4:31b` on both tiers there) is the
+  natural next step to close that specific gap.
 
 **Known issues discovered, not fixed:** none new beyond what's already
 tracked. T-230 (dry-run content-scripting coverage of newer `BrowserEngine`
