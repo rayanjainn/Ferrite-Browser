@@ -120,6 +120,16 @@ struct FilteredToolExecutor {
     rejected_origins: std::collections::HashSet<String>,
 }
 
+/// `ToolId` for a live `BrowserTool` call. Moved here from
+/// `ferrite_ipi::tool_decision` (B1, `docs/TO-DO.md` T-221): that crate no
+/// longer depends on `ferrite-agent`, and this conversion — from
+/// `ferrite_agent::BrowserTool` specifically — was the one piece of
+/// `ferrite-ipi`'s old `ToolId` API that actually needed it. This is its
+/// only remaining caller.
+fn tool_id_of(tool: &BrowserTool) -> ToolId {
+    ToolId::new(tool.tool_id())
+}
+
 /// The URL a `BrowserTool` call itself carries, if any — the only calls this
 /// executor can check against `rejected_origins` without a live session.
 fn tool_url(tool: &BrowserTool) -> Option<&str> {
@@ -139,10 +149,33 @@ fn origin_of_url(url: &str) -> Option<String> {
     Some(format!("{}://{}", parsed.scheme(), host).to_ascii_lowercase())
 }
 
+/// Bridges an existing `ferrite_agent::AgentRuntime` (the live `GeminiAgent`)
+/// onto `ferrite_ipi::dry_run::DryRunDriver` — B1's replacement for this
+/// crate's old direct `DryRunOrchestrator::run<R: AgentRuntime>` call
+/// (`docs/TO-DO.md` T-221; see `docs/handoffs/b01.md`, and
+/// `ferrite-eval::harness::AgentRuntimeDriver` for the identical pattern
+/// used there). Wraps `ferrite_agent::engine_bridge::EngineToolExecutor`.
+struct DryRunAgentDriver<'a, R: AgentRuntime> {
+    agent: &'a R,
+    task: AgentTask,
+}
+
+#[async_trait::async_trait]
+impl<'a, R: AgentRuntime> ferrite_ipi::dry_run::DryRunDriver for DryRunAgentDriver<'a, R> {
+    async fn drive(&self, engine: &mut ferrite_ipi::dry_run::DryRunEngine) -> Result<(), String> {
+        let executor = ferrite_agent::engine_bridge::EngineToolExecutor::new(engine);
+        self.agent
+            .run_turn(&self.task, &[], &executor)
+            .await
+            .map(|_turn| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[async_trait::async_trait]
 impl ferrite_agent::ToolExecutor for FilteredToolExecutor {
     async fn execute(&self, call: &AgentToolCall) -> AgentToolResult {
-        let tool_id = ToolId::from(&call.tool);
+        let tool_id = tool_id_of(&call.tool);
         if self.rejected.contains(&tool_id) {
             return AgentToolResult::err(call.call_id, "blocked by user consent");
         }
@@ -703,6 +736,12 @@ pub fn update(
             let context_url = state.tab_urls.get(state.active_tab).cloned();
             let agent_task = AgentTask::new(prompt, context_url);
             state.pending_task = Some(agent_task.clone());
+            let ipi_task = ferrite_ipi::IpiTask {
+                session_id: agent_task.session_id,
+                task_id: agent_task.task_id,
+                prompt: agent_task.prompt.clone(),
+                context_url: agent_task.context_url.clone(),
+            };
 
             let executor = match state.tool_tx.clone() {
                 Some(tx) => BrowserToolExecutor { tx },
@@ -731,7 +770,7 @@ pub fn update(
                 // sanitizer and continues into the existing fingerprint/dry-run/
                 // compare/consent loop, unchanged.
                 let engine = ToolDecisionEngine::new();
-                let loop_outcome = engine.prepare_task(&agent_task);
+                let loop_outcome = engine.prepare_task(&ipi_task);
                 let defense_mode = match &loop_outcome {
                     LoopOutcome::Bypassed => {
                         run_agent_loop(&agent_task, &agent, &executor, &event_tx).await;
@@ -751,7 +790,23 @@ pub fn update(
                 };
 
                 // ── IPI dry run ──────────────────────────────────────────────
-                let fingerprint = engine.fingerprint_from_task(&agent_task).await;
+                // B1 (docs/TO-DO.md T-221): `fingerprint_from_task` now takes
+                // an explicit `&dyn ModelProvider` instead of reading
+                // FERRITE_GEMINI_API_KEY itself via the deleted
+                // `LlmMayUsePredictor`. This live path has no configured
+                // `ferrite_model::ModelProvider` of its own yet — wiring one
+                // in (Ollama/Gemini via `ferrite_model::ModelConfig`) is
+                // T-224's job, not this charter's (see docs/handoffs/b01.md).
+                // `MockProvider` with no scripted response means the live
+                // app's `may_use` layer is rules-only for now — a real,
+                // flagged regression from the old ad hoc Gemini call (which
+                // was never the tested A4 predictor to begin with), not a
+                // silent one: `must_use` (the rule layer, and therefore
+                // containment itself) is completely unaffected.
+                let no_provider = ferrite_model::MockProvider::new();
+                let fingerprint = engine
+                    .fingerprint_from_task(&no_provider, "ferrite-ui", &ipi_task)
+                    .await;
                 let twin_path = std::env::temp_dir().join("ferrite-ipi-twin.enc");
                 let mut orch = ferrite_ipi::dry_run::DryRunOrchestrator::new(twin_path);
                 // T-215: derive detect_enabled AND strip_enabled together from
@@ -759,7 +814,11 @@ pub fn update(
                 // leaving both at DryRunOrchestrator::new's defaults
                 // (detect-only, strip off) regardless of mode.
                 orch.set_defense_mode(defense_mode);
-                let dry_record = match orch.run(&agent_task, &[], &agent).await {
+                let driver = DryRunAgentDriver {
+                    agent: &agent,
+                    task: agent_task.clone(),
+                };
+                let dry_record = match orch.run(&ipi_task, &driver).await {
                     Ok(r) => r,
                     Err(e) => {
                         let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(format!(
@@ -783,17 +842,8 @@ pub fn update(
                     .context_url
                     .as_deref()
                     .and_then(|url| ferrite_core::Origin::parse(url).ok());
-                let scope = match &context_origin {
-                    Some(origin) => ferrite_core::OriginScope::exact([origin.clone()])
-                        .expect("one origin is never empty"),
-                    None => ferrite_core::OriginScope::task_open(
-                        "no context URL known for this task; see ferrite_ipi::comparator's \
-                         module docs, \"Where a per-capability OriginScope comes from\"",
-                    )
-                    .expect("non-blank rationale"),
-                };
                 let expected =
-                    ExpectedFingerprint::from_legacy_tool_fingerprint(&fingerprint, scope);
+                    ExpectedFingerprint::from_fingerprint(&fingerprint, context_origin.as_ref());
                 let diff = compare(&expected, &dry_record);
                 if !diff.is_clean() {
                     let _ = event_tx.send(FerriteBrowserMessage::ConsentRequired {
@@ -1164,7 +1214,7 @@ fn dry_run_evidence_lines(record: &DryRunRecord) -> Vec<String> {
         .map(|(seq, event)| {
             format!(
                 "#{seq}  {tool}  {origin}",
-                tool = event.tool,
+                tool = event.primitive.as_str(),
                 origin = event.origin.as_deref().unwrap_or("(no origin recorded)")
             )
         })
@@ -3204,14 +3254,14 @@ mod tests {
         let task = AgentTask::new("t", None);
         let mut record = evidence_for(&task);
         record.record_tool(
-            ToolId::new("navigate"),
+            ferrite_core::Primitive::Navigate,
             Some("https://example.com".to_string()),
         );
         record.record_tool(
-            ToolId::new("dom.read"),
+            ferrite_core::Primitive::DomRead,
             Some("https://example.com".to_string()),
         );
-        record.record_tool(ToolId::new("js.execute"), None);
+        record.record_tool(ferrite_core::Primitive::JsExecute, None);
 
         let lines = dry_run_evidence_lines(&record);
         assert_eq!(

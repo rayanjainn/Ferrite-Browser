@@ -2692,6 +2692,7 @@ dependencies = [
  "ferrite-audit-log",
  "ferrite-core",
  "ferrite-ipi",
+ "ferrite-model",
  "ferrite-servo",
  "iced",
  "iced_widget",
