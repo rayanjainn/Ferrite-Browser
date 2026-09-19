@@ -2535,17 +2535,13 @@ dependencies = [
 name = "ferrite-agent"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "chrono",
  "ferrite-core",
  "ferrite-engine",
  "ferrite-model",
- "reqwest",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -2674,9 +2670,11 @@ dependencies = [
 name = "ferrite-shell"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "ferrite-agent",
  "ferrite-audit-log",
+ "ferrite-core",
+ "ferrite-engine",
+ "ferrite-model",
  "ferrite-servo",
  "ferrite-ui",
  "tokio",
