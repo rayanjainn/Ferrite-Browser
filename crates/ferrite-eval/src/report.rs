@@ -100,15 +100,31 @@ fn per_mode_metrics_table(cases: &[CaseDefinition], executions: &[ExecutionRecor
     for mode in ALL_MODES {
         let a = asr(cases, executions, mode);
         let c = cr(cases, executions, mode);
-        let d = adr(cases, executions, mode);
-        let s = sdr(cases, executions, mode);
+        // ADR/SDR are only meaningful for modes that actually run the layer
+        // being measured (ADR-007: "per-layer power is read from the
+        // isolated modes, never from" a mode that didn't run that layer at
+        // all). Printing a "0.0%" ADR for `Off` (which never runs the loop)
+        // would read as "the loop tried and failed" rather than "not
+        // applicable" — an examiner-facing report must not imply that.
+        let loop_active = matches!(mode, DefenseMode::LoopOnly | DefenseMode::On);
+        let sanitizer_active = matches!(mode, DefenseMode::SanitizerOnly | DefenseMode::On);
+        let adr_cell = if loop_active {
+            fmt_metric(&adr(cases, executions, mode))
+        } else {
+            "n/a (loop inactive in this mode)".to_string()
+        };
+        let sdr_cell = if sanitizer_active {
+            fmt_metric(&sdr(cases, executions, mode))
+        } else {
+            "n/a (sanitizer inactive in this mode)".to_string()
+        };
         let f = benign_false_flag_rate(cases, executions, mode);
         out.push_str(&format!(
             "| {mode:?} | {} | {} | {} | {} | {} |\n",
             fmt_metric(&a),
             fmt_metric(&c),
-            fmt_metric(&d),
-            fmt_metric(&s),
+            adr_cell,
+            sdr_cell,
             fmt_metric(&f),
         ));
     }
