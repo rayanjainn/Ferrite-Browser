@@ -2217,3 +2217,143 @@ merge — same principle as every prior agent not merging its own branch).
 T-204 was not touched. No Rust feature work was attempted beyond the one
 comment reword needed to make a doc-accuracy claim (`check_purge.sh`'s
 exclusion reasoning) true again.
+
+## 2026-09-19 — B1 (`ferrite-ipi` vocabulary migration) — dry-run rebuilt on `ferrite_engine::BrowserEngine`, old fingerprint predictor deleted, T-221/T-216 closed
+
+First charter of the new post-A13 sequence (B1–B4), opened because the user
+asked, after using the live app, for zero old pre-rebuild code left
+anywhere in the workspace. **Known hazard, confirmed again:** the worktree
+started on an unrelated tree (`65b6d67`/`46b2177`/`86d7d3c`, no
+`docs/`/`crates/` shape matching current `main`). Recreated
+`rebuild/b01-ipi-vocabulary-migration` from local `main` (`7979a04`, the
+A13 merge) before any work — the same hazard every agent since A4 has hit.
+
+**Core architectural decision.** `ferrite-ipi::dry_run` was rebuilt to
+implement `ferrite_engine::BrowserEngine` directly (option B in the
+charter's own framing) rather than adopting
+`ferrite_agent::browser_loop::run_agent_loop` (option A). Option A was
+rejected for a structural reason, not a preference: `run_agent_loop` lives
+in `ferrite-agent`, so depending on it from `ferrite-ipi` — even only that
+one function — is still a `ferrite-ipi → ferrite-agent` edge, exactly the
+backwards direction T-221 names. Closing T-221 that way would require
+relocating `browser_loop` out of `ferrite-agent` into a crate both `ipi`
+and `agent` can depend on, real cross-crate surgery outside this charter's
+file list. Full reasoning, including the real trade-off being accepted (a
+seam remains between dry-run's own small orchestration loop and
+`browser_loop`'s), is in `crates/ferrite-ipi/src/dry_run/engine.rs`'s
+module docs.
+
+**Landed:**
+- `crates/ferrite-ipi/src/dry_run/engine.rs` (new): `DryRunEngine`
+  implements every `ferrite_engine::BrowserEngine` method — synchronous,
+  `&mut self`, no `Arc<Mutex<_>>` (the pre-B1 `RecordingExecutor` needed
+  that only because `ferrite_agent::ToolExecutor::execute` was an async
+  `&self` method). Detect/strip sanitizer gating and the page-read
+  HTML-channel scan are ported verbatim from the deleted `executor.rs`,
+  including the real, tested "both `detect_injection_in_value` and
+  `sanitize_html` run and both contribute findings for `ReadPage`" double
+  coverage. Containment-by-construction (T-007/D7) re-proved with the same
+  grep-backed test, ported.
+- `crates/ferrite-ipi/src/dry_run/record.rs`: `ToolEvent.tool: ToolId` →
+  `ToolEvent.primitive: ferrite_core::Primitive` — real, direct, no bridge.
+  `ToolEvent::primitive()` (the old fallible bridge) is deleted.
+- `crates/ferrite-ipi/src/dry_run/orchestrator.rs`: `DryRunOrchestrator::run`
+  is now generic over a new `DryRunDriver` trait (`drive(&mut DryRunEngine)`)
+  instead of `ferrite_agent::AgentRuntime`. Whole-turn timeout / partial
+  record on timeout (A6) preserved.
+- `crates/ferrite-ipi/src/comparator/mod.rs`: `resolve_primitive` (T-216's
+  patch table) deleted; `compare` reads `event.primitive` directly and
+  converts to `ToolId` only at the point of inserting into
+  `FingerprintDiff` (whose `HashSet<ToolId>`/`Attribution.tool: ToolId`
+  shape is unchanged, for `ferrite-eval`/`ferrite-ui` compatibility).
+  `comparator::legacy` (`lower_fingerprint`) deleted along with the
+  `ToolFingerprint` type it existed only to convert.
+- `crates/ferrite-ipi/src/tool_decision/mod.rs`: deleted
+  `LlmMayUsePredictor` (raw `reqwest` calls to hardcoded, retired
+  `gemini-2.0-flash`), the old stringly `rule_based_must_use`,
+  `ToolFingerprint`, and `generate_fingerprint`/`fingerprint_from_task`'s
+  old bodies. Replacement `generate_fingerprint` takes an explicit
+  `&dyn ferrite_model::ModelProvider` and calls
+  `crate::fingerprint::generate_fingerprint` (A4's real predictor)
+  directly, returning `crate::fingerprint::Fingerprint`. `prepare_task`
+  takes a new `crate::IpiTask` (mirrors `ferrite_agent::AgentTask`'s shape)
+  instead of `&ferrite_agent::AgentTask` — the last real coupling point,
+  `ToolId: From<&BrowserTool>`, moved to `ferrite-ui` (its only caller).
+  `DefenseMode`/`LoopOutcome`/`prepare_task`'s sanitizer logic (A5/A12,
+  load-bearing) untouched.
+- `crates/ferrite-ipi/Cargo.toml`: `ferrite-agent` dependency line deleted
+  (T-221's literal fix), `ferrite-engine` added, unused `reqwest` removed.
+- `crates/ferrite-agent/src/engine_bridge.rs` (new, purely additive):
+  `EngineToolExecutor<'a, E: BrowserEngine + Send>` bridges the pre-existing
+  `BrowserTool`/`AgentRuntime`/`ToolExecutor` vocabulary onto any
+  `BrowserEngine`, so `ferrite-eval`'s `WorstCaseAgent` and the live
+  `GeminiAgent` can drive `DryRunEngine` without either side changing its
+  own vocabulary. No existing `ferrite-agent` export touched.
+- `crates/ferrite-eval/src/harness.rs`: `AgentRuntimeDriver` (pub) wraps
+  `EngineToolExecutor` to implement `DryRunDriver` for any `AgentRuntime`;
+  `run_one` builds an `IpiTask` alongside its existing `AgentTask`, calls
+  the new `generate_fingerprint` with `ferrite_model::MockProvider::new()`
+  (reproduces the old "no API key configured" rules-only behavior exactly,
+  R7-compliant), and reproduces `from_legacy_tool_fingerprint`'s exact
+  per-case uniform-scope policy via `ExpectedCapability` +
+  `ExpectedFingerprint::from_capabilities` against the new `Fingerprint`
+  type (deliberately not `from_fingerprint`, which would lose a case's
+  authored `domain_suffix`/custom `task_open` scope). Mechanical
+  `ToolEvent{tool: ToolId::new("dom.read")}` → `{primitive: Primitive::DomRead}`
+  fixes at 4 sites (`metrics.rs`, `report.rs`, `adjudication.rs` ×2);
+  `RecordedFinding`'s own `tool: ToolId` field untouched (not
+  security-relevant, no charter reason to retype it).
+- `crates/ferrite-ui/src/lib.rs`: same shape of fix — `tool_id_of()` local
+  helper, `DryRunAgentDriver`, `IpiTask` built alongside `AgentTask`,
+  `ExpectedFingerprint::from_fingerprint` (this call site's own
+  scope-derivation logic already matched `from_fingerprint`'s policy
+  field-for-field, so this is a lossless swap, not an approximation).
+  **Flagged regression:** the live app's `may_use` layer is now
+  unconditionally rules-only (`MockProvider::new()`, nothing scripted) —
+  filed as T-229, squarely inside T-224's existing scope (the live app
+  never used `ferrite-model` for this to begin with).
+
+**Verification, not just "it compiles":** `cargo run -p ferrite-eval
+--example eval` (no API key set) reports **29 cases, 96 executions** —
+identical to `docs/EVALUATION.md`'s committed numbers — and every per-mode
+metric in the generated `target/eval-report/EVAL_REPORT.md` (Off ASR
+100%, LoopOnly CR 94.7%, On CR 100%, etc.) matches `docs/EVALUATION.md`
+§2.1 exactly, confirming the `ExpectedCapability`/`from_capabilities`
+substitution in `harness.rs` is truly behavior-preserving, not merely
+type-correct.
+
+**Tests:** `cargo test -p ferrite-ipi` — **157 passed, 0 failed** (up from
+153 pre-charter: new tests include
+`dry_run::record::tests::tool_event_primitive_is_a_real_direct_value_download_included`,
+`dry_run::engine::containment_tests::this_modules_source_names_no_network_capable_dependency`,
+`dry_run::orchestrator::tests::*` ported to `DryRunDriver`). `cargo test -p
+ferrite-agent` — 15 passed (4 new, `engine_bridge::tests::*`). `cargo test
+-p ferrite-eval` — 125 passed across the lib + 4 test binaries (0
+failed, 0 regressed). `cargo test -p ferrite-ui` — 17 passed. `cargo test
+-p ferrite-model` — 154 passed (sanity check, unaffected). `cargo build
+--workspace` — succeeds. `cargo fmt --all --check` and `cargo clippy
+--workspace --all-targets -- -D warnings` — both clean. `cargo deny check`
+— clean (same pre-existing Servo-git-source `unmatched-source` warning
+every agent since A3 has logged).
+
+**Commits:** `e7ddd91` (ferrite-ipi dry-run rebuild) → `29b7840`
+(ferrite-agent engine_bridge) → `75321e4` (ferrite-eval compile fix) →
+`cd5d090` (ferrite-ui compile fix).
+
+**Known issues discovered, not fixed:** T-229 (live app's `may_use` layer
+now unconditionally rules-only until T-224 wires in a real
+`ModelProvider`); T-230 (`content_key_for_call`'s corpus-scripting key
+table doesn't yet cover `BrowserEngine`-only actions `BrowserTool` never
+had — `scroll`, `wait_for`, `tab.*`, `cookie.read`, `storage.read`,
+`query` always serve the generic stub). Neither is a regression in
+containment/security behavior — both are scoped, honestly filed gaps in
+peripheral capability (model-assisted prediction quality; corpus-scripting
+coverage of newer primitives).
+
+**Explicitly not done, per the charter's own instruction:** did not touch
+`ferrite-eval`'s corpus/adjudication/worst_case_agent logic beyond the
+minimal mechanical fixes above; did not touch `ferrite-ui`/`ferrite-shell`
+beyond the minimal mechanical fixes above; did not delete
+`ferrite_agent::{BrowserTool, AgentRuntime, GeminiAgent, ToolExecutor}`
+(still live, still load-bearing for `ferrite-ui`/`ferrite-eval` until
+B2/B3 migrate off them); did not attempt T-204; did not merge to `main`.
