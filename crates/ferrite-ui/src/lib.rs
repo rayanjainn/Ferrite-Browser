@@ -25,7 +25,7 @@ use ferrite_agent::{
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
 use ferrite_ipi::comparator::{compare, ConsentDecision, ExpectedFingerprint, FingerprintDiff};
 use ferrite_ipi::dry_run::DryRunRecord;
-use ferrite_ipi::tool_decision::{LoopOutcome, ToolDecisionEngine, ToolId};
+use ferrite_ipi::tool_decision::{DefenseMode, LoopOutcome, ToolDecisionEngine, ToolId};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{
@@ -731,7 +731,8 @@ pub fn update(
                 // sanitizer and continues into the existing fingerprint/dry-run/
                 // compare/consent loop, unchanged.
                 let engine = ToolDecisionEngine::new();
-                match engine.prepare_task(&agent_task) {
+                let loop_outcome = engine.prepare_task(&agent_task);
+                let defense_mode = match &loop_outcome {
                     LoopOutcome::Bypassed => {
                         run_agent_loop(&agent_task, &agent, &executor, &event_tx).await;
                         return;
@@ -743,17 +744,21 @@ pub fn update(
                     // LoopOnly and On both continue into the fingerprint/dry-run/
                     // compare/consent loop below. They differ only in whether the
                     // sanitizer ran first (On) or was bypassed (LoopOnly) — a
-                    // distinction the dry-run path will act on in Task 20; here the
-                    // loop itself is identical, so both fall through.
-                    LoopOutcome::RanLoopOnly | LoopOutcome::RanFullLoop { .. } => {
-                        // fall through to the unchanged full loop below
-                    }
-                }
+                    // distinction the dry-run orchestrator now acts on directly
+                    // (T-215: set_defense_mode below), so both fall through here.
+                    LoopOutcome::RanLoopOnly => DefenseMode::LoopOnly,
+                    LoopOutcome::RanFullLoop { .. } => DefenseMode::On,
+                };
 
                 // ── IPI dry run ──────────────────────────────────────────────
                 let fingerprint = engine.fingerprint_from_task(&agent_task).await;
                 let twin_path = std::env::temp_dir().join("ferrite-ipi-twin.enc");
-                let orch = ferrite_ipi::dry_run::DryRunOrchestrator::new(twin_path);
+                let mut orch = ferrite_ipi::dry_run::DryRunOrchestrator::new(twin_path);
+                // T-215: derive detect_enabled AND strip_enabled together from
+                // the mode this dry run is actually running under, instead of
+                // leaving both at DryRunOrchestrator::new's defaults
+                // (detect-only, strip off) regardless of mode.
+                orch.set_defense_mode(defense_mode);
                 let dry_record = match orch.run(&agent_task, &[], &agent).await {
                     Ok(r) => r,
                     Err(e) => {

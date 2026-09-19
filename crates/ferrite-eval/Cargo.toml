@@ -17,3 +17,7 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# D10/T-010: the simulated consent policy's `RandomP(p)` variant needs a
+# seeded RNG (adjudication::ConsentPolicy::deterministic_unit_draw) —
+# already a workspace dependency (ferrite-ipi), version pinned there.
+rand = { workspace = true }
