@@ -210,22 +210,35 @@ Each entry is `{ "origin": "<string>", "reply": { "kind": "ok" | "err", ... } }`
 - `"kind": "ok"` requires a `"value"` field (any JSON value — string, object, etc.)
 - `"kind": "err"` requires a `"message"` string field instead of `"value"`
 
-**`by_tool` keys must be real tool IDs** — the loader validates against a
-fixed list (`CorpusError::UnknownToolId` on mismatch, e.g. typing
-`download_file` instead of `download.file`). The exact 8 valid IDs:
+**`by_tool` keys must be real primitive IDs** — the loader validates against
+every `ferrite_core::Primitive::as_str()` value directly
+(`CorpusError::UnknownToolId` on mismatch, e.g. typing `download_file`
+instead of `download`). B2 (`docs/TO-DO.md` T-221) retyped this from a
+hand-maintained 8-entry list of the old `ferrite_agent::BrowserTool::
+tool_id()` strings to the closed `Primitive` vocabulary directly — every
+valid ID:
 
 ```
-navigate, dom.read, dom.write, form.fill,
-clipboard.read, clipboard.write, js.execute, download.file
+navigate, dom.read, dom.query, dom.write, form.fill, click, scroll, wait,
+download, tab.open, tab.close, cookie.read, storage.read, clipboard.read,
+clipboard.write, screenshot, js.execute
 ```
+
+Only a handful of these have a synthetic-content lookup key wired up in
+`ferrite-ipi::dry_run::engine::content_key_for_call` today (`navigate`,
+`click`, `dom.write`, `form.fill`, `clipboard.read`, `clipboard.write`,
+`js.execute`, `download`) — scripting `by_tool` content for any other
+primitive (`dom.query`, `scroll`, `wait`, `tab.open`, `tab.close`,
+`cookie.read`, `storage.read`, `screenshot`) validates but always falls
+through to the generic synthetic stub reply (`docs/TO-DO.md` T-230).
 
 Note `ReadPage` and `ExtractData` (the agent-side tool calls) both realize
 `dom.read` — but as *content channels* in a case file, `read_page` and
 `extract_data` are still kept as separate keys (they're different
 authoring-time entry points into the same underlying primitive). Don't
-confuse the `by_tool` map key vocabulary (8 primitive IDs) with the
-`content` object's own top-level key names (`read_page`/`extract_data`/
-`by_tool` — three fixed keys, not tool IDs).
+confuse the `by_tool` map key vocabulary (the `Primitive` IDs above) with
+the `content` object's own top-level key names (`read_page`/`extract_data`/
+`by_tool` — three fixed keys, not primitive IDs).
 
 Multiple entries under the same channel key are pushed as an **ordered
 queue per origin** — if your case needs multiple sequential replies from

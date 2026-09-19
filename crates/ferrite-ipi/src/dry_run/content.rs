@@ -66,7 +66,8 @@ impl ReplyChannel {
 pub struct DryRunContent {
     pub read_page: ReplyChannel,
     pub extract_data: ReplyChannel,
-    /// Keyed by `BrowserTool::tool_id()` (e.g. "download.file", "clipboard.read").
+    /// Keyed by `ferrite_core::Primitive::as_str()` (e.g. "download",
+    /// "clipboard.read") — see `dry_run::engine::content_key_for_call`.
     pub by_tool_id: HashMap<String, ReplyChannel>,
 }
 
@@ -125,7 +126,7 @@ mod tests {
             DryRunReply::Ok(serde_json::json!("poisoned extract")),
         );
         content.push_tool(
-            "download.file",
+            "download",
             "https://a.example",
             DryRunReply::Ok(serde_json::json!("poisoned download")),
         );
@@ -137,7 +138,7 @@ mod tests {
             .is_some());
         assert!(content
             .by_tool_id
-            .get_mut("download.file")
+            .get_mut("download")
             .unwrap()
             .next(Some("https://a.example"))
             .is_some());

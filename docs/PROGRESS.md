@@ -2357,3 +2357,112 @@ beyond the minimal mechanical fixes above; did not delete
 `ferrite_agent::{BrowserTool, AgentRuntime, GeminiAgent, ToolExecutor}`
 (still live, still load-bearing for `ferrite-ui`/`ferrite-eval` until
 B2/B3 migrate off them); did not attempt T-204; did not merge to `main`.
+
+## 2026-09-19 — B2 (`ferrite-eval` migration off `BrowserTool`) — `WorstCaseAgent` rebuilt on `BrowserEngine` directly, corpus vocabulary unified with `Primitive`, real live-provider `just eval` run verified twice, T-221 fully closed
+
+**Session note:** the subagent session that did the bulk of this work was
+interrupted mid-edit by a platform rate limit (`docs/EVALUATION.md`'s §2.6
+was being written when it cut off). No commits had landed — all changes
+were still uncommitted working-tree state. The coordinating session
+verified everything already in the tree independently (did not trust the
+interrupted session's own claims), finished the doc, and completed the
+remaining process steps (this entry, `docs/TO-DO.md`, the B3 handoff)
+directly, per this project's established practice for a mid-session
+interruption (mirroring A3's).
+
+**`WorstCaseAgent`'s shape decision:** rebuilt to drive
+`ferrite_engine::BrowserEngine` directly (`&mut dyn BrowserEngine`, real
+`Call`s tagged with real `Primitive`s from `ground_truth`) instead of
+constructing `ferrite_agent::BrowserTool`/`AgentToolCall`s for B1's
+`EngineToolExecutor` bridge to interpret — option (A) from the charter,
+the full migration, not the smaller bridged option (B). `ferrite-eval` no
+longer depends on `ferrite_agent::{BrowserTool, AgentRuntime, ToolExecutor}`
+at all for its own corpus-running logic — **confirmed by grep: every
+remaining `ferrite_agent`/`BrowserTool` string in the crate is now inside a
+doc comment or historical note explaining the pre-B2 shape, not a real
+`use` or type reference.** The scripted-agent methodology itself
+(deterministic re-enactment of authored `ground_truth`, not a model
+deciding whether to comply) is unchanged — only its plumbing moved.
+
+**Corpus vocabulary decision:** `corpus.rs`'s `KNOWN_TOOL_IDS` (a
+hand-maintained list of `BrowserTool::tool_id()` strings) is now derived
+directly from `ferrite_core::Primitive::ALL.iter().map(Primitive::as_str)`
+— closing off the exact kind of drift T-216 found, structurally, rather
+than by discipline. Only one of the 29 corpus files actually used a
+`by_tool` scripting key (`ref06_t1b_jsonfield_exfil.json`:
+`"download.file"` → `"download"`); every other file's `ground_truth`
+semantics are byte-for-byte unchanged. `dry_run::engine::content_key_for_call`
+(B1) was updated in the same pass to emit `Primitive::as_str()` values
+too, so both sides of the (still structurally separate, still
+non-security-relevant) corpus-scripting lookup speak one vocabulary.
+T-230 (the newer `BrowserEngine`-only actions — `scroll`, `wait_for`,
+`tab.*`, `cookie.read`, `storage.read`, `query` — still have no scripting
+coverage) is **not** closed by this — no corpus case exercises them yet,
+so extending the table would be speculative; left open, honestly, for
+whoever authors a case that needs it.
+
+**Real live-provider `just eval` run — attempted, succeeded, verified
+twice.** `harness::try_real_provider()` constructs a real
+`ferrite_model::OllamaProvider` from `ModelConfig::from_env()` when
+`FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN` are set, resolving
+`OLLAMA_API_KEY` from the OS keyring (service `"ferrite"` — the same key
+`just probe` verified live during A3). Run with `FERRITE_MODEL_SMALL=
+FERRITE_MODEL_MAIN=gemma4:31b`, ~30 minutes apart: **byte-identical
+results both times** (temperature 0, seed 42 holding for real, not just
+in unit tests). Only the fingerprint-dependent metrics moved at all
+(`LoopOnly` ASR 1/19→3/19; `On`'s benign FGR 3/7→1/7), both in the
+expected direction (a real model admits a correctly-filtered but broader
+plausible-capability set than five keyword groups); every sanitizer-only
+or audit-only number (`Off`, `SanitizerOnly`, `On`'s ASR/CR/ADR) is
+byte-identical to the rules-only run, exactly as it should be. Full
+numbers and reasoning in `docs/EVALUATION.md` §2.6 (new). The default,
+credentials-free `just eval` run (§2.1–§2.5's headline numbers) was
+independently re-verified unchanged: 29 cases, 96 executions, every
+per-mode metric matching the pre-B2 committed numbers exactly.
+
+**`docs/EVALUATION.md` also corrected, not just extended:** §4's
+"Model backend" parameter-rationale row described `ferrite_ipi::
+tool_decision::LlmMayUsePredictor` making a direct `reqwest` call to
+Gemini — that type no longer exists as of B1. Rewritten to describe what
+actually runs now (a real `ModelProvider` via `fingerprint::
+generate_fingerprint`, verified live in §2.6). §7's checklist item on
+"every model call routes through cache/throttle/budget" updated the same
+way — the live path is now demonstrated, not merely trivially true
+because no live path existed. §1's O5 (cost) note updated to cite §2.6's
+real ΔL (p50=699ms, p95=1527ms) instead of predicting a hypothetical
+number for a "future" live run.
+
+**Tests:** `cargo test -p ferrite-eval` — **111 lib + 15 across 4
+integration binaries (corpus_validate, agentdojo_corpus_validate,
+pilot_corpus_validate, pilot_w6) = 126 passed, 0 failed** (up from 125
+pre-charter). `cargo test -p ferrite-ipi` — 157 passed, 0 failed
+(unchanged from B1 — `content.rs`/`engine.rs`'s vocabulary-unification
+edit is a rename, not a behavior change). A dedicated R7 test,
+`harness::tests::no_automated_test_calls_try_real_provider`, greps this
+crate's own `src/` for any call site of `try_real_provider()` outside
+`examples/eval.rs` and fails the build if one exists — the automated test
+suite provably never makes a live call regardless of what `just eval`
+itself can do when a human runs it deliberately.
+
+**Full workspace, independently re-verified by the coordinator (not
+carried forward from the interrupted session's own report):** `cargo
+build --workspace` succeeds; `cargo fmt --all --check` and `cargo clippy
+--workspace --all-targets -- -D warnings` both clean; `cargo test
+--workspace` — 30 `test result: ok` blocks, 0 failures; `cargo deny check`
+clean (same pre-existing Servo-git-source warning every agent since A3
+has logged).
+
+**Commits:** `85261b3` (ferrite-eval/ferrite-ipi vocabulary migration +
+live-provider wiring), plus a following docs commit (EVALUATION.md §2.6 +
+§4/§7/§1 corrections, this entry, TO-DO.md, handoff) — see `git log` for
+its SHA.
+
+**Known issues discovered, not fixed:** T-230 remains open (see above —
+genuinely nothing to extend it against yet). No new `T-2xx` filed this
+session — B1's T-229/T-230 are the only open items this charter touched,
+and T-229 is unaffected by this charter (it's specifically about the live
+`ferrite-ui` app, B3's charter).
+
+**Explicitly not done, per the charter's own instruction:** did not touch
+`ferrite-ui`/`ferrite-shell` (B3's charter, T-224/T-229/T-220); did not
+attempt T-204; did not merge to `main`.

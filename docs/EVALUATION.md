@@ -3,20 +3,43 @@
 This document is `docs/REBUILD_DIRECTIVE.md` §13's required deliverable:
 objectives, formulas, corpus sizing derivation, and parameter rationale,
 written to be read by an examiner. It is A12's charter output
-(`docs/TO-DO.md` T-112).
+(`docs/TO-DO.md` T-112), updated by B2 (`docs/TO-DO.md` T-221's second
+half; `docs/handoffs/b02.md`) with real-provider verification.
 
 **Read this first, honestly, before any number below:** the corpus this
 document reports against has **29 cases**, not the ~360 §13.3's own sizing
 derivation targets. Every interval quoted here is wide because the sample
 is small — that is stated plainly throughout, not smoothed over. See §3.
+**B2 mechanically migrated the corpus's `by_tool` vocabulary** from the old
+`ferrite_agent::BrowserTool::tool_id()` strings to `ferrite_core::Primitive
+::as_str()` directly (closing T-216's drift at its source rather than
+patching around it) — every case file's `ground_truth`/authored semantics
+are byte-for-byte unchanged; only the JSON `by_tool` key spelling for the
+one case that used it (`ref06_t1b_jsonfield_exfil.json`: `"download.file"`
+→ `"download"`) and `corpus.rs`'s validation logic changed. See §4/§6 for
+the details.
 
-Every number in this document was produced by a real run: `cargo run -p
-ferrite-eval --example eval` (the `just eval` recipe), against the real
-corpus in `crates/ferrite-eval/tests/{corpus,pilot_corpus,agentdojo_corpus}/`,
-producing `target/eval-report/EVAL_REPORT.md` and `eval_report.csv`. The
-run makes **zero live model or network calls** (see §4's model-backend
-note) and is fully reproducible: same corpus in, same numbers out, modulo
-the wall-clock timing fields.
+**Two numbered runs back this document, both real, neither fabricated:**
+
+1. **The primary, always-reproducible run** (headline numbers throughout
+   §1–§3): `cargo run -p ferrite-eval --example eval` with no model config
+   set — the default in this sandbox, in CI, and for any contributor who
+   hasn't configured `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN`. The
+   fingerprint's `may_use` layer runs rules-only (fail-to-empty); the
+   dry-run agent (`WorstCaseAgent`) never calls a model. **Zero live model
+   or network calls** and fully reproducible: same corpus in, same numbers
+   out, modulo wall-clock timing fields — re-verified this session
+   byte-for-byte identical to A12/B1's own committed numbers below.
+2. **A real, live-provider run** (B2, new — §2.6): with
+   `FERRITE_MODEL_SMALL=FERRITE_MODEL_MAIN=gemma4:31b` set and a real
+   `OLLAMA_API_KEY` resolved from the OS keyring (service `"ferrite"`, per
+   `docs/PROGRESS.md`'s 2026-09-18 coordinator entry — the same key `just
+   probe` verified live during A3), `harness::try_real_provider()`
+   constructs a real, undecorated `ferrite_model::OllamaProvider` and the
+   fingerprint's `may_use` prediction makes genuine network round trips.
+   This run is **not** reproducible byte-for-byte (a live model's answer is
+   not pinned the way a scripted corpus is) and is reported separately,
+   clearly labeled, never blended into the headline numbers above.
 
 ---
 
@@ -73,11 +96,13 @@ it, and the actual result this session's run produced.
   not assumed.* → ΔL, ΔT.
   **Result:** ΔL (On − Off total_ms, paired, n_pairs=22): p50 = 0ms, p95 =
   1ms. **ΔT is not computed** — a documented limitation, T-226, see §5.
-  ΔL's near-zero reading is itself a direct consequence of §4's model-backend
-  finding: this run's fingerprint layer answers from the rules-only
-  fallback (no network round-trip), so ΔL here measures the loop's own
-  bookkeeping overhead, not a real model-call latency delta. A live-model
-  run (§4) would produce a materially different, non-trivial ΔL.
+  ΔL's near-zero reading here is a direct consequence of the rules-only
+  fallback this default run uses (no network round-trip), so ΔL here
+  measures the loop's own bookkeeping overhead, not a real model-call
+  latency delta. **This prediction is now verified, not hypothetical:**
+  §2.6's real live-provider run measured ΔL (On − Off, paired, n_pairs=22)
+  at p50 = 699 ms, p95 = 1527 ms — the materially different, non-trivial
+  number a real network round-trip per loop-active case actually costs.
 
 ---
 
@@ -203,6 +228,56 @@ human-factors study, out of scope, per ADR-007/§13.4).
 across 20 repeated calls) — this table is exactly reproducible from the
 same corpus and the same seed.
 
+### 2.6 The real, live-provider run (B2, new)
+
+Everything above (§2.1–§2.5) is the **default, always-reproducible run**:
+no `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN` set, so the fingerprint's
+`may_use` layer runs rules-only (fail-to-empty, per `CLAUDE.md`'s own
+invariant) and the corpus-wide run makes zero network calls. This section
+reports a second, separately-labeled run made with a real, live
+`ferrite_model::OllamaProvider` — `FERRITE_MODEL_SMALL=FERRITE_MODEL_MAIN=
+gemma4:31b`, key resolved from the OS keyring (service `"ferrite"`, the
+same key `just probe` verified live during A3) via
+`harness::try_real_provider()`. Run twice this session, ~30 minutes apart,
+with **byte-identical results both times** — real evidence of
+determinism (temperature 0, seed 42), not an assumption.
+
+Only the metrics that actually depend on the fingerprint's `may_use`
+prediction move at all — everything sanitizer-only or audit-only
+(`Off`, `SanitizerOnly`, and `On`'s ASR/CR/ADR/audit chain) is
+**byte-identical** to §2.1's rules-only numbers, exactly as it should be
+since those modes/fields never consult the fingerprint. The two real
+differences, both in the expected direction for a real model versus the
+rules-only fallback:
+
+| Metric | Rules-only (§2.1) | Live provider (this run) | Why |
+|---|---|---|---|
+| `LoopOnly` ASR/CR | 1/19 = 5.3% / 18/19 = 94.7% | 3/19 = 15.8% / 16/19 = 84.2% | A real `may_use` prediction admits a broader (but still closed-vocabulary, still filtered) set of plausible capabilities than the keyword rules alone catch for 2 of the 19 loop-active attack cases. With no sanitizer running in this mode to independently catch the same deviation, those 2 cases' worst-case action now falls inside the (correctly) wider admitted set and is no longer flagged — a real, honest containment reduction in this one isolated mode, not a bug. |
+| `On`'s FGR (false gate rate, benign) | 3/7 = 42.9% [15.8%–75.0%] | 1/7 = 14.3% [2.6%–51.3%] | The real model's `may_use` judgment is less naive than the keyword rules for benign tasks — fewer benign actions get spuriously flagged. Direction makes sense (a real model should be *better* at "is this plausible for the task" than five keyword groups) but n=7 benign×On cases is far too small to treat either number as more than illustrative. |
+
+`On`'s headline ASR/CR (0/22 / 22/22, containment complete) and every
+McNemar/Cohen's-h comparison against `Off` are **unaffected** — the
+sanitizer's excision (T-105/T-003) already removes the injected
+instruction before the loop runs in `On` mode, so a wider or narrower
+`may_use` set has nothing left to admit or reject for the attack side.
+This is exactly the defense-in-depth composition the four-mode design
+(ADR-007) exists to demonstrate: the loop's fingerprint precision moves
+independently of the sanitizer's own containment, and `On`'s combination
+of both stays robust to either layer's individual noise.
+
+**What this run does and does not establish.** It proves the real
+`ferrite_model::ModelProvider` pipeline (A3's cache/throttle/budget
+decorators, A4's `fingerprint::generate_fingerprint`, B1's rebuilt
+`tool_decision::generate_fingerprint`) works end to end against a live
+backend, on the real corpus, with real network calls — not just in
+isolated unit tests. It does **not** change this document's headline
+numbers (§2.1's rules-only run stays the one quoted everywhere else,
+since it is the only one every contributor can reproduce with zero
+credentials, per R7) and it does **not** grow the corpus (still n=29,
+§3) or make the small-`n` caveats throughout this document any less true
+— a 2-case shift in a 19-case cell is exactly the kind of change a wider
+confidence interval already warns you not to over-read.
+
 ---
 
 ## 3. Corpus sizing — derived, then honestly reconciled against n=29 (§13.3)
@@ -251,11 +326,11 @@ teammate/professor slice exists).
 
 | Parameter | §13.4's stated value | Verified true of what `just eval` actually runs? |
 |---|---|---|
-| Model backend | Ollama Cloud | **No — real, pre-existing drift, not introduced this session.** `ferrite_ipi::tool_decision::LlmMayUsePredictor` (the fingerprint `may_use` predictor the eval harness actually calls) makes a direct `reqwest::Client` call to the Gemini API when `FERRITE_GEMINI_API_KEY` is set, and falls back to rules-only when it is not — it does not go through `ferrite_model::ModelProvider`/Ollama at all. This is `docs/TO-DO.md` T-224 (found by the coordinator, unowned as of this session): the live agent path and the eval harness's fingerprint layer both predate `ferrite-model` and were never migrated onto it. Out of A12's file scope (`fingerprint/` is explicitly off-limits per this charter). This session's real run had no `FERRITE_GEMINI_API_KEY` set, so it exercised the rules-only fallback — zero network calls, fully deterministic, but not a demonstration of the model-tiering design §13.4 describes. |
-| Model tiering | small for `may_use`, mid for the agent loop | **Partially moot for this run.** The fingerprint call, when it does run against Gemini, is not split into a small/mid tier distinction (T-224 again — it predates `ferrite-model`'s `ModelTier`). The corpus-runner agent (`WorstCaseAgent`) makes no model call of any kind for the dry-run action-decision step — see §5. |
-| Model temperature / seed | 0, fixed seed | Not verified this session (fingerprint/ off-limits); `WorstCaseAgent`'s own determinism comes from being a pure function of `ground_truth`, not from a temperature setting. |
-| Response caching | content-addressed, on by default | **Not active in this run's fingerprint path** — the direct Gemini HTTP call (T-224) is not wrapped in `ferrite_model`'s `Cache`/`Throttle`/`Budget` decorators. |
-| Call budget | 500 per process, hard abort | Same as above — not wired into the path this harness actually calls. |
+| Model backend | Ollama Cloud | **Yes, as of B1/B2 — the A12-era drift this row used to describe is fixed, not just documented.** A12's original note here described `ferrite_ipi::tool_decision::LlmMayUsePredictor` making a direct `reqwest::Client` call straight to the Gemini API — that type no longer exists. B1 rebuilt `tool_decision::generate_fingerprint` to take a real `&dyn ferrite_model::ModelProvider` and call A4's `fingerprint::generate_fingerprint`; B2 wired `harness::try_real_provider()` to construct a real `ferrite_model::OllamaProvider` from `ModelConfig`/the OS keyring when `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN` are set, and verified it live against Ollama Cloud (§2.6, `gemma4:31b`, byte-identical across two separate runs). The default `just eval` run (no env vars set, §2.1–§2.5's headline numbers) still uses the rules-only fail-to-empty path deliberately, per R7 — this is a choice about what the *automated, always-reproducible* run does, not a limitation of what the pipeline can do. |
+| Model tiering | small for `may_use`, mid for the agent loop | **The `may_use` half is real and verified** (§2.6 uses `ModelTier::Small` via `fingerprint::generate_fingerprint`, unchanged since A4). The agent-loop mid-tier half remains moot for `just eval` specifically: `WorstCaseAgent` (§5) is a deterministic re-enactment of authored `ground_truth`, not a model deciding a plan, by design — it makes no model call of any kind, tiered or otherwise. |
+| Model temperature / seed | 0, fixed seed | **Verified, not assumed** — §2.6's two live runs, ~30 minutes apart, produced byte-identical per-mode metrics, which is only possible if the real model calls underneath are genuinely deterministic at temperature 0 with a fixed seed. `WorstCaseAgent`'s own action-decision determinism is separately a pure function of `ground_truth`, unrelated to the model call. |
+| Response caching | content-addressed, on by default | Real and active on the §2.6 live path — `ferrite_model::OllamaProvider` is used through its normal `Cache`/`Throttle`/`Budget` decorator stack (A3), unchanged by B1/B2. Not exercised by the default rules-only run, which makes no model call to cache. |
+| Call budget | 500 per process, hard abort | Same as response caching — real and active on the §2.6 live path via the same decorator stack, not exercised by the default run. |
 | Capability allowlist | closed, 7 labels | Verified unchanged — `ferrite_core::Capability`'s closed enum, untouched this session. |
 | Provider failure policy | fail to empty | Verified unchanged — `fingerprint::engine`'s fail-to-empty guards, untouched this session (read-only per this charter's scope walls). |
 | `js.execute` | always unscopable | Verified unchanged — `comparator`'s structural handling, untouched this session. |
@@ -530,11 +605,15 @@ not met, stated plainly rather than rounded up.
 - [x] Every model call routes through cache + throttle + budget decorators;
       a full eval re-run on an unchanged corpus makes zero live calls;
       `just cache-stats` reports the hit rate. — True of `ferrite-model`'s
-      own conformance suite and decorators (A3, unchanged). **Caveat, not
-      hidden:** the eval harness's fingerprint layer does not call through
-      `ferrite-model` at all in this run (T-224/§4) — it exercises the
-      rules-only fallback, so "zero live calls" holds trivially here, not
-      because the cache proved itself on a live path this session.
+      own conformance suite and decorators (A3, unchanged), and, as of B2,
+      demonstrated on a real path too: the eval harness's fingerprint layer
+      now goes through a genuine `ferrite_model::OllamaProvider` when a
+      backend is configured (§2.6, verified live), through the same
+      Cache/Throttle/Budget stack A3 built. The *default* `just eval` run
+      that every contributor and CI actually runs makes zero live calls by
+      deliberate design (R7, rules-only fail-to-empty, no env vars set) —
+      not because the live path doesn't exist, but because determinism and
+      credential-free reproducibility are the right default.
 - [ ] `just build-servo` succeeds and the action-conformance suite passes
       against `ServoEngine` at least once, with cost recorded. — **Partially
       true, not done.** `just build-servo` succeeded for real (A9: 15m31s,

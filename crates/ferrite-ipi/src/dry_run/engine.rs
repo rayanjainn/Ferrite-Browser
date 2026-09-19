@@ -99,13 +99,26 @@
 //! [`content::DryRunContent`]'s public shape (`read_page`, `extract_data`,
 //! `by_tool_id`) is **unchanged** by this module — `ferrite-eval::corpus`'s
 //! JSON-corpus loader (`crates/ferrite-eval/src/corpus.rs::lower_content`)
-//! constructs it directly by field/method name, and every existing corpus
-//! fixture's `by_tool` JSON keys (`"navigate"`, `"dom.write"`,
-//! `"clipboard.read"`, `"download.file"`, …) are the pre-existing
-//! `ferrite_agent::BrowserTool::tool_id()` strings. Retyping that keying
-//! scheme to `ferrite_core::Primitive` would either break every existing
-//! corpus fixture or force `ferrite-eval::corpus`'s own migration onto this
-//! charter — out of scope (B2's job).
+//! constructs it directly by field/method name.
+//!
+//! **B2 update (`docs/TO-DO.md` T-221):** [`content_key_for_call`]'s keys
+//! were originally the pre-existing `ferrite_agent::BrowserTool::tool_id()`
+//! strings (`"navigate"`, `"dom.write"`, `"clipboard.read"`,
+//! `"download.file"`, …), kept that way purely so `ferrite-eval::corpus`'s
+//! JSON scripting kept working unmodified while B1 removed `ferrite-ipi`'s
+//! backwards dependency on `ferrite-agent`. B2 (which owns `ferrite-eval`'s
+//! own migration off that vocabulary — see `docs/handoffs/b01.md`/`b02.md`)
+//! retyped both sides together: `content_key_for_call` now returns
+//! `ferrite_core::Primitive::as_str()` directly (so `Call::Download` keys on
+//! `"download"`, not `"download.file"`, and `Call::Click` gets its own
+//! `"click"` key distinct from `Call::TypeText`/`Call::SelectOption`'s
+//! `"dom.write"` — a real primitive distinction the old merged key hid),
+//! and `ferrite-eval::corpus`'s `by_tool` validation now derives its known-ID
+//! set from `Primitive::ALL` the same way. Verified low-risk before making
+//! this change: at B2 time, the entire 29-case corpus had exactly one
+//! `by_tool`-scripted case (`ref06_t1b_jsonfield_exfil.json`, using
+//! `"download.file"`), migrated to `"download"` in the same commit — no
+//! other fixture's scripted content silently stopped resolving.
 //!
 //! So there are deliberately **two** independent identifiers for one
 //! `BrowserEngine` call, serving two different, non-overlapping purposes:
@@ -114,18 +127,21 @@
 //!   correct, always derived from [`ferrite_engine::Call::primitive`], never
 //!   a lookup into anything a case author wrote.
 //! - [`content_key_for_call`] (this module, private) — which
-//!   `content.by_tool_id` bucket a case author's *content* lands in, kept
-//!   deliberately equal to the pre-existing `BrowserTool::tool_id()` strings
-//!   purely so existing/future corpus JSON scripting keeps working
-//!   unmodified. This key has **no** security role: get it "wrong" (or miss
-//!   a new `BrowserEngine` action `BrowserTool` never had, e.g. `scroll`,
-//!   `wait_for`, `tab.open`) and the dry run simply falls through to a
-//!   generic synthetic stub reply for that call, exactly as an unscripted
-//!   call already does today. This is categorically different from the
-//!   T-216 bridge it replaces, which fed a security-relevant classification
-//!   (`compare()`'s primitive matching) — a wrong answer there could hide a
-//!   real deviation. A wrong answer here can only under-script a synthetic
-//!   reply.
+//!   `content.by_tool_id` bucket a case author's *content* lands in. Since
+//!   B2 this is the same `Primitive::as_str()` string `ToolEvent::primitive`
+//!   would carry for that call, but it remains a structurally separate
+//!   lookup, not a shared implementation: it derives its key from the
+//!   `ferrite_engine::Call` shape (a case author's authoring-time construct)
+//!   rather than from the primitive the engine ends up recording, and it has
+//!   **no** security role — get it "wrong" (or miss a new `BrowserEngine`
+//!   action, e.g. `scroll`, `wait_for`, `tab.open` — T-230, not extended by
+//!   B2 since no corpus case exercises them) and the dry run simply falls
+//!   through to a generic synthetic stub reply for that call, exactly as an
+//!   unscripted call already does today. This is categorically different
+//!   from the T-216 bridge it replaces, which fed a security-relevant
+//!   classification (`compare()`'s primitive matching) — a wrong answer
+//!   there could hide a real deviation. A wrong answer here can only
+//!   under-script a synthetic reply.
 
 use std::collections::HashMap;
 
@@ -142,25 +158,26 @@ use crate::twin::SyntheticTwin;
 use super::content::{DryRunContent, DryRunReply};
 use super::record::{DryRunRecord, FindingCarrier, RecordedFinding};
 
-/// The `content.by_tool_id` scripting key for one `BrowserEngine` call,
-/// matching the pre-existing `ferrite_agent::BrowserTool::tool_id()`/
-/// `ferrite-eval::corpus::KNOWN_TOOL_IDS` vocabulary — see the [module
-/// docs](self) for why this is deliberately independent of, and lower-stakes
-/// than, the `Primitive` recorded on the event. `None` for actions
-/// `BrowserTool` never had (e.g. `scroll`, `wait_for`, `tab.*`,
-/// `cookies_read`, `storage_read`, `query`) — those simply always serve the
-/// generic synthetic stub, which is honest: no corpus fixture predating this
-/// charter could have scripted them anyway.
+/// The `content.by_tool_id` scripting key for one `BrowserEngine` call —
+/// `ferrite_core::Primitive::as_str()` values, matching
+/// `ferrite-eval::corpus`'s `by_tool` validation vocabulary since B2 — see
+/// the [module docs](self) for why this is deliberately a structurally
+/// independent lookup from, and lower-stakes than, the `Primitive` recorded
+/// on the event. `None` for actions no corpus case scripts today (`scroll`,
+/// `wait_for`, `tab.*`, `cookies_read`, `storage_read`, `query` —
+/// `docs/TO-DO.md` T-230, not extended by B2) — those simply always serve
+/// the generic synthetic stub.
 fn content_key_for_call(call: &ferrite_engine::Call) -> Option<&'static str> {
     use ferrite_engine::Call;
     match call {
-        Call::Navigate(_) => Some("navigate"),
-        Call::Click(_) | Call::TypeText(..) | Call::SelectOption(..) => Some("dom.write"),
-        Call::FillForm(_) => Some("form.fill"),
-        Call::ClipboardRead => Some("clipboard.read"),
-        Call::ClipboardWrite(_) => Some("clipboard.write"),
-        Call::JsExecute(_) => Some("js.execute"),
-        Call::Download(_) => Some("download.file"),
+        Call::Navigate(_) => Some(Primitive::Navigate.as_str()),
+        Call::Click(_) => Some(Primitive::Click.as_str()),
+        Call::TypeText(..) | Call::SelectOption(..) => Some(Primitive::DomWrite.as_str()),
+        Call::FillForm(_) => Some(Primitive::FormFill.as_str()),
+        Call::ClipboardRead => Some(Primitive::ClipboardRead.as_str()),
+        Call::ClipboardWrite(_) => Some(Primitive::ClipboardWrite.as_str()),
+        Call::JsExecute(_) => Some(Primitive::JsExecute.as_str()),
+        Call::Download(_) => Some(Primitive::Download.as_str()),
         _ => None,
     }
 }

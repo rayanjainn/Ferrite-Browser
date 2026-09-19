@@ -11,24 +11,22 @@ use std::path::Path;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use ferrite_core::Primitive;
 use ferrite_ipi::dataset::{Carrier, CaseDefinition, FindingLocation};
 use ferrite_ipi::dry_run::{DryRunContent, DryRunReply};
 
-/// The known `BrowserTool::tool_id()` strings (`ferrite_agent::BrowserTool`).
-/// MUST stay in sync with that canonical producer. Mirrors the existing
-/// convention in `ferrite_ipi::comparator::capability_primitives`/`UNSCOPABLE`,
-/// which hardcodes the same vocabulary rather than importing it — this
-/// deliberately does not add a reverse-lookup to the product crate.
-const KNOWN_TOOL_IDS: &[&str] = &[
-    "navigate",
-    "dom.read",
-    "dom.write",
-    "form.fill",
-    "clipboard.read",
-    "clipboard.write",
-    "js.execute",
-    "download.file",
-];
+/// The known `by_tool` scripting keys — B2 (`docs/TO-DO.md` T-221) retyped
+/// this from a hand-maintained list of the old `ferrite_agent::BrowserTool::
+/// tool_id()` strings to a direct derivation from
+/// `ferrite_core::Primitive::ALL`, closing off the exact drift T-216 found
+/// (`"download.file"` vs. `"download"`) at its source rather than requiring
+/// this list to be kept in sync with a canonical producer by hand — see
+/// `docs/handoffs/b02.md`. `ferrite-ipi::dry_run::engine::content_key_for_call`
+/// (the actual lookup a scripted `by_tool` entry feeds) was updated in the
+/// same migration to emit exactly these strings.
+fn known_tool_ids() -> impl Iterator<Item = &'static str> {
+    Primitive::ALL.iter().map(|p| p.as_str())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CorpusError {
@@ -125,13 +123,14 @@ fn lower_content(authored: AuthoredContent) -> DryRunContent {
     content
 }
 
-/// `true` iff at least one `by_tool` key is not in `KNOWN_TOOL_IDS`. Returns
-/// the first unknown key found, if any.
+/// `true` iff at least one `by_tool` key is not a known `Primitive::as_str()`
+/// value. Returns the first unknown key found, if any.
 fn find_unknown_tool_id(content: &AuthoredContent) -> Option<&str> {
+    let known: std::collections::HashSet<&str> = known_tool_ids().collect();
     content
         .by_tool
         .keys()
-        .find(|tool_id| !KNOWN_TOOL_IDS.contains(&tool_id.as_str()))
+        .find(|tool_id| !known.contains(tool_id.as_str()))
         .map(|s| s.as_str())
 }
 
@@ -314,10 +313,6 @@ pub fn load_corpus(dir: &Path) -> Result<Vec<(CaseDefinition, DryRunContent)>, V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrite_agent::{
-        AgentError, AgentRuntime, AgentTask, AgentToolCall, AgentToolResult, AgentTurn,
-        BrowserTool, ToolExecutor,
-    };
     use ferrite_audit_log::PersistentAuditLog;
     use ferrite_ipi::dataset::{ConsentOutcome, DatasetStore, LayerOutcome, RunLabel};
     use ferrite_ipi::tool_decision::ToolDecisionEngine;
@@ -693,28 +688,43 @@ mod tests {
 
     // ── Full chain: parse -> lower -> validate -> run ──────────────────────
 
-    struct ScriptedAgent {
-        calls: Vec<BrowserTool>,
+    /// A deterministic [`ferrite_ipi::dry_run::DryRunDriver`] that issues a
+    /// fixed sequence of calls directly against a `DryRunEngine` — B2's
+    /// replacement for the pre-migration `ferrite_agent::AgentRuntime`-based
+    /// `ScriptedAgent` (`docs/TO-DO.md` T-221; mirrors
+    /// `ferrite-ipi::dry_run::orchestrator`'s own test-only `ScriptedDriver`).
+    struct ScriptedDriver {
+        calls: Vec<ScriptedCall>,
+    }
+
+    enum ScriptedCall {
+        Navigate(String),
+        ReadPage,
     }
 
     #[async_trait::async_trait]
-    impl AgentRuntime for ScriptedAgent {
-        async fn run_turn(
+    impl ferrite_ipi::dry_run::DryRunDriver for ScriptedDriver {
+        async fn drive(
             &self,
-            _task: &AgentTask,
-            _history: &[AgentTurn],
-            executor: &dyn ToolExecutor,
-        ) -> Result<AgentTurn, AgentError> {
-            let mut turn = AgentTurn::new();
-            for tool in &self.calls {
-                let call = AgentToolCall::new(tool.clone());
-                let result: AgentToolResult = executor.execute(&call).await;
-                turn.tool_calls.push(call);
-                turn.tool_results.push(result);
+            engine: &mut ferrite_ipi::dry_run::DryRunEngine,
+        ) -> Result<(), String> {
+            use ferrite_engine::BrowserEngine;
+            // Every call is issued unconditionally, matching the pre-B2
+            // `AgentRuntime`-based agent's behavior exactly — an individual
+            // call's `Err` must not truncate the scripted sequence (see
+            // `worst_case_agent::WorstCaseAgent::drive`'s doc comment for
+            // the real regression this once caused).
+            for call in &self.calls {
+                match call {
+                    ScriptedCall::Navigate(url) => {
+                        let _ = engine.navigate(url);
+                    }
+                    ScriptedCall::ReadPage => {
+                        let _ = engine.dom_snapshot();
+                    }
+                }
             }
-            turn.final_response = Some("done".to_string());
-            turn.is_complete = true;
-            Ok(turn)
+            Ok(())
         }
     }
 
@@ -750,15 +760,25 @@ mod tests {
         let mut audit = PersistentAuditLog::new(audit_path.to_str().unwrap()).unwrap();
         let principal = Uuid::new_v4();
 
-        let agent = ScriptedAgent {
+        let agent = ScriptedDriver {
             calls: vec![
-                BrowserTool::ReadPage,
-                BrowserTool::Navigate("https://attacker.example/steal".to_string()),
+                ScriptedCall::ReadPage,
+                ScriptedCall::Navigate("https://attacker.example/steal".to_string()),
             ],
         };
 
+        let provider = ferrite_model::MockProvider::new();
         let records = crate::harness::run_case(
-            &case, &content, &engine, &twin_base, &mut audit, principal, &store, &agent,
+            &case,
+            &content,
+            &engine,
+            &twin_base,
+            &mut audit,
+            principal,
+            &store,
+            &agent,
+            &provider,
+            "eval-harness",
         )
         .await
         .unwrap();
