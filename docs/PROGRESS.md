@@ -2059,3 +2059,161 @@ authoring guide fixes, T-201).
 - **T-228** — `WithinFingerprintOriginShift` adjudication gap, root-caused, not fixed. Full trace in this entry and `docs/EVALUATION.md` §5.
 - **T-224 confirmed still live, not caused by this session** — the eval harness's fingerprint layer runs Gemini-direct-HTTP or rules-only, never through `ferrite_model`/Ollama, exactly as T-224 already described for the live UI path. This session's `docs/EVALUATION.md` §4 is the first place this is stated against the eval harness specifically (T-224 was filed against `ferrite-ui` only).
 - **UP (utility preservation vs `Off`) is not computable at all** under the current run matrix — `Benign` has no `Off` cell (ADR-007's own design). Not a defect this session introduced or could fix within scope; stated in `docs/EVALUATION.md` §1/O3.
+
+## 2026-09-19 — A13 (Reconciliation & release) — final doc-vs-test/SHA audit, honest limitations consolidated, `docs/TO-DO.md` regenerated, no tag
+
+**Session note:** same hazard A4–A12 hit — the worktree's own branch
+(`worktree-agent-afdaa81020145c0dc`) started on a completely unrelated
+tree (`65b6d67`, "Initial test case designing with Authoring guide
+document", `46b2177`, `86d7d3c` "gemini key for agent" — pre-rebuild
+commits with no `docs/`/`crates/` shape matching this rebuild at all).
+Confirmed via `git log --oneline -5` per the launch brief's explicit
+warning, then recreated `rebuild/a13-reconciliation-release` from local
+`main` (`5d4738e`, carrying A0–A12 including the merge commit named in
+the launch brief) before any work — nothing lost, the stale worktree
+branch was untouched garbage, not in-progress work.
+
+**Landed:**
+- **Doc-claim audit (item 1 of the charter).** Spot-checked every ADR in
+  `docs/DECISIONS.md`, sampled `PROGRESS.md` headline claims across
+  A0/A2/A3/A4/A6/A7/A8/A9/A11/A12, and every `CLAUDE.md` invariant, against
+  real evidence: `git log -1 --format="%H %s" <sha>` for 13 cited SHAs
+  spanning nine different agents' commits (`e474403`, `a45b2ad`, `6cb4c70`,
+  `6250cb3`, `ec7ece9`, `795977a`, `d9e2c12`, `aaae747`, `6e6926a`,
+  `b1545d3`, `5bd0dc1`, `3062977`, `f582dda`) — all matched their cited
+  description exactly, no fabricated or misattributed SHA found. Verified
+  `docs/ARCHITECTURE.md` still genuinely doesn't exist (`CLAUDE.md`'s claim
+  still true). Verified the `rusqlite`-is-one-version invariant directly
+  (`grep -c '^rusqlite' Cargo.toml` = 1; `Cargo.lock` has exactly one
+  `rusqlite` package entry; no `sea-query`/`sea-orm`/`sqlx`/`diesel`
+  anywhere). Verified `ferrite-ipi`'s `Cargo.toml` still names
+  `ferrite-agent` as a real dependency (T-221 still live, not stale).
+- **Found and fixed a real drift in `crates/ferrite-servo/src/shell.rs`
+  and `scripts/check_purge.sh`** (commit `a39f58c`): a doc-comment still
+  said "the block path used by the capability broker" — `check_purge.sh`
+  had excluded this one file since A0 specifically because the crate
+  wasn't `cargo fmt`-clean yet at the time; T-207 (A1) made it clean
+  months ago, so the blocker the exclusion cited no longer exists. Reworded
+  the comment (mechanism description, no dead-architecture name) and
+  removed the now-stale exclusion — `cargo fmt -p ferrite-servo --check`,
+  `cargo clippy -p ferrite-servo --all-targets -- -D warnings`, and
+  `cargo test -p ferrite-servo` (1 passed) all verified clean before
+  committing.
+- **`docs/TO-DO.md` regenerated (item 2), not renumbered, nothing dropped**
+  (commit `0de760c`): added a top summary (**39 done, 1 in-progress, 11
+  open, 1 held, 1 dropped, 2 needing owner confirmation** — 55 rows total,
+  re-tallied directly against every row, not carried forward). **Found and
+  fixed one real staleness bug while auditing:** T-215's row still said
+  `in-progress`, even though A12's own PROGRESS entry and the T-003 row
+  both already state it closed by `31d66a1` — confirmed by reading that
+  commit's actual diff (`harness.rs::run_one` and `ferrite-ui/src/lib.rs`
+  both call `set_defense_mode`), not just trusting the cross-reference.
+  T-113 (this charter) marked `done`. **T-204 untouched**, per the standing
+  "not now" instruction — its row was not read for editing purposes beyond
+  confirming it still says `held`.
+- **`README.md` rewritten** (commit `4787847`): the old file listed 7
+  crates and said "mid-rebuild"; the real root `Cargo.toml` has 11 members
+  (`ferrite-core`, `ferrite-model`, `ferrite-audit-log`, `ferrite-ipi`,
+  `ferrite-engine`, `ferrite-engine-servo`, `ferrite-agent`,
+  `ferrite-servo`, `ferrite-ui`, `ferrite-shell`, `ferrite-eval`) — the new
+  README lists all 11 with one-line purposes, explicitly explains the two
+  Servo-related crates and the two `ferrite-agent` code paths (a source of
+  real confusion otherwise), and states the rebuild-complete status without
+  overclaiming: T-224 (live-app gap), T-227 (corpus shortfall), and T-220
+  (`ServoEngine` navigation gap, with the "live app unaffected" caveat) are
+  named in the status section itself, not buried only in `TO-DO.md`.
+- **`CLAUDE.md` correction pass** (commit `e6603eb`): the
+  dependency-direction invariant claimed a clean downward graph; T-221
+  (found by A9, still open) is a real, live exception —
+  `ferrite-ipi/Cargo.toml` really does depend on `ferrite-agent`. Reworded
+  the invariant to name the exception explicitly rather than silently
+  contradicting it. Confirmed no status/planned-work section has crept
+  back in (full re-read; only the one invariant line changed). No crate-list
+  drift to fix — `CLAUDE.md` deliberately never hardcodes one, pointing
+  at `Cargo.toml` instead, which is why this file didn't need the same
+  crate-list fix `README.md` did.
+- **`docs/EVALUATION.md` §6/§7 added** (commit `d10fdb2`), the graded
+  deliverable: §6 is the consolidated limitations account A12's §5
+  explicitly deferred here — irreducible blind spot (R = 1/22 = 4.5%,
+  re-verified via `grep -l 'WithinFingerprintDataOnly'` matching exactly
+  one corpus file), pattern ceiling (5+5 patterns re-counted directly
+  against `crates/ferrite-ipi/src/sanitizer/patterns.rs`, not assumed from
+  the directive's table), consent-policy upper bound, single-machine eval,
+  corpus-size shortfall (29/360, per-stratum percentages re-derived from a
+  fresh `grep`/`ls` count, not copied from T-227's prose), the
+  worst-case-agent methodology's real scope, the live-app gap (T-224,
+  stated as material, not a footnote), the `ServoEngine` navigation gap
+  (T-220, with the confirmed-live-elsewhere addendum), and brief mentions
+  of T-221/T-222/T-223/T-228. §7 scores the directive's own §14
+  definition-of-done checklist item by item against evidence gathered this
+  session: **8 of 11 fully met, 1 partially met (Servo build succeeds,
+  real navigation doesn't), 2 not met (corpus size/κ)** — stated plainly,
+  not rounded up. `scripts/check_purge.sh` gained a `docs/EVALUATION.md`
+  exclusion (same reasoning as its existing exclusions for the other
+  rebuild-record docs — the new §7 checklist names dead-architecture
+  strings to confirm their absence) and a comment fix (the exclusion list
+  comment was missing `docs/TO-DO.md`/`docs/handoffs/**`, which the actual
+  command already excluded — code and comment now agree).
+- **AI-attribution history check (item 6 of the charter), run fresh, not
+  assumed:** `git log --all --oneline | grep -iE "claude|anthropic|ai.assist"`
+  and `git log --all --format="%H %B" | grep -iE "claude|anthropic"` across
+  the full reachable history (119 commits on `main`, plus whatever other
+  refs exist locally) both return exactly two commits — `f582dda`
+  ("docs(claude): update Build/test/run to the justfile...") and `01c3f54`
+  ("docs: rewrite CLAUDE.md and README.md...") — and in both cases the
+  matched text is discussing **the file named `CLAUDE.md`**, not AI
+  attribution. No commit-msg trailer, byline, "Generated with", or 🤖
+  anywhere in the matched output. **No breach found.** `.rules`/
+  `commands.md` confirmed absent from the whole tree (`find . -name
+  ".rules" -o -name "commands.md"`, excluding `.git/` — no matches); the
+  three dead broker/policy/sandbox crates confirmed absent from
+  `Cargo.toml` `members` and from disk; the `9222` port forward confirmed
+  absent from `.devcontainer/devcontainer.json` (only appears inside the
+  rebuild's own record docs, describing what was removed).
+- **`grep -rn "allow(dead_code)" crates/` returns zero matches
+  workspace-wide** — nothing to check the "has a `T-###` comment" condition
+  against; the crate-root `#![deny(dead_code)]` gates in `ferrite-core`/
+  `ferrite-model` make the allow-and-annotate pattern structurally
+  unnecessary rather than merely unused today.
+- **`just check && just test` timed for real, from this freshly-recreated
+  branch:** wall clock **228 seconds (3m48s)**, exit code 0, every crate's
+  `test result: ok`, 0 failures anywhere in the run (spot-checked via
+  `grep -E "test result:|FAILED|error\["` over the captured log — only
+  `ok` lines and zero `FAILED`/real `error[` matches). Under the 5-minute
+  budget with real headroom. `cargo deny check` also run fresh:
+  `advisories ok, bans ok, licenses ok, sources ok`, the same pre-existing
+  Servo-git-source `unmatched-source` warning every prior agent since A3
+  has logged (not a new finding).
+
+**Commits:** `a39f58c` (dead-architecture doc-comment reword + stale
+`check_purge.sh` exclusion removed) → `e6603eb` (`CLAUDE.md` T-221
+correction) → `4787847` (`README.md` rewrite) → `d10fdb2`
+(`docs/EVALUATION.md` §6/§7 + `check_purge.sh` exclusion/comment fix) →
+`0de760c` (`docs/TO-DO.md` regeneration, T-215 fix, T-113 closed).
+
+**Tests:** `cargo test -p ferrite-servo` (1 passed, the only Rust source
+touched this session); full-workspace `cargo test` via `just test` (every
+crate green, 0 failed, exact counts unchanged from A12's numbers since no
+production code changed beyond the one comment). `cargo fmt -p
+ferrite-servo --check`, `cargo clippy -p ferrite-servo --all-targets -- -D
+warnings`, `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo machete`, `sh scripts/check_purge.sh`,
+`sh scripts/check_no_archive_links.sh` all clean at this entry's HEAD.
+
+**Known issues discovered, not fixed (correctly left to a future
+session — this charter is documentation/verification, not new features):**
+none new beyond the T-215 status-staleness bug (fixed in `docs/TO-DO.md`
+itself, not a code defect) and the stale `check_purge.sh` exclusion (also
+fixed). Every T-2xx item this entry's `docs/EVALUATION.md` §6 discusses
+was already filed by an earlier agent; this session found no previously
+unknown defect in the product itself, which is the expected shape of a
+reconciliation-only charter, not evidence the audit was shallow — see the
+spot-check list above for what was actually re-verified against source
+rather than re-read from a prior doc.
+
+**Explicitly not done, per the charter's own instruction:** no `v0.1.0`
+git tag was created (coordinator's call, after reviewing this branch's
+merge — same principle as every prior agent not merging its own branch).
+T-204 was not touched. No Rust feature work was attempted beyond the one
+comment reword needed to make a doc-accuracy claim (`check_purge.sh`'s
+exclusion reasoning) true again.
