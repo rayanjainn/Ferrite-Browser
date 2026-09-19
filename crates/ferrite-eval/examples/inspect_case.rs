@@ -18,7 +18,7 @@ use ferrite_eval::corpus::load_case;
 use ferrite_eval::harness;
 use ferrite_eval::worst_case_agent::WorstCaseAgent;
 use ferrite_ipi::dataset::{
-    CaseDefinition, Corpus, DatasetStore, ExecutionRecord, FinalOutcome, GroundTruth,
+    CaseDefinition, Corpus, DatasetStore, ExecutionRecord, FinalOutcome, GroundTruth, LayerOutcome,
 };
 use ferrite_ipi::tool_decision::{DefenseMode, ToolDecisionEngine};
 use uuid::Uuid;
@@ -165,6 +165,17 @@ async fn main() {
             format!("{:?}", rec.final_outcome),
             if matched { "OK" } else { "CHECK" }
         );
+        // Print the raw diff whenever the loop ran — exactly the detail an
+        // author needs to diagnose WHY a layer caught or missed what
+        // ground_truth expected (see docs/TO-DO.md T-228, found using this
+        // exact detail: `fingerprint_caught` alone doesn't say what the
+        // comparator actually saw).
+        if rec.fingerprint_caught != LayerOutcome::NotApplicable {
+            println!(
+                "    diff: extra_primitives={:?} out_of_scope_origins={:?}",
+                rec.computed_diff.extra_primitives, rec.computed_diff.out_of_scope_origins
+            );
+        }
     }
     println!();
     println!(
