@@ -28,7 +28,8 @@
 // `WebResourceLoad` carries a `WebResourceRequest` (with `.url: Url`).
 // Dropping `load` without calling `.intercept()` lets the request proceed.
 // Calling `load.intercept(response).cancel()` aborts the request with a
-// network error — that is the block path used by the capability broker.
+// network error — the mechanism a network-interception policy layer would
+// use to block a request.
 //
 // There is no lower-level `ResourceThread` hook exposed in v0.0.5 — all
 // interception must go through `load_web_resource`.

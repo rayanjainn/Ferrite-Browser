@@ -29,20 +29,16 @@ PATTERN='capability.broker|regorus|extism|9222|ferrite-(types|network|a11y|cef|p
 #                               `regorus`/`extism*` package entries exist in this file)
 #   scripts/check_purge.sh itself — its own source necessarily contains the
 #                             pattern strings; a self-match here is not a hit
-#   crates/ferrite-servo/src/shell.rs — ONE known, tracked, pre-existing hit:
-#                             a doc-comment explaining Servo's network-
-#                             interception API mentions "the capability
-#                             broker" historically. Not fixed by A0 (fixing
-#                             it means this crate must first be
-#                             cargo-fmt-clean, which it currently isn't —
-#                             see docs/TO-DO.md T-207/T-012); tracked there,
-#                             not silently exempted forever.
+#
+# The former exclusion for crates/ferrite-servo/src/shell.rs (a doc-comment
+# that used to say "the capability broker") is gone as of A13 (T-113):
+# T-207 made this crate cargo-fmt-clean at A1, which was the blocker A0's
+# comment cited, so the comment was reworded instead of staying excluded.
 HITS=$(git grep -ilE "$PATTERN" -- \
   ':!docs/archive/**' \
   ':!docs/REBUILD_DIRECTIVE.md' ':!docs/AUDIT.md' ':!docs/DECISIONS.md' ':!docs/PROGRESS.md' ':!docs/TO-DO.md' ':!docs/handoffs/**' \
   ':!CLAUDE.md' ':!.devcontainer/Dockerfile' ':!Cargo.lock' \
   ':!scripts/check_purge.sh' \
-  ':!crates/ferrite-servo/src/shell.rs' \
   || true)
 
 if [ -n "$HITS" ]; then
