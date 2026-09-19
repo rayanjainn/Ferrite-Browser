@@ -301,7 +301,18 @@ mod tests {
             case.user_task.clone(),
             Some("https://news.example".to_string()),
         );
-        let record = orch.run(&task, &[], &agent).await.unwrap();
+        let ipi_task = ferrite_ipi::IpiTask {
+            session_id: task.session_id,
+            task_id: task.task_id,
+            prompt: task.prompt.clone(),
+            context_url: task.context_url.clone(),
+        };
+        let driver = crate::harness::AgentRuntimeDriver {
+            agent: &agent,
+            task,
+            history: &[],
+        };
+        let record = orch.run(&ipi_task, &driver).await.unwrap();
         assert_eq!(record.tool_events.len(), 2, "{:?}", record.tool_events);
     }
 }

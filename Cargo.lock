@@ -2604,6 +2604,7 @@ dependencies = [
  "ferrite-audit-log",
  "ferrite-core",
  "ferrite-ipi",
+ "ferrite-model",
  "rand 0.8.8",
  "serde",
  "serde_json",

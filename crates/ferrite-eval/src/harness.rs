@@ -4,16 +4,43 @@
 
 use std::time::{Duration, Instant};
 
-use ferrite_agent::{AgentRuntime, AgentTask};
+use ferrite_agent::{AgentRuntime, AgentTask, AgentTurn};
 use ferrite_audit_log::{AuditError, AuditEventKind, PersistentAuditLog};
+use ferrite_core::{ExpectedCapability, ExpectedCapabilitySet};
 use ferrite_ipi::comparator::{compare, ExpectedFingerprint};
 use ferrite_ipi::dataset::{
     CaseDefinition, Corpus, DatasetStore, ExecutionRecord, ExpectedRealization, Model, RunLabel,
     Tier, Timing,
 };
-use ferrite_ipi::dry_run::{DryRunContent, DryRunOrchestrator};
-use ferrite_ipi::tool_decision::{DefenseMode, ToolDecisionEngine};
+use ferrite_ipi::dry_run::{DryRunContent, DryRunDriver, DryRunEngine, DryRunOrchestrator};
+use ferrite_ipi::tool_decision::{DefenseMode, ToolDecisionEngine, ToolId};
+use ferrite_ipi::IpiTask;
 use uuid::Uuid;
+
+/// Bridges an existing `ferrite_agent::AgentRuntime` (a live `GeminiAgent`,
+/// `WorstCaseAgent`, or any test fixture already implementing it) onto
+/// `ferrite_ipi::dry_run::DryRunDriver` — B1's replacement for this crate's
+/// old direct `DryRunOrchestrator::run<R: AgentRuntime>` call
+/// (`docs/TO-DO.md` T-221; see `docs/handoffs/b01.md`). Wraps
+/// `ferrite_agent::engine_bridge::EngineToolExecutor`, the purely additive
+/// bridge B1 added to `ferrite-agent` for exactly this purpose.
+pub struct AgentRuntimeDriver<'a, R: AgentRuntime> {
+    pub agent: &'a R,
+    pub task: AgentTask,
+    pub history: &'a [AgentTurn],
+}
+
+#[async_trait::async_trait]
+impl<'a, R: AgentRuntime> DryRunDriver for AgentRuntimeDriver<'a, R> {
+    async fn drive(&self, engine: &mut DryRunEngine) -> Result<(), String> {
+        let executor = ferrite_agent::engine_bridge::EngineToolExecutor::new(engine);
+        self.agent
+            .run_turn(&self.task, self.history, &executor)
+            .await
+            .map(|_turn| ())
+            .map_err(|e| e.to_string())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Part C — run-label mapping (EVALUATION_PLAN §9)
@@ -203,22 +230,64 @@ pub async fn run_one<R: AgentRuntime>(
         _ => None,
     };
     let task = AgentTask::new(case.user_task.clone(), context_url);
+    let ipi_task = IpiTask {
+        session_id: task.session_id,
+        task_id: task.task_id,
+        prompt: task.prompt.clone(),
+        context_url: task.context_url.clone(),
+    };
 
     let mut sw = Stopwatch::start();
 
-    let (expected_fingerprint, expected_realization) = if behavior.loop_runs {
+    // B1 (docs/TO-DO.md T-221): `generate_fingerprint` now takes a
+    // `&dyn ModelProvider` explicitly (dependency injection, not a hidden
+    // env read). This crate has no configured model backend of its own yet
+    // — `MockProvider` with no scripted response reproduces exactly the old
+    // "no Gemini API key configured" behavior (`may_use` fails to empty,
+    // `must_use`/the rule layer is unaffected), which is what every
+    // `just eval` run in this environment has actually exercised so far (R7:
+    // no live network call either way). Wiring a real, configured
+    // `ferrite_model::ModelProvider` into the harness is real, separate work
+    // — see `docs/handoffs/b01.md` for B2.
+    let no_provider = ferrite_model::MockProvider::new();
+    let (expected_fingerprint, expected, expected_realization) = if behavior.loop_runs {
         let t0 = Instant::now();
         let fp = engine
-            .generate_fingerprint(&case.user_task, task.task_id)
+            .generate_fingerprint(&no_provider, "eval-harness", &case.user_task)
             .await;
         sw.mark_predict(t0.elapsed());
+
+        // Reproduces `from_legacy_tool_fingerprint`'s exact policy (every
+        // `must_use`/`may_use` capability gets the case's own single
+        // authored `expected_origins` scope) against the new `Fingerprint`
+        // type — deliberately NOT `ExpectedFingerprint::from_fingerprint`,
+        // which would derive a cruder scope from the task's bare context URL
+        // alone and silently lose a case's authored `domain_suffix`/
+        // `task_open`-with-rationale scope (see that constructor's own
+        // docs). This is the real, per-case scope the corpus already
+        // authors — `from_capabilities` is the direct, no-defaulting
+        // constructor for exactly this.
+        let capabilities = fp
+            .must_use()
+            .iter()
+            .chain(fp.may_use())
+            .map(|c| ExpectedCapability::new(*c, case.expected_origins.clone()));
+        let expected = ExpectedFingerprint::from_capabilities(
+            ExpectedCapabilitySet::new(capabilities)
+                .unwrap_or_else(|_| ExpectedCapabilitySet::empty()),
+        );
+        let expected_primitives: std::collections::HashSet<ToolId> = expected
+            .lowered()
+            .into_iter()
+            .map(|(sp, _, _)| ToolId::new(ferrite_core::Primitive::from(sp).as_str()))
+            .collect();
         let realization = ExpectedRealization {
-            expected_primitives: ferrite_ipi::comparator::lower_fingerprint(&fp),
+            expected_primitives,
             origin_scope: case.expected_origins.clone(),
         };
-        (Some(fp), Some(realization))
+        (Some(fp), Some(expected), Some(realization))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let mut orch = DryRunOrchestrator::with_content(orchestrator_twin_path, content.clone());
@@ -229,18 +298,15 @@ pub async fn run_one<R: AgentRuntime>(
     // A5 wired it in production).
     orch.set_defense_mode(mode);
     let t1 = Instant::now();
-    let record = orch.run(&task, &[], agent).await?;
+    let driver = AgentRuntimeDriver {
+        agent,
+        task: task.clone(),
+        history: &[],
+    };
+    let record = orch.run(&ipi_task, &driver).await?;
     sw.mark_dry_run(t1.elapsed());
 
-    let diff = if behavior.loop_runs {
-        let expected = ExpectedFingerprint::from_legacy_tool_fingerprint(
-            expected_fingerprint.as_ref().unwrap(),
-            case.expected_origins.clone(),
-        );
-        Some(compare(&expected, &record))
-    } else {
-        None
-    };
+    let diff = expected.map(|expected| compare(&expected, &record));
 
     let adj = crate::adjudication::adjudicate(
         case,

@@ -458,6 +458,12 @@ async fn case5_benign_false_positive_via_direct_adjudication() {
         case.user_task.clone(),
         Some("https://tutorials.example".to_string()),
     );
+    let ipi_task = ferrite_ipi::IpiTask {
+        session_id: task.session_id,
+        task_id: task.task_id,
+        prompt: task.prompt.clone(),
+        context_url: task.context_url.clone(),
+    };
     let twin_path = std::env::temp_dir().join(format!("ferrite-w6-twin-{}.enc", Uuid::new_v4()));
     let mut orch = DryRunOrchestrator::with_content(twin_path, content);
     orch.set_detect_enabled(true);
@@ -465,8 +471,13 @@ async fn case5_benign_false_positive_via_direct_adjudication() {
     let agent = ScriptedAgent {
         calls: vec![BrowserTool::ReadPage],
     };
+    let driver = ferrite_eval::harness::AgentRuntimeDriver {
+        agent: &agent,
+        task,
+        history: &[],
+    };
 
-    let record = orch.run(&task, &[], &agent).await.unwrap();
+    let record = orch.run(&ipi_task, &driver).await.unwrap();
     assert!(
         !record.sanitizer_findings.is_empty(),
         "benign page legitimately contains the trigger phrase and must produce a finding"

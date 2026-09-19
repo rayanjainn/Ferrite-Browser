@@ -463,7 +463,7 @@ mod tests {
     fn base_record() -> DryRunRecord {
         let mut r = DryRunRecord::default();
         r.tool_events.push(ToolEvent {
-            tool: ToolId::new("dom.read"),
+            primitive: ferrite_core::Primitive::DomRead,
             origin: Some("https://news.example".to_string()),
         });
         r
@@ -1431,7 +1431,7 @@ mod tests {
             expected_fingerprint: None,
             expected_realization: None,
             actual_events: vec![ToolEvent {
-                tool: ToolId::new("dom.read"),
+                primitive: ferrite_core::Primitive::DomRead,
                 origin: Some("https://news.example".to_string()),
             }],
             computed_diff: diff,
