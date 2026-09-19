@@ -5,9 +5,10 @@ is an *architectural* defense against indirect prompt injection: predict the
 agent's expected tool/origin fingerprint, dry-run its plan against synthetic
 data, compare actual behavior to the prediction, and consent-gate any
 deviation before anything real executes. A hash-chained audit log makes the
-containment decision verifiable after the fact. The project is mid-rebuild
-per `docs/REBUILD_DIRECTIVE.md` — read that file for the phase plan and
-`docs/TO-DO.md` for the live task ledger.
+containment decision verifiable after the fact. The A0–A13 rebuild plan in
+`docs/REBUILD_DIRECTIVE.md` is complete — read `docs/TO-DO.md` for the live
+task ledger (what's still open) and `README.md`'s Status section for what
+"complete" does and doesn't mean before assuming anything works end to end.
 
 **This file must never contain a "planned" or "not yet implemented" list.
 Status lives only in `docs/PROGRESS.md` and `docs/TO-DO.md`.** The failure
@@ -66,9 +67,13 @@ previously hid a real bug for months (`docs/TO-DO.md` T-207).
 - **No AI attribution in commit messages.** Enforced by the commit-msg hook
   in `scripts/hooks/` (installed via `git config core.hooksPath
   scripts/hooks`) — see that file if a commit is being rejected.
-- **Dependency direction is strictly downward** once the crate split lands
-  per the rebuild directive's target architecture (`core ← {model, audit,
-  engine} ← ipi ← agent ← {ui, eval, cli}`). No cycles, no upward imports.
+- **Dependency direction is strictly downward** per the rebuild directive's
+  target architecture (`core ← {model, audit, engine} ← ipi ← agent ← {ui,
+  eval, cli}`). No cycles, no new upward imports. **Known, tracked
+  exception:** `ferrite-ipi` currently depends on `ferrite-agent`
+  (backwards) — `docs/TO-DO.md` T-221, found by A9, still open. Do not
+  treat this as license to add another upward edge; it is a real debt this
+  invariant statement now names rather than silently contradicts.
 - **No dead code.** If a function exists, something reachable calls it.
   `OriginScope::admission_rank()` being computed and never consumed by
   `compare()` was exactly this failure mode — see `docs/TO-DO.md` T-001/T-002.
