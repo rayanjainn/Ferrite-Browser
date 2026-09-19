@@ -2466,3 +2466,230 @@ and T-229 is unaffected by this charter (it's specifically about the live
 **Explicitly not done, per the charter's own instruction:** did not touch
 `ferrite-ui`/`ferrite-shell` (B3's charter, T-224/T-229/T-220); did not
 attempt T-204; did not merge to `main`.
+
+## 2026-09-19 — B3 (`ferrite-ui`/`ferrite-shell` live wiring) — real ModelProvider + browser_loop-driven live agent execution, T-224/T-229/T-220 closed, old GeminiAgent/BrowserTool vocabulary deleted workspace-wide
+
+**Known hazard, confirmed again:** the worktree started on an unrelated tree
+(`65b6d67`/`46b2177`/`3c08dde`, an "Initial test case designing" branch with
+no relationship to this project's real history). Recreated
+`rebuild/b03-ui-live-wiring` from local `main` (`d08916b`, B2's merge)
+before any work — the same hazard every agent since A4 has hit.
+
+**Core architectural decision — giving the live session a `BrowserEngine`
+face.** Investigated whether `ferrite_engine_servo::ServoEngine` (owns and
+constructs its own `HeadlessServoSession` per tab) could be adapted, or
+whether a sibling type was needed. Decision: added
+`BorrowedServoEngine<'a>`, wrapping an **externally-owned**
+`&'a mut HeadlessServoSession` instead of constructing one —
+`ferrite-ui` already owns and correctly drives one session per tab via its
+own `ServoFrame` subscription (a real winit event loop tick, the exact
+ingredient T-220's diagnosis found missing from `ServoEngine`'s own
+standalone conformance-test environment). Every `BrowserEngine` method's
+DOM/JS/navigation logic was extracted into a session-first `ops` module
+(`crates/ferrite-engine-servo/src/lib.rs`) so `ServoEngine` and
+`BorrowedServoEngine` share one implementation — no script or logic
+duplicated between them, per the charter's own explicit ask. Multi-tab:
+`ferrite-ui` keeps its own tab bookkeeping (`Vec<String>`/`tab_urls`/etc.)
+rather than switching to `ServoEngine`'s `TabId` model — `BorrowedServoEngine`
+wraps exactly one, externally-managed tab, and its `open_tab`/`close_tab`/
+`switch_tab` return `EngineError::Unsupported` (never reachable in practice:
+`ferrite_agent::browser_loop::AgentAction` has no tab-management variants at
+all). This is a smaller, lower-risk choice than migrating `ferrite-ui`'s
+entire tab model, and it is what let `ClickElement`/`FillForm`/
+`ExtractData`/`WriteClipboard` upgrade from literal no-op stubs to real DOM
+actions **for free** (they were already implemented and tested in
+`ServoEngine`'s own JS-injection logic, T-109 — this charter only gave that
+logic a second way to reach a real session).
+
+**Does this actually fix T-220 for the live app? Evidence, not just
+architecture.** `BorrowedServoEngine::navigate`'s `drive_until_loaded` calls
+`session.spin()` in a loop — the identical `pump_engine()`/`sync_and_read()`
+calls the live app's own `ServoFrame` subscription already makes every 16ms
+to browse real pages successfully (confirmed live by the user in the A9/T-220
+session note: "confirmed live 2026-09-18 ... render a real page end-to-end").
+Because the session is the *same* one, in the *same* process, with the
+*same* real winit event loop already proven to drive it — not a second,
+freshly-constructed session in a standalone test binary with no winit
+`EventLoop` object at all (T-220's actual root cause) — there is no reason
+for `BorrowedServoEngine`'s navigation to fail differently than the tab UI's
+own navigation already succeeds. This reasoning is sound but the literal
+click-through (submit an agent task that navigates, watch it complete) was
+**not observed interactively this session** — see "Honest remainder" below
+for exactly why and what was checked instead. `ServoEngine`'s own
+**owned**-session path (used only by the `#[ignore]`d
+`servo_conformance.rs` test) was not touched and would very likely still
+exhibit T-220's original symptom if ever run for real — nothing in
+production calls `ServoEngine::new` anymore, so this residual defect is now
+conformance-test-only.
+
+**T-229 (real `ModelProvider` at startup).** `ferrite-ui`'s `launch()` now
+calls a local `try_real_model_provider()` (mirrors
+`ferrite-eval::harness::try_real_provider()` exactly: `ModelConfig::
+from_env()`, Ollama first via the OS keyring service `"ferrite"`, Gemini
+fallback) and overwrites `FerriteBrowser::model_provider`/`model_tag_small`/
+`model_tag_main` with the result *before* the window opens. Deliberately
+**not** called from `FerriteBrowser::default()` — that stays hardcoded to
+`MockProvider::new()` so the entire test suite (dozens of call sites
+construct a `FerriteBrowser::default()`) never touches the environment or
+OS keyring, matching `ferrite-eval::try_real_provider()`'s own established
+R7 convention exactly (that function is likewise never reachable from a
+`#[test]`, only from `examples/eval.rs`). A new grep-based test,
+`no_automated_test_calls_try_real_model_provider_outside_launch`, proves
+exactly one real (non-comment) call site exists in the file. `AgentTaskSubmitted`'s
+handler now passes this real provider into `ToolDecisionEngine::
+fingerprint_from_task` in place of the hardcoded `MockProvider::new()` B1
+left behind — closes T-229 as T-224's side effect, exactly as B1's handoff
+anticipated.
+
+**T-224 (the live app on the new stack) — landed in three commits:**
+
+1. `555ad99` — `ferrite-engine-servo`: `ops` module extraction +
+   `BorrowedServoEngine<'a>` (T-220's fix, above). `ServoEngine`'s own
+   public behavior is unchanged, now implemented on top of the same `ops`
+   functions.
+2. `3addb46` — `ferrite-ui`: real `ModelProvider` wiring (T-229, above);
+   the dry run's decision loop now calls
+   `ferrite_agent::browser_loop::run_agent_loop` **directly** against
+   `ferrite_ipi::dry_run::DryRunEngine` (`BrowserLoopDryRunDriver`),
+   replacing the `GeminiAgent`/`EngineToolExecutor`-bridged
+   `DryRunAgentDriver` B1 built — the "cleaner path" B1's own handoff
+   anticipated once nothing needed the bridge for the dry run's own sake.
+   This required one real, well-justified upstream change:
+   `run_agent_loop`'s signature moved from `engine: &mut dyn BrowserEngine`
+   to a generic `<E: BrowserEngine>` `engine: &mut E`, because a trait
+   object erases its concrete type's `Send`-ness even when the concrete
+   type (`DryRunEngine`) genuinely is `Send` — calling the old signature
+   from inside an `async_trait`-boxed `DryRunDriver::drive` produced a
+   provably-`!Send` future regardless of what was actually passed in.
+   Verified: the resulting `run_agent_loop::<DryRunEngine>` future is
+   `Send` (compiles inside `tokio::spawn`); `run_agent_loop::<ServoEngine>`
+   (or any real `!Send` engine) correctly stays un-spawnable, exactly
+   reflecting that engine's real constraint — see `browser_loop.rs`'s own
+   updated doc comment.
+
+   The **live** (real) run cannot use this same direct-call shape:
+   `BorrowedServoEngine` wraps a real, `!Send` `HeadlessServoSession`, so
+   nothing built on it can cross a `tokio::spawn` boundary, which
+   `run_agent_loop`'s own async, multi-step design would require. Built
+   instead: a message-driven step loop (`start_live_loop`/
+   `spawn_next_step`/the `LiveRunReady`/`AgentStepReady` message handlers)
+   — only the per-step model round trip (`&dyn ModelProvider`, `Send +
+   Sync`) is ever spawned in the background; each returned `AgentAction`
+   executes synchronously, on the Iced update thread, via
+   `ferrite_agent::browser_loop::execute_action` (made `pub` for exactly
+   this reuse) against a `BorrowedServoEngine` over the active tab's
+   session. Step/wall-clock budgets and repeated-action detection mirror
+   `run_agent_loop`'s own logic exactly (same `LoopBudget`/`LoopStopReason`
+   types, reused not reimplemented). A `run_id` generation counter, bumped
+   on every fresh run and on `StopAgent`, is stamped onto every
+   `LiveRunReady`/`AgentStepReady` message and checked before acting, so a
+   step already in flight when the user stops the agent (or starts a new
+   task) can never execute a live browser action after that point — tested
+   (`a_stale_run_id_is_ignored_by_live_run_ready`,
+   `a_stale_run_id_is_ignored_by_agent_step_ready`).
+
+   Consent enforcement was re-implemented on the `AgentAction`/
+   `ferrite_core::Primitive` vocabulary (`is_action_rejected`,
+   `action_tool_id`, `action_url`) — the same semantics the old
+   `FilteredToolExecutor` had (block a rejected tool id; block a rejected
+   origin only for actions that carry their own URL, `Navigate`/`Download`
+   — the same honest, pre-existing limitation for actions with no URL of
+   their own). The old `ToolRequest`/`BrowserToolExecutor`/
+   `FilteredToolExecutor`/`tool_tx`/`tool_rx` channel bridge and its
+   subscription are deleted outright — no longer needed now that live
+   actions execute directly inside `update()`.
+
+3. `c696d0b` — `ferrite-agent`: deleted `BrowserTool`, `AgentTask`,
+   `AgentToolCall`, `AgentToolResult`, `AgentTurn`, `AgentError`, the
+   `AgentRuntime`/`ToolExecutor` traits, `GeminiAgent`/`gemini.rs`,
+   `engine_bridge.rs`/`EngineToolExecutor`, and `RateLimiter` (used only by
+   `GeminiAgent`). **Grep-confirmed before deleting** (per the charter's own
+   explicit instruction): `ferrite-ui` and `ferrite-shell`'s `agent-smoke`
+   were the only two remaining real (non-comment) callers anywhere in the
+   11-crate workspace — both already migrated in commits 1–2 and this same
+   commit respectively. `ferrite-agent/src/lib.rs` is now nine lines: a
+   module doc explaining the history, plus `pub mod browser_loop;`.
+   `ferrite-shell`'s `agent-smoke` subcommand now demonstrates the new
+   stack end to end: a real `ModelProvider` (same `try_real_model_provider`
+   pattern, a third, consistent copy per this project's own established
+   convention of not sharing this ~15-line pattern across crates) driving
+   `run_agent_loop` against `ferrite_engine::MockEngine`. Removed now-unused
+   dependencies: `reqwest`/`uuid`/`thiserror`/`async-trait` from
+   `ferrite-agent`, `async-trait` from `ferrite-shell`.
+
+**Full-workspace grep, after deletion, confirms zero real references
+remain** to `ferrite_agent::{BrowserTool, AgentRuntime, GeminiAgent,
+ToolExecutor, AgentTask, AgentToolCall, AgentToolResult, AgentTurn,
+AgentError, RateLimiter}` or `engine_bridge::EngineToolExecutor` anywhere in
+the workspace — every remaining string match is inside a doc comment
+explaining pre-B3 history (the same pattern B1/B2 already left in
+`ferrite-ipi`/`ferrite-eval`'s own module docs).
+
+**Tests:** `cargo test -p ferrite-ui` — 29 passed, 0 failed (up from 17
+pre-charter: 12 new, including
+`a_rejected_tool_id_blocks_the_action_before_it_reaches_the_engine`,
+`a_rejected_origin_blocks_a_navigate_before_it_reaches_the_engine`,
+`agent_step_ready_with_finish_completes_the_task`,
+`agent_step_ready_with_a_model_error_fails_the_task`,
+`repeated_identical_actions_stop_the_live_loop_before_a_third_execution`,
+`step_budget_exhausted_stops_the_loop_instead_of_spawning_another_step`,
+`stop_agent_bumps_run_id_and_clears_the_live_loop`,
+`a_stale_run_id_is_ignored_by_live_run_ready`/`..._by_agent_step_ready`,
+`no_automated_test_calls_try_real_model_provider_outside_launch`; 3 old
+`FilteredToolExecutor` tests replaced 1:1 by their `AgentAction`-vocabulary
+equivalents). `cargo test -p ferrite-engine-servo` — 6 passed (2 new:
+`without_the_engine_servo_feature_borrowed_engine_reports_unsupported_actions_not_panics`
+plus the 4 pre-existing `unwrap_js_string_result`/`js_string_literal`
+tests). `cargo test -p ferrite-agent` — 7 passed (down from 15: the 8
+deleted-vocabulary tests are gone with the code they tested;
+`browser_loop`'s own 7 tests, including the `<E: BrowserEngine>` generic
+change, all still pass unchanged). `cargo test --workspace` — every test
+binary green, 0 failures (full per-crate counts in this entry's commit
+messages). `cargo build --workspace`, `cargo fmt --all --check`, `cargo
+clippy --workspace --all-targets -- -D warnings`, `cargo deny check` — all
+clean (`cargo deny`'s only output is the same pre-existing Servo-git-source
+`unmatched-source` warning every agent since A3 has logged).
+
+**App launch, confirmed observed this session:** `cargo run -p ferrite-shell
+-- ui` (default features, no real Servo) starts, prints
+`[ferrite-ui] no ModelProvider configured/reachable (FERRITE_MODEL_SMALL/
+FERRITE_MODEL_MAIN unset, or no Ollama/Gemini credential found) — ...` (this
+sandbox's shell has no `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN` exported,
+confirmed via `env | grep FERRITE_MODEL` — empty) and
+`[ferrite-ui] Servo unavailable: ferrite-servo compiled without the
+'servo' feature` (expected — default build), then enters the real winit
+event loop and keeps running (`timeout 20 ... ; echo "EXIT: $?"` → `EXIT:
+124`, i.e. killed by the timeout while still alive, not a crash — no panic,
+no non-zero-from-the-process exit). `cargo run -p ferrite-shell --features
+ferrite-servo/servo -- ui` (the real-Servo path) [FILLED IN BELOW ONCE THE
+BUILD IN PROGRESS AT THE TIME OF WRITING COMPLETES].
+
+**Honest remainder — what was not verified, and exactly why:**
+- **The full pipeline was not exercised interactively via a real click.**
+  This sandbox has no attached display for a real winit window to be
+  clicked through, and this agent cannot drive a GUI. What *was* checked:
+  every state-machine transition the click would trigger is unit-tested
+  directly against `update()` (the `AgentStepReady`/`LiveRunReady`/
+  `ConsentSubmitted`/`StopAgent` tests above), and the app is confirmed to
+  launch and stay alive rather than crash.
+- **No real model round trip was exercised, live, through the actual app.**
+  `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN` are not exported in this
+  session's shell even though a `"ferrite"`-service OS-keyring credential
+  exists from an earlier session (`security find-generic-password -s
+  ferrite` finds an entry) — `ModelConfig::from_env()` requires both env
+  vars with no default (§10.2), so `try_real_model_provider()` correctly
+  returns `None` here and the app falls back to the mock, exactly as
+  designed. A human with those two env vars exported (matching B2's own
+  `docs/EVALUATION.md` §2.6 run, `gemma4:31b` on both tiers) could exercise
+  this for real; not attempted further this session because it needs
+  either those vars set in this shell (a real, deliberate environment
+  change to a live-credential-bearing sandbox) or a human with keyboard/
+  mouse access to actually submit a task.
+
+**Known issues discovered, not fixed:** none new beyond what's already
+tracked. T-230 (dry-run content-scripting coverage of newer `BrowserEngine`
+actions) untouched, as before. `ServoEngine`'s own owned-session standalone
+defect (T-220's literal original bug) is unchanged — see that row.
+
+**Explicitly not done, per the charter's own instruction:** did not attempt
+T-204; did not merge to `main`.

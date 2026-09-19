@@ -3072,6 +3072,54 @@ mod tests {
         DryRunRecord::new(task.session_id, task.task_id)
     }
 
+    // ── R7: no automated test call reaches a live ModelProvider ──────────
+
+    /// Mirrors `ferrite-eval::harness::no_automated_test_calls_try_real_provider`
+    /// (same technique, scoped to this crate's one source file): scans this
+    /// module's own source for every non-comment, non-definition call site
+    /// of `try_real_model_provider(` and fails if more than the one real
+    /// caller (`launch()`) exists. `FerriteBrowser::default()` itself never
+    /// names the function at all (it constructs `MockProvider` inline —
+    /// see that impl), so this test's job is only to catch a future edit
+    /// that accidentally adds a second call site somewhere a test could
+    /// reach.
+    #[test]
+    fn no_automated_test_calls_try_real_model_provider_outside_launch() {
+        const NEEDLE: &str = "try_real_model_provider(";
+        let src = include_str!("lib.rs");
+        let mut real_call_sites = 0;
+        for (i, line) in src.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            let mut search_from = 0;
+            while let Some(rel) = line[search_from..].find(NEEDLE) {
+                let idx = search_from + rel;
+                let preceded_by_ident_char = line[..idx]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let is_definition = line[..idx].trim_end().ends_with("fn");
+                let in_string_literal = line[..idx].matches('"').count() % 2 == 1;
+                if !preceded_by_ident_char && !is_definition && !in_string_literal {
+                    real_call_sites += 1;
+                    assert!(
+                        line.contains("try_real_model_provider()"),
+                        "line {}: unexpected call shape: {line}",
+                        i + 1
+                    );
+                }
+                search_from = idx + NEEDLE.len();
+            }
+        }
+        assert_eq!(
+            real_call_sites, 1,
+            "expected exactly one real call site (launch()) — found {real_call_sites}; a new \
+             one would risk a live OS-keyring lookup reaching cargo test (R7)"
+        );
+    }
+
     /// A fresh `LiveAgentLoop` with the default budget and no consent
     /// rejections — the shape `start_live_loop` builds for a
     /// bypassed/clean-dry-run task.
