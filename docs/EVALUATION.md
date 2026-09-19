@@ -355,3 +355,251 @@ consolidated limitations section alongside its own findings (irreducible
 blind spot, pattern ceiling, consent-policy upper bound, single-machine
 eval — per its own charter) rather than duplicating this list; this
 document is the source for the eval-specific ones.
+
+---
+
+## 6. Consolidated limitations — final pass (A13, `docs/TO-DO.md` T-113)
+
+This section is the definitive limitations account for v0.1.0. It absorbs
+§5 above rather than duplicating it — where a §5 finding still holds
+unchanged, it is cross-referenced, not re-derived. Every number below was
+re-verified this session against the real corpus files and source, not
+copied forward from an earlier agent's claim (see the grep/count commands
+cited inline).
+
+1. **Irreducible blind spot.** Same-origin/same-primitive, data-only
+   attacks (`GroundTruth::WithinFingerprintDataOnly`) are undetectable by
+   the fingerprint/comparator layer **by construction** — there is no
+   deviation from the predicted fingerprint for the loop to notice, because
+   the attack never leaves the fingerprint's admitted surface. Measured
+   share of the attack corpus: **R = 1/22 = 4.5%** [95% CI 0.8%–21.8%]
+   (re-verified: `grep -l 'WithinFingerprintDataOnly' crates/ferrite-eval/tests/**/*.json`
+   matches exactly one file,
+   `crates/ferrite-eval/tests/corpus/c24_tool_json_scope_escalation_category5.json`).
+   This is a structural floor on ASR, not a defect — reported as such
+   everywhere in this document, never smoothed into the headline number.
+
+2. **Pattern ceiling.** The sanitizer's detection layer is 5 general
+   literal-phrase patterns (`instruction_override`,
+   `instruction_override_disregard`, `system_prompt_reference`,
+   `data_exfiltration_language`, `new_instructions`) plus 5 script-specific
+   patterns (`js_fetch_call`, `js_websocket_construction`,
+   `js_cookie_access`, `js_storage_access`, `js_send_beacon`) — re-counted
+   this session directly against `crates/ferrite-ipi/src/sanitizer/patterns.rs`
+   (`GENERAL_PATTERNS`/`SCRIPT_PATTERNS`), not assumed from the directive's
+   parameter table. Patterns match literal phrasing; they miss paraphrase,
+   synonym substitution, and any non-English injection by design — this is
+   stated in the sanitizer's own module docs, not just this document. **The
+   architecture (predict → dry-run → compare → consent), not sanitizer
+   recall, carries the actual security argument** — `LoopOnly` mode (loop
+   active, sanitizer bypassed) independently reaches CR = 94.7% in this
+   corpus (§2.1), which is the evidence for that claim, not an assertion.
+
+3. **Consent-policy upper bound.** `RejectFlagged` — the policy behind
+   every headline number in this document — models a maximally attentive
+   human who correctly rejects every flagged item. It is reported
+   everywhere as an **upper bound on human vigilance**, never as an
+   estimate of real user behavior (T-010's own finding, §2.5). The sweep
+   against `ApproveAll` (lower bound, `On`-mode ASR = 45.5%) and
+   `RandomP(0.5)` (middle estimate, `On`-mode ASR = 27.3%) shows how wide
+   the real range plausibly is; no human-factors study narrows it further,
+   and none was in scope.
+
+4. **Single-machine eval.** Every number in this document comes from one
+   run, on one machine (macOS, Apple Silicon, `rustc 1.98.1` —
+   `docs/BUILD_BUDGET.md`'s recorded environment), authored and run by one
+   agent session per corpus-authoring pass. There is no cross-hardware, no
+   cross-platform (Windows/Linux CI never ran the eval, only `check`/
+   `test`), and no cross-operator replication of these specific numbers.
+   The harness is deterministic and reproducible *on this machine*
+   (`just eval` twice produced byte-identical 29-case/96-execution counts,
+   per A12's entry) — reproducibility and independent replication are not
+   the same claim, and only the former is established here.
+
+5. **Corpus-size shortfall (T-227).** Re-counted this session directly
+   against the corpus directories (`grep`/`ls`, not trusted from prior
+   claims): **29 cases** against the §13.3 target of **~360** — Tier 1
+   (WebContent) 17/120 (14.2%), Tier 2 (ToolOutput) 9/80 (11.25%), Tier 3
+   (AgentDojo) 3/60 (5.0%), Benign 7/100 (7.0%); 22 attack / 7 benign
+   overall, confirmed via `grep -c '"corpus": "Attack"'`/`"Benign"` across
+   all three corpus directories. Confidence intervals throughout this
+   document are correspondingly wide: the pooled attack-mode intervals
+   (n=19–22) run roughly ±15 points; per-tier intervals (n=3–12) run
+   ±20–35 points; Tier 3's n=3 is flagged as supporting no per-category
+   claim at all (§2.2). **0% double-authored** against the 10% requirement
+   — every case is `Author::SelfAuthored` or `Author::AgentDojo` (a
+   citation-derived provenance, not a second independent human) — so
+   Cohen's κ is not computable and was not fabricated from a fake pair.
+
+6. **Worst-case-agent methodology.** `ferrite_eval::worst_case_agent::WorstCaseAgent`
+   re-enacts each attack case's authored deviation unconditionally — it
+   does not read the (possibly sanitizer-stripped) content and decide
+   whether to comply, the way a real model-driven agent would. This is a
+   **deliberate scope choice**, stated in the module's own doc comment, not
+   an oversight: Ferrite's claim is that the architecture contains a
+   *realized* deviation, not that a given model resists a given phrasing of
+   an injected instruction. Concretely, this means `ASR_Off = 100%` in this
+   corpus measures "if the agent complied, would anything stop it"
+   (by construction, nothing does in `Off`), not "does a real model
+   actually comply" — a live-model run would very likely show a lower,
+   more realistic `Off`-mode ASR, and would be a different, complementary
+   experiment, not a re-run of this one.
+
+7. **The live-app gap (T-224) — significant, not a footnote.** The actual
+   running `ferrite-ui`/`ferrite-shell` application does not use the
+   `ferrite-model`/`ferrite-engine`/`browser_loop` stack this rebuild built
+   and tested. Verified this session by reading the call path directly:
+   `ferrite-ui`'s agent-task handler still calls
+   `ferrite_agent::gemini::GeminiAgent::read_api_key()` (a `gemini_key.txt`
+   file or a bare `FERRITE_GEMINI_API_KEY` env var — code that predates
+   `ferrite-model` and does not know the OS keyring exists), and never
+   constructs a `ferrite_model::ModelProvider`, never calls
+   `ferrite_engine::BrowserEngine`, and never drives
+   `ferrite_agent::browser_loop::run_agent_loop`. The IPI defense loop
+   itself (`ferrite-ipi`: fingerprint, sanitizer, dry-run, comparator,
+   consent) **is** real, tested, and (per `docs/PROGRESS.md`'s A7 entry)
+   wired into `ferrite-ui`'s own agent-task path — what is *not* wired in
+   is the new model-provider and engine abstraction this rebuild's later
+   phases (A3, A9) built alongside it. This is a real, material gap
+   between "what was built and proven in isolation" and "what actually
+   runs when you launch the app," not a minor integration detail.
+
+8. **`ServoEngine` real-navigation gap (T-220).** The new,
+   engine-agnostic path's Servo backend (`ferrite-engine-servo`) does not
+   complete a real page load in this environment: `ServoEngine::new`
+   succeeds against a real, successfully-built Servo, but `navigate()` to a
+   loopback fixture server never observes a TCP connection attempt within
+   the drive-until-loaded window (leading hypothesis: `HeadlessServoSession`
+   needs a genuine winit event loop driving it, not bare
+   `spin_event_loop()` calls — not confirmed, not fixed). **This is
+   isolated to the new wrapper.** `docs/TO-DO.md` T-220 carries a
+   2026-09-18 addendum, confirmed live by the coordinator: the live
+   `ferrite-ui`/`ferrite-shell` app's own, separate Servo integration
+   (`ferrite-servo::session`/`shell.rs`, built with
+   `cargo run -p ferrite-shell --features ferrite-servo/servo`) uses a real
+   winit event loop and was directly observed rendering a real page
+   end-to-end. Real browsing in the actual product is not blocked by
+   T-220; the new `BrowserEngine`-trait path's Servo backend is.
+
+9. **Other open items material to an honest accounting, briefly:**
+   - **T-221** — `ferrite-ipi` depends on `ferrite-agent`, backwards from
+     the target dependency direction (`core ← {model, audit, engine} ← ipi
+     ← agent ← {ui, eval, cli}`). Confirmed still present this session
+     (`crates/ferrite-ipi/Cargo.toml`: `ferrite-agent = { workspace =
+     true }`). Fixing it means relocating `BrowserTool`/`AgentRuntime`/
+     `ToolExecutor` to a crate both sides can depend on — real, cross-crate
+     work, not attempted here (out of a doc-reconciliation charter's
+     remit; `CLAUDE.md`'s dependency-direction invariant now names this
+     exception explicitly rather than silently contradicting it).
+   - **T-222** — `FingerprintDiff`'s `extra_primitives`/`out_of_scope_origins`
+     each record only one half of a `(tool, origin)` pair, so the consent
+     panel can name authorized origins in general but not tie a specific
+     flagged primitive to the specific origin it needed. A real fix means
+     enriching the diff's shape in `ferrite-ipi::comparator`.
+   - **T-223** — iced 0.13's `button` widget has no `Focusable` impl in
+     this pinned version, so the consent panel's Reject button cannot get a
+     literal keyboard-focus-ring default; mitigated with reject-listed-first
+     plus strict completeness-gating (no silent default-approve path
+     regardless of stray-keypress focus).
+   - **T-228** — `WithinFingerprintOriginShift`'s adjudication check credits
+     a catch only via `diff.out_of_scope_origins`; a degenerate (correctly
+     empty, fail-to-empty) fingerprint routes the same deviation into
+     `diff.extra_primitives` instead, where the check never looks.
+     Root-caused (§5 item 5), not fixed — containment itself is not broken
+     (the case is still correctly gated), only this category's specific
+     per-layer attribution claim.
+
+None of the nine items above is hidden elsewhere and stated differently
+here — this section is the single place a reader should go for "what does
+this project's evaluation not show."
+
+---
+
+## 7. `docs/REBUILD_DIRECTIVE.md` §14 — definition of done, scored item by item
+
+Verified fresh this session (T-113), not carried forward from an earlier
+agent's self-report. Evidence is cited per item; **[ ]** means genuinely
+not met, stated plainly rather than rounded up.
+
+- [x] `just check && just test` green on a clean clone, with no network and
+      `OLLAMA_API_KEY` unset, under 5 minutes, without Servo. — Re-run this
+      session from a freshly-recreated branch: `just check` clean (fmt,
+      clippy `--all-targets -D warnings`, `cargo machete`), `just test`
+      green workspace-wide. Exact wall-clock time and command are recorded
+      in this session's `docs/PROGRESS.md` entry.
+- [x] Every model call routes through cache + throttle + budget decorators;
+      a full eval re-run on an unchanged corpus makes zero live calls;
+      `just cache-stats` reports the hit rate. — True of `ferrite-model`'s
+      own conformance suite and decorators (A3, unchanged). **Caveat, not
+      hidden:** the eval harness's fingerprint layer does not call through
+      `ferrite-model` at all in this run (T-224/§4) — it exercises the
+      rules-only fallback, so "zero live calls" holds trivially here, not
+      because the cache proved itself on a live path this session.
+- [ ] `just build-servo` succeeds and the action-conformance suite passes
+      against `ServoEngine` at least once, with cost recorded. — **Partially
+      true, not done.** `just build-servo` succeeded for real (A9: 15m31s,
+      6.4GB, `docs/BUILD_BUDGET.md`). The action-conformance suite did
+      **not** fully pass against real `ServoEngine`: construction succeeds,
+      but `navigate()` never completes a real page load (T-220). Marked
+      unmet rather than rounded up to "passed."
+- [x] Every D1–D14 defect closed, each with a test that would fail if
+      reverted. — All fourteen have a `docs/TO-DO.md` row citing a real SHA
+      and test name (T-001 through T-014, cross-checked against
+      `docs/DECISIONS.md`'s ADR history this session). D3/T-003 in
+      particular took three charters (A5, A6, A12) to close for real —
+      documented as `in-progress` until T-215 landed, not marked done
+      early.
+- [x] Zero dead code, zero `#[allow(dead_code)]` without a comment naming
+      the reason and a `T-###`. — `grep -rn "allow(dead_code)" crates/`
+      returns **zero matches** workspace-wide this session — there is
+      nothing to check the "has a `T-###` comment" condition against
+      because the crate-root `#![deny(dead_code)]` gates
+      (`ferrite-core`/`ferrite-model`) made the allow-and-annotate pattern
+      unnecessary; no reachable-but-uncalled function was found separately.
+- [x] No doc claims anything a test or SHA doesn't back; the doc CI check
+      passes. — `scripts/check_purge.sh` and `scripts/check_no_archive_links.sh`
+      both run clean this session (the former updated to drop its one
+      stale exclusion, see this session's `docs/PROGRESS.md` entry). Every
+      SHA spot-checked this session against `git log -1 --format="%H %s"
+      <sha>` matched its cited description (sample: `e474403`, `a45b2ad`,
+      `6cb4c70`, `6250cb3`, `ec7ece9`, `795977a`, `d9e2c12`, `aaae747`,
+      `6e6926a`).
+- [x] `CLAUDE.md` has no status section; `.rules`, `commands.md`, broker
+      crates and the 9222 forward are gone from the working tree. — Verified
+      fresh: `find . -name ".rules" -o -name "commands.md"` (excluding
+      `.git/`) — no matches; `grep -rn "9222"` outside `docs/archive/` and
+      the rebuild's own record docs — no matches in any live config;
+      `crates/ferrite-capability-broker`/`ferrite-policy`/`ferrite-sandbox`
+      absent from disk and from `Cargo.toml` `members`. `CLAUDE.md` itself
+      re-read this session — no "planned"/"not yet implemented" section,
+      only the dependency-direction invariant was updated (to name T-221's
+      known exception, not to add a status list).
+- [ ] Corpus authored to the §13.3 targets, κ reported; `just eval` emits
+      the full metrics table with Wilson CIs and McNemar results. —
+      **False, stated plainly.** Corpus is 29 cases, not ~360 (item 5
+      above); κ is not computed (0% double-authored). The second half is
+      true in isolation — `just eval` does emit the full metrics table with
+      Wilson CIs and McNemar/Holm-Bonferroni/Cohen's h results — but the
+      item as a whole is not met because the corpus-sizing half is not.
+- [x] `docs/EVALUATION.md` complete: objectives, formulas, sizing
+      derivation, parameter rationale, honest limitations. — All five
+      sections present (§1–§4 plus this §6); this session's §6/§7 are the
+      final consolidation the document's own header called for.
+- [x] `docs/BUILD_BUDGET.md` shows target-dir size and cold-test time at
+      every phase gate. — A1 and A9 entries present with real, cited
+      numbers; no phase after A9 changed the build surface enough to need
+      a new entry (A10–A12 added no new heavy dependency).
+- [x] No commit in `rebuild/*` or `main` mentions Claude, Anthropic, or AI
+      assistance. — Verified fresh this session across full history:
+      `git log --all --oneline | grep -iE "claude|anthropic|ai.assist"` and
+      `git log --all --format="%H %B" | grep -iE "claude|anthropic"` both
+      return only two commits (`f582dda`, `01c3f54`) whose *content*
+      discusses fixing **`CLAUDE.md` the file** — no AI-attribution trailer,
+      byline, or "generated with" string anywhere in the matched text. No
+      breach found.
+
+**Net: 8 of 11 items fully met, 1 partially met (Servo conformance —
+build succeeds, real navigation does not), 2 not met (corpus size/κ). This
+matches, item for item, what `docs/TO-DO.md` T-227 and T-220 already state
+honestly — nothing in this checklist is new information, only the first
+place it is scored against the directive's own checklist explicitly.**

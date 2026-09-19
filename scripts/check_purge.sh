@@ -16,9 +16,15 @@ PATTERN='capability.broker|regorus|extism|9222|ferrite-(types|network|a11y|cef|p
 # Exclusions, each with a reason — this is a short, explicit allowlist, not
 # a way to make the check pass by hiding things:
 #   docs/archive/**          — historical, banner-marked, whole point is to name dead things
-#   docs/REBUILD_DIRECTIVE.md, docs/AUDIT.md, docs/DECISIONS.md, docs/PROGRESS.md
+#   docs/REBUILD_DIRECTIVE.md, docs/AUDIT.md, docs/DECISIONS.md, docs/PROGRESS.md,
+#   docs/TO-DO.md, docs/EVALUATION.md, docs/handoffs/**
 #                             — the rebuild's own record; each explicitly discusses what
-#                               was removed and why, by name, as its stated job
+#                               was removed (or, for EVALUATION.md's §14 checklist and
+#                               TO-DO.md's summary, verifies it's gone) and why, by name,
+#                               as its stated job — added docs/EVALUATION.md at A13 (T-113)
+#                               when its new §14 checklist named "9222"/the broker crates
+#                               to confirm their absence, the same pattern this exclusion
+#                               list already allowed for the other rebuild-record docs.
 #   CLAUDE.md                — the "Never reference, import, or revive: ..." list must
 #                               name the forbidden crates to forbid them
 #   .devcontainer/Dockerfile — its comments explain *why* a target/COPY line is absent;
@@ -36,7 +42,8 @@ PATTERN='capability.broker|regorus|extism|9222|ferrite-(types|network|a11y|cef|p
 # comment cited, so the comment was reworded instead of staying excluded.
 HITS=$(git grep -ilE "$PATTERN" -- \
   ':!docs/archive/**' \
-  ':!docs/REBUILD_DIRECTIVE.md' ':!docs/AUDIT.md' ':!docs/DECISIONS.md' ':!docs/PROGRESS.md' ':!docs/TO-DO.md' ':!docs/handoffs/**' \
+  ':!docs/REBUILD_DIRECTIVE.md' ':!docs/AUDIT.md' ':!docs/DECISIONS.md' ':!docs/PROGRESS.md' \
+  ':!docs/TO-DO.md' ':!docs/EVALUATION.md' ':!docs/handoffs/**' \
   ':!CLAUDE.md' ':!.devcontainer/Dockerfile' ':!Cargo.lock' \
   ':!scripts/check_purge.sh' \
   || true)
