@@ -5,9 +5,10 @@ is an *architectural* defense against indirect prompt injection: predict the
 agent's expected tool/origin fingerprint, dry-run its plan against synthetic
 data, compare actual behavior to the prediction, and consent-gate any
 deviation before anything real executes. A hash-chained audit log makes the
-containment decision verifiable after the fact. The project is mid-rebuild
-per `docs/REBUILD_DIRECTIVE.md` — read that file for the phase plan and
-`docs/TO-DO.md` for the live task ledger.
+containment decision verifiable after the fact. The A0–A13 rebuild plan in
+`docs/REBUILD_DIRECTIVE.md` is complete — read `docs/TO-DO.md` for the live
+task ledger (what's still open) and `README.md`'s Status section for what
+"complete" does and doesn't mean before assuming anything works end to end.
 
 **This file must never contain a "planned" or "not yet implemented" list.
 Status lives only in `docs/PROGRESS.md` and `docs/TO-DO.md`.** The failure
