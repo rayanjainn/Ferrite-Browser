@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::comparator::FingerprintDiff;
 use crate::dry_run::ToolEvent;
-use crate::tool_decision::{DefenseMode, ToolFingerprint, ToolId};
+use crate::tool_decision::{DefenseMode, ToolId};
 use ferrite_core::scope::OriginScope;
 
 // ---------------------------------------------------------------------------
@@ -359,7 +359,7 @@ pub struct ExecutionRecord {
     pub run_label: RunLabel,
     pub model: Model,
     pub defense_mode: DefenseMode,
-    pub expected_fingerprint: Option<ToolFingerprint>,
+    pub expected_fingerprint: Option<crate::fingerprint::Fingerprint>,
     pub expected_realization: Option<ExpectedRealization>,
     pub actual_events: Vec<ToolEvent>,
     pub computed_diff: FingerprintDiff,
@@ -411,7 +411,7 @@ pub enum DatasetError {
 /// strategy: a handful of top-level scalars/keys are kept as native columns so
 /// the M1-M6 metric queries can filter/aggregate with plain SQL, while the
 /// `data` column holds the full serde_json of the struct (including every
-/// nested type — GroundTruth, OriginScope, FingerprintDiff, ToolFingerprint,
+/// nested type — GroundTruth, OriginScope, FingerprintDiff, Fingerprint,
 /// Vec<ToolEvent>, Timing, ExpectedRealization). Native columns are a
 /// queryable projection only; `data` is the source of truth on read.
 pub struct DatasetStore {
@@ -573,7 +573,8 @@ impl DatasetStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_decision::ToolFingerprint;
+    use ferrite_core::Primitive;
+    use ferrite_model::MockProvider;
 
     fn exact_scope(url: &str) -> OriginScope {
         OriginScope::exact([ferrite_core::Origin::parse(url).expect("valid test origin")])
@@ -637,16 +638,30 @@ mod tests {
         }
     }
 
-    fn sample_execution_record(case_id: Uuid) -> ExecutionRecord {
+    /// `async` because a real [`crate::fingerprint::Fingerprint`] (B1's
+    /// replacement for the deleted `ToolFingerprint`) is only constructible
+    /// through [`crate::fingerprint::generate_fingerprint`] — its
+    /// disjointness invariant is a property of that one non-empty
+    /// constructor, not something a test should be able to sidestep with a
+    /// hand-built literal (`Fingerprint`'s fields are private for exactly
+    /// this reason). `MockProvider` with no scripted response mirrors R7: no
+    /// live call, `may_use` fails to empty.
+    async fn sample_execution_record(case_id: Uuid) -> ExecutionRecord {
         let mut diff = FingerprintDiff::default();
         diff.extra_primitives.insert(ToolId::new("js.execute"));
 
-        let fingerprint = ToolFingerprint {
-            session_id: Uuid::new_v4(),
-            task_id: Uuid::new_v4(),
-            must_use: ["web.read"].iter().map(|s| ToolId::new(s)).collect(),
-            may_use: HashSet::new(),
-        };
+        let fingerprint = crate::fingerprint::generate_fingerprint(
+            &MockProvider::new(),
+            "test-tag",
+            "read the article",
+        )
+        .await;
+        let expected = crate::comparator::ExpectedFingerprint::from_fingerprint(&fingerprint, None);
+        let expected_primitives: HashSet<ToolId> = expected
+            .lowered()
+            .into_iter()
+            .map(|(sp, _, _)| ToolId::new(ferrite_core::Primitive::from(sp).as_str()))
+            .collect();
 
         ExecutionRecord {
             exec_id: Uuid::new_v4(),
@@ -655,13 +670,13 @@ mod tests {
             run_label: RunLabel::R2,
             model: Model::Gemini,
             defense_mode: DefenseMode::On,
-            expected_fingerprint: Some(fingerprint.clone()),
+            expected_fingerprint: Some(fingerprint),
             expected_realization: Some(ExpectedRealization {
-                expected_primitives: crate::comparator::lower_fingerprint(&fingerprint),
+                expected_primitives,
                 origin_scope: exact_scope("https://news.example"),
             }),
             actual_events: vec![ToolEvent {
-                tool: ToolId::new("js.execute"),
+                primitive: Primitive::JsExecute,
                 origin: Some("https://news.example".to_string()),
             }],
             computed_diff: diff,
@@ -758,17 +773,17 @@ mod tests {
         assert_eq!(back.ground_truth, GroundTruth::None);
     }
 
-    #[test]
-    fn execution_record_round_trips_through_serde_json() {
-        let exec = sample_execution_record(Uuid::new_v4());
+    #[tokio::test]
+    async fn execution_record_round_trips_through_serde_json() {
+        let exec = sample_execution_record(Uuid::new_v4()).await;
         let json = serde_json::to_string(&exec).unwrap();
         let back: ExecutionRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(exec, back);
     }
 
-    #[test]
-    fn unscopable_primitive_invoked_detects_js_execute() {
-        let exec = sample_execution_record(Uuid::new_v4());
+    #[tokio::test]
+    async fn unscopable_primitive_invoked_detects_js_execute() {
+        let exec = sample_execution_record(Uuid::new_v4()).await;
         assert!(unscopable_primitive_invoked(&exec));
 
         let mut clean = exec.clone();
@@ -776,9 +791,9 @@ mod tests {
         assert!(!unscopable_primitive_invoked(&clean));
     }
 
-    #[test]
-    fn production_residual_true_only_when_missed_and_not_gated() {
-        let mut exec = sample_execution_record(Uuid::new_v4());
+    #[tokio::test]
+    async fn production_residual_true_only_when_missed_and_not_gated() {
+        let mut exec = sample_execution_record(Uuid::new_v4()).await;
         exec.fingerprint_caught = LayerOutcome::Missed;
         exec.consent_gated = ConsentOutcome::NotGated;
         assert!(production_residual(&exec));
@@ -791,8 +806,8 @@ mod tests {
         assert!(!production_residual(&exec));
     }
 
-    #[test]
-    fn dataset_store_round_trips_case_and_execution() {
+    #[tokio::test]
+    async fn dataset_store_round_trips_case_and_execution() {
         let path = std::env::temp_dir().join(format!("ferrite-dataset-{}.db", Uuid::new_v4()));
         let store = DatasetStore::open(&path).unwrap();
 
@@ -801,7 +816,7 @@ mod tests {
         let loaded_case = store.get_case(case.case_id).unwrap();
         assert_eq!(case, loaded_case);
 
-        let exec = sample_execution_record(case.case_id);
+        let exec = sample_execution_record(case.case_id).await;
         store.insert_execution(&exec).unwrap();
         let execs = store.executions_for_case(case.case_id).unwrap();
         assert_eq!(execs.len(), 1);
@@ -823,8 +838,8 @@ mod tests {
     /// here: a store opened against a pre-existing file (as every real
     /// corpus run does, reopening the same `.db`) never loses data or fails
     /// to open because the schema "changed".
-    #[test]
-    fn dataset_store_reopen_against_an_existing_db_preserves_rows() {
+    #[tokio::test]
+    async fn dataset_store_reopen_against_an_existing_db_preserves_rows() {
         let path =
             std::env::temp_dir().join(format!("ferrite-dataset-migrate-{}.db", Uuid::new_v4()));
 
@@ -832,7 +847,7 @@ mod tests {
             let store = DatasetStore::open(&path).unwrap();
             let case = sample_case_definition();
             store.insert_case(&case).unwrap();
-            let exec = sample_execution_record(case.case_id);
+            let exec = sample_execution_record(case.case_id).await;
             store.insert_execution(&exec).unwrap();
         } // store (and its Connection) dropped — simulates a fresh process
 
@@ -854,14 +869,14 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    #[test]
-    fn export_jsonl_writes_one_line_per_row() {
+    #[tokio::test]
+    async fn export_jsonl_writes_one_line_per_row() {
         let db_path = std::env::temp_dir().join(format!("ferrite-dataset-{}.db", Uuid::new_v4()));
         let store = DatasetStore::open(&db_path).unwrap();
 
         let case = sample_case_definition();
         store.insert_case(&case).unwrap();
-        let exec = sample_execution_record(case.case_id);
+        let exec = sample_execution_record(case.case_id).await;
         store.insert_execution(&exec).unwrap();
 
         let cases_path =

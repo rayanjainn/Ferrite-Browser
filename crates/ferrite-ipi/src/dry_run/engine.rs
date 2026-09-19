@@ -1,0 +1,647 @@
+//! [`DryRunEngine`]: the dry run's synthetic [`ferrite_engine::BrowserEngine`]
+//! implementation — the core deliverable of `docs/TO-DO.md` T-221 (B1).
+//!
+//! # The architectural decision, in full (why `BrowserEngine`, why a new
+//! type rather than `MockEngine`, and why not `browser_loop`)
+//!
+//! Before this charter, the dry run was a bespoke system:
+//! `RecordingExecutor` implemented `ferrite_agent::ToolExecutor`, driven by
+//! whatever `ferrite_agent::AgentRuntime` the caller supplied, dispatching on
+//! `ferrite_agent::BrowserTool` — a vocabulary independent of, and
+//! occasionally inconsistent with (T-216), `ferrite_core::Primitive`. That
+//! coupling to `ferrite-agent` is exactly `docs/TO-DO.md` T-221: `ferrite-ipi`
+//! depended on `ferrite-agent`, backwards from the target dependency
+//! direction (`core ← {model, audit, engine} ← ipi ← agent ← {ui, eval,
+//! cli}`, `CLAUDE.md`).
+//!
+//! `ferrite_engine::BrowserEngine` (A9) already solves almost exactly the
+//! problem the dry run has — a full agentic-browser action surface, every
+//! method tagged with a real `ferrite_core::Primitive`
+//! ([`ferrite_engine::Call::primitive`]) and returning `(T, Origin)` — but
+//! for a different original purpose (the *production* agent loop's
+//! engine-agnostic backing). Two shapes were weighed for how the dry run
+//! should relate to it:
+//!
+//! **(A) Unify under `ferrite_agent::browser_loop::run_agent_loop`.**
+//! `run_agent_loop` is already provider-agnostic and engine-agnostic
+//! (`&dyn ModelProvider`, `&mut dyn BrowserEngine`) — feeding it a
+//! synthetic, scripted `BrowserEngine` would functionally reproduce "drive
+//! the agent's real plan against fake data," and would be the
+//! architecturally cleanest end state: one action vocabulary, one agent
+//! loop, for both dry-run and live execution.
+//!
+//! This was **rejected for this charter**, for a structural reason, not a
+//! taste preference: `run_agent_loop` — and its `AgentAction` vocabulary,
+//! system prompt, and JSON-action-per-turn protocol — lives in
+//! `crates/ferrite-agent/src/browser_loop.rs`. Depending on it from
+//! `ferrite-ipi`, even only on that one function, is still a `ferrite-ipi →
+//! ferrite-agent` edge — exactly the backwards direction T-221 names,
+//! regardless of which part of `ferrite-agent` is depended on. Closing T-221
+//! this way would require relocating `run_agent_loop` (or the whole
+//! `browser_loop` module) out of `ferrite-agent` into a crate both `ipi` and
+//! `agent` can depend on — real, cross-crate surgery on a module this
+//! charter's file list does not include, and squarely the kind of change the
+//! charter asks to be described and handed off rather than attempted under a
+//! different review scope. It is also unnecessary to get T-221's actual
+//! benefit: the dry run does not need the *model* to decide the plan the way
+//! `run_agent_loop` does (a live agent, or `ferrite-eval`'s
+//! `WorstCaseAgent`, already decides the plan upstream) — it needs a place
+//! to *execute* that plan against synthetic data, which is a narrower
+//! requirement.
+//!
+//! **(B) `ferrite-ipi::dry_run` grows its own `BrowserEngine`-implementing
+//! type, with its own (small) orchestration loop, separate from
+//! `browser_loop`.** This is what this module does. `DryRunEngine` below
+//! implements `ferrite_engine::BrowserEngine` directly, reusing
+//! [`content::DryRunContent`]'s per-origin ordered reply-queue *pattern*
+//! (A6, preserved verbatim — see that module's docs) without depending on
+//! `ferrite_engine::MockEngine` (which exists to back *tests*, not to be a
+//! production dependency of this crate's own synthetic-execution path — see
+//! `ferrite_engine`'s own module docs on why `MockEngine` is unconditionally
+//! built rather than gated, which does not make it the right type for this
+//! crate to build on rather than pattern-match).
+//!
+//! `DryRunOrchestrator::run` is generic over a small local trait,
+//! [`super::orchestrator::DryRunDriver`], rather than
+//! `ferrite_agent::AgentRuntime` — "whatever decides the plan" now drives a
+//! `&mut DryRunEngine` directly (calling `navigate`/`dom_snapshot`/`click`/…
+//! the same way a live caller would drive any other `BrowserEngine`), instead
+//! of constructing `ferrite_agent::AgentToolCall`s for a `ToolExecutor` to
+//! interpret. A caller that still has an existing `ferrite_agent::AgentRuntime`
+//! (a live `GeminiAgent`, or `ferrite-eval`'s `WorstCaseAgent`) bridges it
+//! with the small, purely additive `ferrite_agent::engine_bridge::EngineToolExecutor`
+//! adapter this charter added to `ferrite-agent` (which already depends on
+//! `ferrite_engine` for `browser_loop` — no new dependency edge there) —
+//! see `docs/handoffs/b01.md` for exactly how `ferrite-eval`/`ferrite-ui`
+//! use it.
+//!
+//! **The real trade-off of (B) — stated plainly, not hidden.** A seam
+//! remains between "how dry-runs execute a plan" (this module) and "how the
+//! live agent loop executes a plan" (`browser_loop::run_agent_loop`,
+//! untouched). They now share the *action* vocabulary
+//! (`ferrite_engine::BrowserEngine`/`Primitive`) — the actual goal of T-221
+//! — but not one call-site's worth of orchestration code. Given this
+//! charter's mandate ("this is the highest-risk charter... a partial,
+//! honestly-reported result is far better than a broken merge") and the
+//! explicit instruction not to preempt B2's `ferrite-eval` migration or
+//! touch `ferrite-ui`/`ferrite-shell`, (B) is the version of "no old stuff"
+//! this session can responsibly deliver: it removes the *backwards
+//! dependency* (T-221's literal defect) and the *vocabulary mismatch*
+//! (T-216's literal defect) without forcing a same-session rewrite of every
+//! downstream consumer's own orchestration loop. Fully collapsing the seam
+//! — adopting `browser_loop::run_agent_loop` everywhere, live and dry-run
+//! alike — is a legitimate future direction, but it is B2/B3's call once
+//! `ferrite-eval`/`ferrite-ui` are themselves migrated onto the new
+//! vocabulary, not something to force from `ferrite-ipi`'s side alone.
+//!
+//! # Content scripting: two independent lookup keys, on purpose
+//!
+//! [`content::DryRunContent`]'s public shape (`read_page`, `extract_data`,
+//! `by_tool_id`) is **unchanged** by this module — `ferrite-eval::corpus`'s
+//! JSON-corpus loader (`crates/ferrite-eval/src/corpus.rs::lower_content`)
+//! constructs it directly by field/method name, and every existing corpus
+//! fixture's `by_tool` JSON keys (`"navigate"`, `"dom.write"`,
+//! `"clipboard.read"`, `"download.file"`, …) are the pre-existing
+//! `ferrite_agent::BrowserTool::tool_id()` strings. Retyping that keying
+//! scheme to `ferrite_core::Primitive` would either break every existing
+//! corpus fixture or force `ferrite-eval::corpus`'s own migration onto this
+//! charter — out of scope (B2's job).
+//!
+//! So there are deliberately **two** independent identifiers for one
+//! `BrowserEngine` call, serving two different, non-overlapping purposes:
+//! - [`ToolEvent::primitive`](super::record::ToolEvent) — the real,
+//!   direct `ferrite_core::Primitive` `compare()` reasons about. Always
+//!   correct, always derived from [`ferrite_engine::Call::primitive`], never
+//!   a lookup into anything a case author wrote.
+//! - [`content_key_for_call`] (this module, private) — which
+//!   `content.by_tool_id` bucket a case author's *content* lands in, kept
+//!   deliberately equal to the pre-existing `BrowserTool::tool_id()` strings
+//!   purely so existing/future corpus JSON scripting keeps working
+//!   unmodified. This key has **no** security role: get it "wrong" (or miss
+//!   a new `BrowserEngine` action `BrowserTool` never had, e.g. `scroll`,
+//!   `wait_for`, `tab.open`) and the dry run simply falls through to a
+//!   generic synthetic stub reply for that call, exactly as an unscripted
+//!   call already does today. This is categorically different from the
+//!   T-216 bridge it replaces, which fed a security-relevant classification
+//!   (`compare()`'s primitive matching) — a wrong answer there could hide a
+//!   real deviation. A wrong answer here can only under-script a synthetic
+//!   reply.
+
+use std::collections::HashMap;
+
+use ferrite_core::{Origin, Primitive};
+use ferrite_engine::{
+    BrowserEngine, Cookie, DomNode, DomSnapshot, ElementHandle, EngineError, Frame, TabId,
+    WaitCondition,
+};
+
+use crate::sanitizer::{self, Finding};
+use crate::tool_decision::ToolId;
+use crate::twin::SyntheticTwin;
+
+use super::content::{DryRunContent, DryRunReply};
+use super::record::{DryRunRecord, FindingCarrier, RecordedFinding};
+
+/// The `content.by_tool_id` scripting key for one `BrowserEngine` call,
+/// matching the pre-existing `ferrite_agent::BrowserTool::tool_id()`/
+/// `ferrite-eval::corpus::KNOWN_TOOL_IDS` vocabulary — see the [module
+/// docs](self) for why this is deliberately independent of, and lower-stakes
+/// than, the `Primitive` recorded on the event. `None` for actions
+/// `BrowserTool` never had (e.g. `scroll`, `wait_for`, `tab.*`,
+/// `cookies_read`, `storage_read`, `query`) — those simply always serve the
+/// generic synthetic stub, which is honest: no corpus fixture predating this
+/// charter could have scripted them anyway.
+fn content_key_for_call(call: &ferrite_engine::Call) -> Option<&'static str> {
+    use ferrite_engine::Call;
+    match call {
+        Call::Navigate(_) => Some("navigate"),
+        Call::Click(_) | Call::TypeText(..) | Call::SelectOption(..) => Some("dom.write"),
+        Call::FillForm(_) => Some("form.fill"),
+        Call::ClipboardRead => Some("clipboard.read"),
+        Call::ClipboardWrite(_) => Some("clipboard.write"),
+        Call::JsExecute(_) => Some("js.execute"),
+        Call::Download(_) => Some("download.file"),
+        _ => None,
+    }
+}
+
+/// The dry run's synthetic [`BrowserEngine`]. Never touches the real
+/// network or a real browser engine — containment is by construction, the
+/// same argument `docs/TO-DO.md` T-007/D7 established for the pre-B1
+/// `RecordingExecutor` (see `this_modules_source_names_no_network_capable_dependency`
+/// below, ported verbatim).
+///
+/// Plain owned fields, no `Arc<Mutex<_>>`: every `BrowserEngine` method takes
+/// `&mut self`, so exclusive access is already guaranteed by the borrow
+/// checker — the previous `Arc<Mutex<DryRunRecord>>`/`Mutex<DryRunContent>`
+/// shape existed only because `ferrite_agent::ToolExecutor::execute` was an
+/// async `&self` method that could, in principle, be called concurrently.
+pub struct DryRunEngine {
+    record: DryRunRecord,
+    twin: SyntheticTwin,
+    /// The active tab's current URL. Seeded from the task's `context_url`
+    /// when known; `"about:blank"` otherwise, matching a real browser's
+    /// fresh-tab state (and, deliberately unlike `MockEngine`'s synthetic
+    /// `MOCK_HOME`, genuinely opaque until the first navigation — see
+    /// `ferrite_engine`'s module docs on `EngineError::OpaqueOrigin`).
+    current_url: String,
+    content: DryRunContent,
+    tabs: HashMap<TabId, String>,
+    next_tab: u64,
+    clipboard: String,
+    detect_enabled: bool,
+    strip_enabled: bool,
+}
+
+impl DryRunEngine {
+    pub(crate) fn new(
+        session_id: uuid::Uuid,
+        task_id: uuid::Uuid,
+        twin: SyntheticTwin,
+        context_url: Option<&str>,
+        content: DryRunContent,
+        detect_enabled: bool,
+        strip_enabled: bool,
+    ) -> Self {
+        let current_url = context_url
+            .map(str::to_string)
+            .unwrap_or_else(|| "about:blank".to_string());
+        let mut tabs = HashMap::new();
+        tabs.insert(TabId(0), current_url.clone());
+        Self {
+            record: DryRunRecord::new(session_id, task_id),
+            twin,
+            current_url,
+            content,
+            tabs,
+            next_tab: 1,
+            clipboard: String::new(),
+            detect_enabled,
+            strip_enabled,
+        }
+    }
+
+    /// Consumes the engine, returning everything it recorded. Called by
+    /// [`super::orchestrator::DryRunOrchestrator::run`] after the driver
+    /// finishes (or the whole-turn timeout fires) — see that method's docs
+    /// for why a timeout still calls this rather than discarding the engine.
+    pub(crate) fn into_record(self) -> DryRunRecord {
+        self.record
+    }
+
+    /// Marks the record complete (the driver finished on its own, not via
+    /// timeout).
+    pub(crate) fn mark_completed(&mut self) {
+        self.record.completed = true;
+    }
+
+    fn current_origin(&self) -> Result<Origin, EngineError> {
+        Origin::parse(&self.current_url)
+            .map_err(|e| EngineError::OpaqueOrigin(format!("{}: {e}", self.current_url)))
+    }
+
+    /// Records one call's event (real `Primitive`, literal-string origin —
+    /// T-211's opaque-origin handling, unchanged from pre-B1) and, for a
+    /// navigation, the network attempt.
+    fn record_call(&mut self, primitive: Primitive, is_navigation: bool) {
+        if is_navigation {
+            self.record.record_network_attempt(self.current_url.clone());
+        }
+        let origin = Some(super::record::extract_origin(&self.current_url));
+        self.record.record_tool(primitive, origin);
+    }
+
+    /// Runs the generic (non-page) detect/strip gate: `detect_injection_in_value`
+    /// only, no HTML-channel-specific scan — the same treatment every
+    /// non-`ReadPage` tool got pre-B1. See [`Self::gate_page`] for the page
+    /// path's extra HTML-aware scan.
+    fn gate_generic(&mut self, primitive: Primitive, reply: DryRunReply) -> DryRunReply {
+        if !self.detect_enabled {
+            return reply;
+        }
+        let origin = Some(super::record::extract_origin(&self.current_url));
+        let value = match &reply {
+            DryRunReply::Ok(v) => v.clone(),
+            DryRunReply::Err(e) => serde_json::Value::String(e.clone()),
+        };
+        let findings: Vec<RecordedFinding> = sanitizer::detect_injection_in_value(&value)
+            .into_iter()
+            .map(|lf| RecordedFinding {
+                finding: lf.finding,
+                carrier: FindingCarrier::ToolOutput { json_path: lf.path },
+                tool: ToolId::new(primitive.as_str()),
+                origin: origin.clone(),
+            })
+            .collect();
+        for f in findings {
+            self.record.record_finding(f);
+        }
+        if self.strip_enabled {
+            match reply {
+                DryRunReply::Ok(v) => DryRunReply::Ok(sanitizer::excise_value(&v)),
+                DryRunReply::Err(e) => DryRunReply::Err(sanitizer::excise_injections_text(&e)),
+            }
+        } else {
+            reply
+        }
+    }
+
+    /// The page-read detect/strip gate: `detect_injection_in_value` (as
+    /// above) *plus* `sanitize_html`'s channel-aware visible-text/comment/
+    /// script scan — both run and both contribute findings, ported verbatim
+    /// from the pre-B1 `RecordingExecutor` (this is real, tested,
+    /// intentional double coverage: `detect_injection_in_value` catches
+    /// pattern matches in the raw string that `sanitize_html`'s
+    /// channel-specific extraction may not surface identically, and vice
+    /// versa — see `crate::sanitizer::html`'s own module docs).
+    fn gate_page(&mut self, reply: DryRunReply) -> DryRunReply {
+        if !self.detect_enabled {
+            return reply;
+        }
+        let origin = Some(super::record::extract_origin(&self.current_url));
+        let value = match &reply {
+            DryRunReply::Ok(v) => v.clone(),
+            DryRunReply::Err(e) => serde_json::Value::String(e.clone()),
+        };
+
+        let mut findings: Vec<RecordedFinding> = sanitizer::detect_injection_in_value(&value)
+            .into_iter()
+            .map(|lf| RecordedFinding {
+                finding: lf.finding,
+                carrier: FindingCarrier::ToolOutput { json_path: lf.path },
+                tool: ToolId::new(Primitive::DomRead.as_str()),
+                origin: origin.clone(),
+            })
+            .collect();
+
+        let mut clean_html: Option<String> = None;
+        if let serde_json::Value::String(html) = &value {
+            let sanitized = sanitizer::sanitize_html(html);
+            clean_html = Some(sanitized.clean_html.clone());
+            findings.extend(
+                sanitized
+                    .visible_text_findings
+                    .into_iter()
+                    .map(|f| RecordedFinding {
+                        finding: f,
+                        carrier: FindingCarrier::WebContent {
+                            channel: "visible_text".to_string(),
+                        },
+                        tool: ToolId::new(Primitive::DomRead.as_str()),
+                        origin: origin.clone(),
+                    }),
+            );
+            findings.extend(
+                sanitized
+                    .comment_findings
+                    .into_iter()
+                    .map(|f| RecordedFinding {
+                        finding: f,
+                        carrier: FindingCarrier::WebContent {
+                            channel: "comment".to_string(),
+                        },
+                        tool: ToolId::new(Primitive::DomRead.as_str()),
+                        origin: origin.clone(),
+                    }),
+            );
+            findings.extend(
+                sanitized
+                    .script_findings
+                    .into_iter()
+                    .map(|label| RecordedFinding {
+                        finding: Finding {
+                            pattern: label,
+                            snippet: String::new(),
+                        },
+                        carrier: FindingCarrier::WebContent {
+                            channel: "script".to_string(),
+                        },
+                        tool: ToolId::new(Primitive::DomRead.as_str()),
+                        origin: origin.clone(),
+                    }),
+            );
+        }
+
+        for f in findings {
+            self.record.record_finding(f);
+        }
+
+        if !self.strip_enabled {
+            return reply;
+        }
+        match (&reply, &clean_html) {
+            (DryRunReply::Ok(_), Some(clean)) => DryRunReply::Ok(serde_json::Value::String(
+                sanitizer::excise_injections_html(clean),
+            )),
+            (DryRunReply::Ok(v), None) => DryRunReply::Ok(sanitizer::excise_value(v)),
+            (DryRunReply::Err(e), _) => DryRunReply::Err(sanitizer::excise_injections_text(e)),
+        }
+    }
+
+    /// Resolves the scripted reply for one call: `content.by_tool_id`
+    /// (keyed per [`content_key_for_call`]) first, falling through to a
+    /// generic synthetic stub — the same fallback shape the pre-B1 executor
+    /// used for every non-`ReadPage`/`ExtractData` tool.
+    fn scripted_reply(
+        &mut self,
+        call: &ferrite_engine::Call,
+        stub: impl FnOnce() -> String,
+    ) -> DryRunReply {
+        let origin = super::record::extract_origin(&self.current_url);
+        let key = content_key_for_call(call);
+        key.and_then(|k| self.content.by_tool_id.get_mut(k))
+            .and_then(|chan| chan.next(Some(&origin)))
+            .unwrap_or_else(|| DryRunReply::Ok(serde_json::Value::String(stub())))
+    }
+
+    fn reply_to_string(reply: DryRunReply) -> Result<String, EngineError> {
+        match reply {
+            DryRunReply::Ok(serde_json::Value::String(s)) => Ok(s),
+            DryRunReply::Ok(v) => Ok(v.to_string()),
+            DryRunReply::Err(e) => Err(EngineError::Internal(e)),
+        }
+    }
+}
+
+impl BrowserEngine for DryRunEngine {
+    fn navigate(&mut self, url: &str) -> Result<((), Origin), EngineError> {
+        self.current_url = url.to_string();
+        self.record_call(Primitive::Navigate, true);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn go_back(&mut self) -> Result<((), Origin), EngineError> {
+        self.record_call(Primitive::Navigate, false);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn go_forward(&mut self) -> Result<((), Origin), EngineError> {
+        self.record_call(Primitive::Navigate, false);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn reload(&mut self) -> Result<((), Origin), EngineError> {
+        self.record_call(Primitive::Navigate, false);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn current_url(&mut self) -> Result<(String, Origin), EngineError> {
+        self.record_call(Primitive::DomRead, false);
+        let url = self.current_url.clone();
+        Ok((url, self.current_origin()?))
+    }
+
+    fn dom_snapshot(&mut self) -> Result<(DomSnapshot, Origin), EngineError> {
+        self.record_call(Primitive::DomRead, false);
+        let twin_name = self.twin.name.clone();
+        let origin_str = super::record::extract_origin(&self.current_url);
+        let raw = self
+            .content
+            .read_page
+            .next(Some(&origin_str))
+            .unwrap_or_else(|| {
+                DryRunReply::Ok(serde_json::Value::String(format!(
+                    "Synthetic page. User: {twin_name}"
+                )))
+            });
+        let served = self.gate_page(raw);
+        let text = Self::reply_to_string(served)?;
+        let snapshot = DomSnapshot {
+            root: DomNode {
+                role: "document".to_string(),
+                text: Some(text),
+                ..DomNode::default()
+            },
+        };
+        Ok((snapshot, self.current_origin()?))
+    }
+
+    fn query(&mut self, _selector: &str) -> Result<(Vec<ElementHandle>, Origin), EngineError> {
+        self.record_call(Primitive::DomQuery, false);
+        Ok((Vec::new(), self.current_origin()?))
+    }
+
+    fn read_text(&mut self, _selector: &str) -> Result<(String, Origin), EngineError> {
+        self.record_call(Primitive::DomRead, false);
+        let twin_email = self.twin.email.clone();
+        let origin_str = super::record::extract_origin(&self.current_url);
+        let raw = self
+            .content
+            .extract_data
+            .next(Some(&origin_str))
+            .unwrap_or_else(|| {
+                DryRunReply::Ok(serde_json::Value::String(format!(
+                    "Extracted: {twin_email}"
+                )))
+            });
+        let served = self.gate_generic(Primitive::DomRead, raw);
+        let text = Self::reply_to_string(served)?;
+        Ok((text, self.current_origin()?))
+    }
+
+    fn click(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
+        let call = ferrite_engine::Call::Click(selector.to_string());
+        let reply = self.scripted_reply(&call, || "dry-run: ok".to_string());
+        let served = self.gate_generic(Primitive::Click, reply);
+        let _ = Self::reply_to_string(served)?;
+        self.record_call(Primitive::Click, false);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn type_text(&mut self, selector: &str, text: &str) -> Result<((), Origin), EngineError> {
+        let call = ferrite_engine::Call::TypeText(selector.to_string(), text.to_string());
+        let reply = self.scripted_reply(&call, || "dry-run: ok".to_string());
+        let served = self.gate_generic(Primitive::DomWrite, reply);
+        let _ = Self::reply_to_string(served)?;
+        self.record_call(Primitive::DomWrite, false);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn fill_form(&mut self, fields: &[(String, String)]) -> Result<((), Origin), EngineError> {
+        let call = ferrite_engine::Call::FillForm(fields.to_vec());
+        let reply = self.scripted_reply(&call, || "dry-run: ok".to_string());
+        let served = self.gate_generic(Primitive::FormFill, reply);
+        let _ = Self::reply_to_string(served)?;
+        self.record_call(Primitive::FormFill, false);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn select_option(&mut self, selector: &str, value: &str) -> Result<((), Origin), EngineError> {
+        let call = ferrite_engine::Call::SelectOption(selector.to_string(), value.to_string());
+        let reply = self.scripted_reply(&call, || "dry-run: ok".to_string());
+        let served = self.gate_generic(Primitive::DomWrite, reply);
+        let _ = Self::reply_to_string(served)?;
+        self.record_call(Primitive::DomWrite, false);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn scroll(&mut self, _dx: i64, _dy: i64) -> Result<((), Origin), EngineError> {
+        self.record_call(Primitive::Scroll, false);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn wait_for(&mut self, _condition: WaitCondition) -> Result<((), Origin), EngineError> {
+        self.record_call(Primitive::Wait, false);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn screenshot(&mut self) -> Result<(Frame, Origin), EngineError> {
+        self.record_call(Primitive::Screenshot, false);
+        Ok(((0, 0, Vec::new()), self.current_origin()?))
+    }
+
+    fn download(&mut self, url: &str) -> Result<(String, Origin), EngineError> {
+        let call = ferrite_engine::Call::Download(url.to_string());
+        let stub_url = url.to_string();
+        let reply = self.scripted_reply(&call, move || {
+            format!(
+                "/dry-run-downloads/{}",
+                stub_url.rsplit('/').next().unwrap_or("file")
+            )
+        });
+        let served = self.gate_generic(Primitive::Download, reply);
+        let path = Self::reply_to_string(served)?;
+        self.record_call(Primitive::Download, false);
+        Ok((path, self.current_origin()?))
+    }
+
+    fn open_tab(&mut self, url: Option<&str>) -> Result<(TabId, Origin), EngineError> {
+        self.record_call(Primitive::TabOpen, false);
+        let id = TabId(self.next_tab);
+        self.next_tab += 1;
+        let initial = url
+            .map(str::to_string)
+            .unwrap_or_else(|| "about:blank".to_string());
+        self.tabs.insert(id, initial.clone());
+        self.current_url = initial;
+        Ok((id, self.current_origin()?))
+    }
+
+    fn close_tab(&mut self, tab: TabId) -> Result<((), Origin), EngineError> {
+        self.record_call(Primitive::TabClose, false);
+        if self.tabs.remove(&tab).is_none() {
+            return Err(EngineError::NoSuchTab(tab));
+        }
+        Ok(((), self.current_origin()?))
+    }
+
+    fn switch_tab(&mut self, tab: TabId) -> Result<((), Origin), EngineError> {
+        match self.tabs.get(&tab) {
+            Some(url) => {
+                self.current_url = url.clone();
+                self.record_call(Primitive::Navigate, false);
+                Ok(((), self.current_origin()?))
+            }
+            None => Err(EngineError::NoSuchTab(tab)),
+        }
+    }
+
+    fn cookies_read(&mut self, _scope: &Origin) -> Result<(Vec<Cookie>, Origin), EngineError> {
+        self.record_call(Primitive::CookieRead, false);
+        Ok((Vec::new(), self.current_origin()?))
+    }
+
+    fn storage_read(
+        &mut self,
+        _scope: &Origin,
+    ) -> Result<(Vec<(String, String)>, Origin), EngineError> {
+        self.record_call(Primitive::StorageRead, false);
+        Ok((Vec::new(), self.current_origin()?))
+    }
+
+    fn clipboard_read(&mut self) -> Result<(String, Origin), EngineError> {
+        let call = ferrite_engine::Call::ClipboardRead;
+        let current = self.clipboard.clone();
+        let reply = self.scripted_reply(&call, move || current);
+        let served = self.gate_generic(Primitive::ClipboardRead, reply);
+        let text = Self::reply_to_string(served)?;
+        self.record_call(Primitive::ClipboardRead, false);
+        Ok((text, self.current_origin()?))
+    }
+
+    fn clipboard_write(&mut self, text: &str) -> Result<((), Origin), EngineError> {
+        let call = ferrite_engine::Call::ClipboardWrite(text.to_string());
+        let reply = self.scripted_reply(&call, || "dry-run: ok".to_string());
+        let served = self.gate_generic(Primitive::ClipboardWrite, reply);
+        let _ = Self::reply_to_string(served)?;
+        self.clipboard = text.to_string();
+        self.record_call(Primitive::ClipboardWrite, false);
+        Ok(((), self.current_origin()?))
+    }
+
+    fn js_execute(&mut self, script: &str) -> Result<(String, Origin), EngineError> {
+        let call = ferrite_engine::Call::JsExecute(script.to_string());
+        let reply = self.scripted_reply(&call, || "null".to_string());
+        let served = self.gate_generic(Primitive::JsExecute, reply);
+        let result = Self::reply_to_string(served)?;
+        self.record_call(Primitive::JsExecute, false);
+        Ok((result, self.current_origin()?))
+    }
+}
+
+#[cfg(test)]
+mod containment_tests {
+    /// `docs/TO-DO.md` T-007/D7, ported to B1's `DryRunEngine`: containment
+    /// is by construction, not by an active interceptor. Needles are built
+    /// from split literals so this test cannot trivially match its own
+    /// source text.
+    #[test]
+    fn this_modules_source_names_no_network_capable_dependency() {
+        let source = include_str!("engine.rs");
+        let forbidden: [[&str; 2]; 5] = [
+            ["re", "qwest"],
+            ["tokio", "::net"],
+            ["std", "::net"],
+            ["Tcp", "Stream"],
+            ["hyper", "::"],
+        ];
+        for parts in forbidden {
+            let needle = parts.concat();
+            assert!(
+                !source.contains(&needle),
+                "engine.rs must not reference {needle} — containment is by construction \
+                 (no network backend), and a reference here would be evidence against that claim"
+            );
+        }
+    }
+}

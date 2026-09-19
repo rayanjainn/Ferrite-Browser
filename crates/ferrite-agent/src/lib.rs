@@ -1,4 +1,5 @@
 pub mod browser_loop;
+pub mod engine_bridge;
 pub mod gemini;
 pub use gemini::GeminiAgent;
 

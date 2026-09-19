@@ -13,6 +13,9 @@ ferrite-audit-log = { workspace = true }
 ferrite-servo = { workspace = true }
 ferrite-agent = { workspace = true }
 ferrite-ipi = { workspace = true }
+# B1 (docs/TO-DO.md T-221): ToolDecisionEngine::{generate_fingerprint,
+# fingerprint_from_task} now take a &dyn ModelProvider explicitly.
+ferrite-model = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 urlencoding = { workspace = true }

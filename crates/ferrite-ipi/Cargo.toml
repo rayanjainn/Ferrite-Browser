@@ -6,14 +6,13 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-ferrite-agent = { workspace = true }
 ferrite-core = { workspace = true }
+ferrite-engine = { workspace = true }
 ferrite-model = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-reqwest = { workspace = true }
 tokio = { workspace = true }
 ammonia = { workspace = true }
 regex = { workspace = true }

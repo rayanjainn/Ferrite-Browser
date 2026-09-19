@@ -717,7 +717,6 @@ mod tests {
             Tier, Timing, WebContentVector,
         };
         use ferrite_ipi::dry_run::ToolEvent;
-        use ferrite_ipi::tool_decision::ToolId;
 
         pub fn exact(url: &str) -> OriginScope {
             OriginScope::exact([ferrite_core::Origin::parse(url).unwrap()]).unwrap()
@@ -769,7 +768,7 @@ mod tests {
                 expected_fingerprint: None,
                 expected_realization: None,
                 actual_events: vec![ToolEvent {
-                    tool: ToolId::new("dom.read"),
+                    primitive: ferrite_core::Primitive::DomRead,
                     origin: None,
                 }],
                 computed_diff: FingerprintDiff::default(),

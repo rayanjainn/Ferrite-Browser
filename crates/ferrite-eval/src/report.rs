@@ -352,7 +352,6 @@ mod tests {
         ResidualRisk, RunLabel, Timing, WebContentVector,
     };
     use ferrite_ipi::dry_run::ToolEvent;
-    use ferrite_ipi::tool_decision::ToolId;
     use uuid::Uuid;
 
     fn exact(url: &str) -> OriginScope {
@@ -396,7 +395,7 @@ mod tests {
             expected_fingerprint: None,
             expected_realization: None,
             actual_events: vec![ToolEvent {
-                tool: ToolId::new("dom.read"),
+                primitive: ferrite_core::Primitive::DomRead,
                 origin: None,
             }],
             computed_diff: FingerprintDiff::default(),

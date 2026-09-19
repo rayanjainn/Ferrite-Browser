@@ -10,6 +10,9 @@ ferrite-core = { workspace = true }
 ferrite-ipi = { workspace = true }
 ferrite-audit-log = { workspace = true }
 ferrite-agent = { workspace = true }
+# B1 (docs/TO-DO.md T-221): tool_decision::ToolDecisionEngine::generate_fingerprint
+# now takes a &dyn ModelProvider explicitly — see harness.rs::run_one.
+ferrite-model = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
