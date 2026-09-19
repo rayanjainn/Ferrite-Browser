@@ -222,7 +222,12 @@ pub async fn run_one<R: AgentRuntime>(
     };
 
     let mut orch = DryRunOrchestrator::with_content(orchestrator_twin_path, content.clone());
-    orch.set_detect_enabled(behavior.detect_enabled);
+    // T-215: derive detect_enabled AND strip_enabled together from the mode,
+    // instead of setting detect alone — see set_defense_mode's doc comment
+    // for exactly why that half-call was the bug (D3/T-003 wasn't fully live
+    // without it: excision stayed off in every eval-harness mode even after
+    // A5 wired it in production).
+    orch.set_defense_mode(mode);
     let t1 = Instant::now();
     let record = orch.run(&task, &[], agent).await?;
     sw.mark_dry_run(t1.elapsed());
