@@ -93,6 +93,40 @@ fn corpus_composition_table(cases: &[CaseDefinition]) -> String {
     out
 }
 
+/// Per-`(tier, mode)` ASR — the charter's own explicit example of why pooled
+/// numbers alone are not enough: a pooled Off-mode ASR silently averages
+/// over Tier 3 AgentDojo's 3 cases and Tier 1's 12, hiding that the
+/// AgentDojo cell alone is nowhere near powered for its own claim. Every
+/// cell under `UNDERPOWERED_FLOOR` is flagged, not smoothed over.
+fn stratified_asr_table(cases: &[CaseDefinition], executions: &[ExecutionRecord]) -> String {
+    let mut out = String::new();
+    out.push_str("| Tier | Mode | ASR |\n|---|---|---|\n");
+    for tier in [
+        Tier::Tier1,
+        Tier::Tier2,
+        Tier::Tier3Teammate,
+        Tier::Tier3Professor,
+        Tier::Tier3AgentDojo,
+    ] {
+        let tier_cases: Vec<CaseDefinition> = cases
+            .iter()
+            .filter(|c| c.tier == tier && c.corpus == Corpus::Attack)
+            .cloned()
+            .collect();
+        if tier_cases.is_empty() {
+            continue;
+        }
+        for mode in ALL_MODES {
+            let m = asr(&tier_cases, executions, mode);
+            if m.n == 0 {
+                continue;
+            }
+            out.push_str(&format!("| {tier:?} | {mode:?} | {} |\n", fmt_metric(&m)));
+        }
+    }
+    out
+}
+
 fn per_mode_metrics_table(cases: &[CaseDefinition], executions: &[ExecutionRecord]) -> String {
     let mut out = String::new();
     out.push_str("| Mode | ASR | CR | ADR | SDR | FGR / FSR-proxy |\n");
@@ -261,6 +295,15 @@ pub fn generate_report(cases: &[CaseDefinition], executions: &[ExecutionRecord])
     md.push_str(&per_mode_metrics_table(cases, executions));
     md.push('\n');
 
+    md.push_str(
+        "## Per-tier ASR stratification\n\n\
+         Pooled ASR above averages over every tier; a per-tier breakdown is \
+         what actually shows which claims are powered at this corpus size \
+         (§13.3's own worked example — Tier 3 AgentDojo has 3 cases).\n\n",
+    );
+    md.push_str(&stratified_asr_table(cases, executions));
+    md.push('\n');
+
     let r = residual_r(cases);
     md.push_str(&format!(
         "**Residual R** (structural floor on ASR, corpus-level, mode-independent): {}\n\n",
@@ -400,6 +443,7 @@ mod tests {
             "# Ferrite evaluation report",
             "## Corpus composition",
             "## Per-mode metrics",
+            "## Per-tier ASR stratification",
             "## Mode-pair comparisons",
             "## Consent-policy sweep",
             "## Audit-chain anchors",
