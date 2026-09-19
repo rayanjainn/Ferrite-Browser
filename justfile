@@ -111,12 +111,17 @@ build-servo:
 bloat *ARGS:
     cargo bloat --release {{ARGS}}
 
-# Run the evaluation harness. NOT YET IMPLEMENTED — the batch corpus
-# driver + metrics aggregator is A12's deliverable (docs/TO-DO.md T-112).
-# This recipe exists now (per the charter's command-surface list) but is
-# honest about not doing anything yet rather than silently no-op'ing.
+# Runs the real corpus (tests/corpus + tests/pilot_corpus +
+# tests/agentdojo_corpus) through the real pipeline across every defined
+# mode and writes the metrics report (docs/REBUILD_DIRECTIVE.md §13.2:
+# markdown table + CSV + audit-chain anchors) to target/eval-report/ (or
+# FERRITE_EVAL_OUT_DIR if set). Makes zero live model calls by construction
+# (the corpus-runner agent is ground-truth-scripted, never model-backed;
+# the fingerprint layer runs rules-only without FERRITE_GEMINI_API_KEY set)
+# — safe to run anywhere, though NOT part of `just check`/`just test`/CI
+# (T-112, A12: Harness + metrics). See docs/EVALUATION.md.
 eval:
-    @echo "not yet implemented — see docs/TO-DO.md T-112 (A12: Harness + metrics)" && exit 1
+    cargo run -p ferrite-eval --example eval
 
 # Prune stale (7+ day old) build artifacts from the target dir. Requires
 # `cargo install cargo-sweep` (not bundled, same reasoning as `bloat`).
