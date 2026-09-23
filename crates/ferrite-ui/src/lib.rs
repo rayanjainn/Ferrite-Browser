@@ -43,6 +43,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod icons;
+use icons::{icon, Icon};
+
 use ferrite_agent::browser_loop::{
     execute_action, run_agent_loop, AgentAction, LoopBudget, LoopStopReason, SYSTEM_PROMPT,
     SYSTEM_PROMPT_VERSION,
@@ -57,7 +60,8 @@ use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{
-    keyboard, time, Background, Border, Color, Element, Length, Size, Subscription, Task, Theme,
+    keyboard, time, Background, Border, Color, Element, Length, Padding, Size, Subscription, Task,
+    Theme,
 };
 use iced_widget::image::{Handle as ImageHandle, Image as ServoImage};
 
@@ -289,6 +293,20 @@ const TAB_BAR_HEIGHT: f32 = 36.0;
 const BORDER_RADIUS: f32 = 8.0;
 const PANEL_PADDING: u16 = 12;
 
+/// Icon sizes — the two sizes every `icon()` call site in this crate picks
+/// from, so the icon set reads as one consistent scale rather than a grab
+/// bag of ad hoc pixel sizes. `ICON_SIZE` is the default (toolbar/tab-bar/
+/// panel-toggle chrome); `ICON_SIZE_SM` is for icons paired tightly with
+/// text at a smaller point size (consent-item rows, the tab close button).
+const ICON_SIZE: f32 = 15.0;
+const ICON_SIZE_SM: f32 = 12.0;
+
+/// Advance per `ConsentPanelTick` for `FerriteBrowser::consent_panel_anim` —
+/// ticks fire every 16ms (the same cadence `ServoFrame` already uses, see
+/// `subscription()`), so this reaches 1.0 in ~200ms: the fast, subtle end of
+/// the 150-250ms range typical for this kind of UI entrance transition.
+const CONSENT_ANIM_STEP: f32 = 16.0 / 200.0;
+
 // ---------------------------------------------------------------------------
 // Colour palette
 // ---------------------------------------------------------------------------
@@ -493,6 +511,22 @@ pub struct FerriteBrowser {
     pub pending_task: Option<String>,
     /// Whether the dry-run evidence section is expanded.
     pub show_evidence: bool,
+    // ── C1 design-system state ───────────────────────────────────────────────
+    /// Index of the tab bar entry currently under the pointer, if any —
+    /// drives the close-button-on-hover reveal pattern (`view()`'s tab bar).
+    /// `None` when the pointer is not over any tab; reset on `CloseTab`
+    /// since a close shifts every later tab's index, and a stale hovered
+    /// index would otherwise show the close button on the wrong tab.
+    pub hovered_tab: Option<usize>,
+    /// Fade/slide-in progress for the consent panel, `0.0` (just appeared)
+    /// to `1.0` (fully settled) — advanced by `ConsentPanelTick` while
+    /// `pending_diff` is `Some` and this is below `1.0` (see
+    /// `subscription()`'s `consent_anim_tick`). Reset to `0.0` whenever
+    /// `pending_diff` transitions from `None` to `Some` (`ConsentRequired`),
+    /// so the panel replays its entrance every time a new one appears. Pure
+    /// decoration only — see `view_agent_sidebar`'s consent body for why
+    /// this never delays or hides any of the panel's actual content.
+    pub consent_panel_anim: f32,
 }
 
 impl Default for FerriteBrowser {
@@ -551,6 +585,8 @@ impl Default for FerriteBrowser {
             pending_decision: ConsentDecision::default(),
             pending_task: None,
             show_evidence: false,
+            hovered_tab: None,
+            consent_panel_anim: 0.0,
         }
     }
 }
@@ -647,6 +683,17 @@ pub enum FerriteBrowserMessage {
     ToggleEvidence,
     ConsentSubmitted,
     ConsentCancelled,
+    // ── C1 design-system messages ────────────────────────────────────────────
+    /// Pointer entered tab `usize`'s hit area — drives the tab bar's
+    /// close-button-on-hover reveal. Does not change tab selection/order/
+    /// closing (`SelectTab`/`CloseTab`/`AddTab` are unchanged).
+    TabHoverEnter(usize),
+    /// Pointer left tab `usize`'s hit area.
+    TabHoverExit(usize),
+    /// One animation-subscription tick advancing
+    /// `FerriteBrowser::consent_panel_anim` — see that field's docs and
+    /// `subscription()`'s `consent_anim_tick`.
+    ConsentPanelTick,
 }
 
 // ---------------------------------------------------------------------------
@@ -677,6 +724,10 @@ pub fn update(
             }
         }
         FerriteBrowserMessage::CloseTab(i) => {
+            // Every later tab's index shifts by one — a stale hovered index
+            // would otherwise show the close-on-hover button on the wrong
+            // tab until the next real hover event.
+            state.hovered_tab = None;
             if state.tabs.len() > 1 {
                 state.tabs.remove(i);
                 state.tab_urls.remove(i);
@@ -1027,6 +1078,9 @@ pub fn update(
             state.pending_decision = ConsentDecision::default();
             state.show_evidence = false;
             state.agent_is_running = false;
+            // pending_diff just transitioned None -> Some: (re)start the
+            // panel's entrance animation from the beginning (C1).
+            state.consent_panel_anim = 0.0;
         }
         FerriteBrowserMessage::ApproveTool(id) => {
             state.pending_decision.approve(ToolId::new(&id));
@@ -1202,6 +1256,18 @@ pub fn update(
                     });
                 }
             }
+        }
+        // ── C1 design-system messages ────────────────────────────────────────
+        FerriteBrowserMessage::TabHoverEnter(i) => {
+            state.hovered_tab = Some(i);
+        }
+        FerriteBrowserMessage::TabHoverExit(i) => {
+            if state.hovered_tab == Some(i) {
+                state.hovered_tab = None;
+            }
+        }
+        FerriteBrowserMessage::ConsentPanelTick => {
+            state.consent_panel_anim = (state.consent_panel_anim + CONSENT_ANIM_STEP).min(1.0);
         }
     }
     Task::none()
@@ -1393,6 +1459,17 @@ fn dry_run_evidence_lines(record: &DryRunRecord) -> Vec<String> {
         lines.push("No tool calls were recorded during the dry run.".to_string());
     }
     lines
+}
+
+/// Ease-out-cubic easing curve, mapping linear progress `t` (`0.0..=1.0`,
+/// clamped) to eased progress — accelerates out of the start rather than
+/// moving at a constant rate, the standard curve for a short UI entrance
+/// transition. Used by `view_agent_sidebar`'s consent panel to turn
+/// `FerriteBrowser::consent_panel_anim`'s linear tick-driven progress into
+/// the panel's actual background-alpha/slide-offset animation.
+fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
 }
 
 // ---------------------------------------------------------------------------
@@ -1699,17 +1776,19 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         .enumerate()
         .map(|(i, label)| {
             let is_active = i == active_tab_idx;
+            let is_hovered = state.hovered_tab == Some(i);
             let spinning = is_loading_active && i == active_tab_idx;
 
-            let favicon = text(if spinning {
-                "..."
-            } else if is_active {
-                ">"
-            } else {
-                "-"
-            })
-            .size(11)
-            .color(if is_active { C_ACCENT } else { C_TEXT_DIM });
+            // Loading state keeps the "..." text pulse (a pure, cheap
+            // animation via the same `progress_offset`-driven dots pattern
+            // the agent sidebar's "Working..." indicator already uses); an
+            // idle tab gets a small dot instead of the old ">"/"-" ASCII
+            // markers — the accent underline below already carries most of
+            // the active/inactive signal, so this is a quiet accent, not a
+            // second competing indicator.
+            let favicon = text(if spinning { "..." } else { "•" })
+                .size(11)
+                .color(if is_active { C_ACCENT } else { C_TEXT_DIM });
 
             let label_elem = text(truncate(label, 22)).size(13).color(if is_active {
                 C_TEXT
@@ -1717,16 +1796,25 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 C_TEXT_DIM
             });
 
-            let close_btn = button(text("x").size(10).color(if can_close {
-                C_TEXT_DIM
+            // Close-button-on-hover: visible for the active tab (always
+            // reachable without a hover) and for whichever tab the pointer
+            // is currently over; otherwise a same-size transparent spacer,
+            // so the row's width never jumps when the button appears.
+            let show_close = can_close && (is_active || is_hovered);
+            let close_btn: Element<FerriteBrowserMessage> = if show_close {
+                button(icon(Icon::Close, 10.0, C_TEXT_DIM))
+                    .padding(4)
+                    .width(Length::Fixed(18.0))
+                    .height(Length::Fixed(18.0))
+                    .style(close_btn_style)
+                    .on_press(FerriteBrowserMessage::CloseTab(i))
+                    .into()
             } else {
-                Color::TRANSPARENT
-            }))
-            .padding([2, 4])
-            .width(Length::Fixed(18.0))
-            .height(Length::Fixed(18.0))
-            .style(close_btn_style)
-            .on_press_maybe(can_close.then_some(FerriteBrowserMessage::CloseTab(i)));
+                container(text(""))
+                    .width(Length::Fixed(18.0))
+                    .height(Length::Fixed(18.0))
+                    .into()
+            };
 
             let content_row = container(
                 row![favicon, label_elem, close_btn]
@@ -1740,6 +1828,8 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             .style(move |_: &Theme| container::Style {
                 background: Some(Background::Color(if is_active {
                     C_BASE
+                } else if is_hovered {
+                    Color { a: 0.5, ..C_RAISED }
                 } else {
                     Color::TRANSPARENT
                 })),
@@ -1774,22 +1864,23 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     .height(Length::Fixed(TAB_BAR_HEIGHT)),
             )
             .on_press(FerriteBrowserMessage::SelectTab(i))
+            .on_enter(FerriteBrowserMessage::TabHoverEnter(i))
+            .on_exit(FerriteBrowserMessage::TabHoverExit(i))
             .into()
         })
         .collect();
 
-    // "+" new-tab button
+    // "+" new-tab button — a real `button` (not a bare `mouse_area`) so it
+    // gets the same hover/press feedback every other toolbar control has,
+    // via the same `nav_btn_style` used by Back/Forward/Reload.
     tab_elements.push(
-        mouse_area(
-            container(text("+").size(17).color(C_TEXT_DIM).center())
-                .width(Length::Fixed(TAB_BAR_HEIGHT))
-                .height(Length::Fixed(TAB_BAR_HEIGHT))
-                .align_x(iced::Alignment::Center)
-                .align_y(iced::Alignment::Center)
-                .style(|_: &Theme| container::Style::default()),
-        )
-        .on_press(FerriteBrowserMessage::AddTab)
-        .into(),
+        button(icon(Icon::Add, ICON_SIZE_SM, C_TEXT_DIM))
+            .width(Length::Fixed(TAB_BAR_HEIGHT))
+            .height(Length::Fixed(TAB_BAR_HEIGHT))
+            .padding(0)
+            .style(nav_btn_style)
+            .on_press(FerriteBrowserMessage::AddTab)
+            .into(),
     );
 
     let tab_bar = container(
@@ -1817,28 +1908,51 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // ── Toolbar ────────────────────────────────────────────────────────────
     // [←] [→] [↺/✕]  [🔒 address bar ...]  [Audit] [JS]
 
-    let back_btn = button(text("Back").size(12))
-        .padding([5, 11])
-        .style(nav_btn_style)
-        .on_press_maybe(state.can_go_back.then_some(FerriteBrowserMessage::GoBack));
+    // Back/Forward/Reload read as icon-only controls (the common browser
+    // convention) — disabled state dims the icon itself in addition to
+    // `nav_btn_style`'s existing Disabled text-color handling, so the cue
+    // survives the switch from text to a tinted glyph.
+    let nav_icon_color = |enabled: bool| {
+        if enabled {
+            C_TEXT
+        } else {
+            Color {
+                a: 0.25,
+                ..C_TEXT_DIM
+            }
+        }
+    };
 
-    let fwd_btn = button(text("Fwd").size(12))
-        .padding([5, 11])
-        .style(nav_btn_style)
-        .on_press_maybe(
-            state
-                .can_go_forward
-                .then_some(FerriteBrowserMessage::GoForward),
-        );
+    let back_btn = button(icon(
+        Icon::Back,
+        ICON_SIZE,
+        nav_icon_color(state.can_go_back),
+    ))
+    .padding([6, 11])
+    .style(nav_btn_style)
+    .on_press_maybe(state.can_go_back.then_some(FerriteBrowserMessage::GoBack));
+
+    let fwd_btn = button(icon(
+        Icon::Forward,
+        ICON_SIZE,
+        nav_icon_color(state.can_go_forward),
+    ))
+    .padding([6, 11])
+    .style(nav_btn_style)
+    .on_press_maybe(
+        state
+            .can_go_forward
+            .then_some(FerriteBrowserMessage::GoForward),
+    );
 
     let reload_btn: Element<FerriteBrowserMessage> = if state.is_loading {
-        button(text("Stop").size(12))
+        button(icon(Icon::Close, ICON_SIZE, C_TEXT))
             .padding([6, 11])
             .style(nav_btn_style)
             .on_press(FerriteBrowserMessage::StopLoading)
             .into()
     } else {
-        button(text("Reload").size(12))
+        button(icon(Icon::Reload, ICON_SIZE, C_TEXT))
             .padding([6, 11])
             .style(nav_btn_style)
             .on_press(FerriteBrowserMessage::Reload)
@@ -1909,13 +2023,23 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     .width(Length::Fill)
     .padding([0, 4]);
 
-    // DevTools toggles with platform shortcut hints in tooltips
+    // DevTools toggles — an icon that names the panel plus its label; the
+    // old leading "v"/"+" glyph is gone, since the button's own
+    // active/inactive background (`panel_btn_active`/`panel_btn_inactive`,
+    // unchanged) already carries that state, and duplicating it as a second
+    // text glyph in front of the icon read as dev-tool clutter.
+    let toggle_icon_color = |active: bool| if active { Color::WHITE } else { C_TEXT_DIM };
+
     let audit_btn = button(
         row![
-            text(if state.show_audit_panel { "v" } else { "+" }).size(10),
-            text(" Audit").size(12),
+            icon(
+                Icon::Audit,
+                ICON_SIZE_SM,
+                toggle_icon_color(state.show_audit_panel)
+            ),
+            text("Audit").size(12),
         ]
-        .spacing(2)
+        .spacing(6)
         .align_y(iced::Alignment::Center),
     )
     .padding([5, 10])
@@ -1928,10 +2052,14 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
     let js_btn = button(
         row![
-            text(if state.show_js_console { "v" } else { "+" }).size(10),
-            text(" JS").size(12),
+            icon(
+                Icon::Console,
+                ICON_SIZE_SM,
+                toggle_icon_color(state.show_js_console)
+            ),
+            text("JS").size(12),
         ]
-        .spacing(2)
+        .spacing(6)
         .align_y(iced::Alignment::Center),
     )
     .padding([5, 10])
@@ -1944,10 +2072,14 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
     let agent_btn = button(
         row![
-            text(if state.show_agent_sidebar { "v" } else { "+" }).size(10),
-            text(" Agent").size(12),
+            icon(
+                Icon::Agent,
+                ICON_SIZE_SM,
+                toggle_icon_color(state.show_agent_sidebar)
+            ),
+            text("Agent").size(12),
         ]
-        .spacing(2)
+        .spacing(6)
         .align_y(iced::Alignment::Center),
     )
     .padding([5, 10])
@@ -2551,6 +2683,16 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         Subscription::none()
     };
 
+    // Consent-panel entrance animation (C1) — same 16ms tick shape as
+    // `servo_tick` above, gated so it only ever runs while the panel is
+    // actually animating in, not for the rest of the app's lifetime.
+    let consent_anim_tick = if state.pending_diff.is_some() && state.consent_panel_anim < 1.0 {
+        time::every(std::time::Duration::from_millis(16))
+            .map(|_| FerriteBrowserMessage::ConsentPanelTick)
+    } else {
+        Subscription::none()
+    };
+
     // Drain agent progress messages (AgentToolLogged, AgentCompleted, AgentFailed).
     struct AgentEventChannel;
     let agent_event_sub: Subscription<FerriteBrowserMessage> =
@@ -2577,7 +2719,7 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
             Subscription::none()
         };
 
-    Subscription::batch([keyboard_sub, servo_tick, agent_event_sub])
+    Subscription::batch([keyboard_sub, servo_tick, agent_event_sub, consent_anim_tick])
 }
 
 // ---------------------------------------------------------------------------
@@ -2593,19 +2735,26 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
         .into()];
     if state.agent_is_running {
         header_items.push(
-            button(text("Stop").size(12))
-                .padding([3, 8])
-                .style(|_: &Theme, _| button::Style {
-                    background: Some(Background::Color(C_DANGER)),
-                    text_color: Color::WHITE,
-                    border: Border {
-                        radius: iced::border::Radius::new(BORDER_RADIUS),
-                        ..Border::default()
-                    },
-                    ..button::Style::default()
-                })
-                .on_press(FerriteBrowserMessage::StopAgent)
-                .into(),
+            button(
+                row![
+                    icon(Icon::Stop, ICON_SIZE_SM, Color::WHITE),
+                    text("Stop").size(12)
+                ]
+                .spacing(5)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([3, 8])
+            .style(|_: &Theme, _| button::Style {
+                background: Some(Background::Color(C_DANGER)),
+                text_color: Color::WHITE,
+                border: Border {
+                    radius: iced::border::Radius::new(BORDER_RADIUS),
+                    ..Border::default()
+                },
+                ..button::Style::default()
+            })
+            .on_press(FerriteBrowserMessage::StopAgent)
+            .into(),
         );
     }
     let header = container(
@@ -2675,15 +2824,30 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
     };
 
     let run_disabled = state.agent_is_running || state.agent_task_input.trim().is_empty();
-    let run_btn = button(text("Run Task").size(13))
-        .padding([7, 0])
-        .width(Length::Fill)
-        .style(if run_disabled {
-            panel_btn_inactive
-        } else {
-            accent_btn_style
-        })
-        .on_press_maybe((!run_disabled).then_some(FerriteBrowserMessage::AgentTaskSubmitted));
+    let run_btn = button(
+        row![
+            icon(
+                Icon::Play,
+                ICON_SIZE_SM,
+                if run_disabled {
+                    C_TEXT_DIM
+                } else {
+                    Color::WHITE
+                }
+            ),
+            text("Run Task").size(13),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([7, 0])
+    .width(Length::Fill)
+    .style(if run_disabled {
+        panel_btn_inactive
+    } else {
+        accent_btn_style
+    })
+    .on_press_maybe((!run_disabled).then_some(FerriteBrowserMessage::AgentTaskSubmitted));
 
     // ── Consent panel (shown instead of log+response when diff is pending) ──
     //
@@ -2748,20 +2912,57 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
                 // never lets Proceed fire while any item, including this
                 // one, is undecided, so there is no path to a silent
                 // approve-by-default.
+                // An out-of-scope-origin item gets a small external-link
+                // glyph ahead of its summary — the one place this crate
+                // renders `Icon::Origin`, distinguishing "contacted an
+                // unauthorized origin" rows from "used an unexpected tool"
+                // rows at a glance, on top of the text difference already
+                // in `item.summary` itself.
+                let summary_row: Element<FerriteBrowserMessage> =
+                    if origin_item_origin(&item.id).is_some() {
+                        row![
+                            icon(Icon::Origin, ICON_SIZE_SM, C_TEXT_DIM),
+                            text(item.summary.clone())
+                                .size(12)
+                                .color(C_TEXT)
+                                .width(Length::Fill),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::Alignment::Start)
+                        .into()
+                    } else {
+                        text(item.summary.clone())
+                            .size(12)
+                            .color(C_TEXT)
+                            .width(Length::Fill)
+                            .into()
+                    };
+
                 column![
-                    text(item.summary.clone())
-                        .size(12)
-                        .color(C_TEXT)
-                        .width(Length::Fill),
+                    summary_row,
                     row![
-                        button(text("Reject").size(11))
-                            .padding([3, 7])
-                            .style(reject_style)
-                            .on_press(FerriteBrowserMessage::RejectTool(reject_id)),
-                        button(text("Approve").size(11))
-                            .padding([3, 7])
-                            .style(approve_style)
-                            .on_press(FerriteBrowserMessage::ApproveTool(approve_id)),
+                        button(
+                            row![
+                                icon(Icon::Reject, 11.0, Color::WHITE),
+                                text("Reject").size(11)
+                            ]
+                            .spacing(4)
+                            .align_y(iced::Alignment::Center)
+                        )
+                        .padding([3, 7])
+                        .style(reject_style)
+                        .on_press(FerriteBrowserMessage::RejectTool(reject_id)),
+                        button(
+                            row![
+                                icon(Icon::Approve, 11.0, Color::WHITE),
+                                text("Approve").size(11)
+                            ]
+                            .spacing(4)
+                            .align_y(iced::Alignment::Center)
+                        )
+                        .padding([3, 7])
+                        .style(approve_style)
+                        .on_press(FerriteBrowserMessage::ApproveTool(approve_id)),
                     ]
                     .spacing(6)
                     .align_y(iced::Alignment::Center),
@@ -2799,10 +3000,15 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             .on_press(FerriteBrowserMessage::ConsentCancelled);
 
         let mut panel_items: Vec<Element<FerriteBrowserMessage>> = vec![
-            row![text("! Unexpected Activity Detected")
-                .size(14)
-                .color(C_DANGER)
-                .width(Length::Fill),]
+            row![
+                icon(Icon::Warning, ICON_SIZE, C_DANGER),
+                text("Unexpected Activity Detected")
+                    .size(14)
+                    .color(C_DANGER)
+                    .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
             .into(),
             text(diff.summary()).size(12).color(C_TEXT_DIM).into(),
             sep().into(),
@@ -2852,18 +3058,35 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
         panel_items.push(proceed_btn.into());
         panel_items.push(cancel_btn.into());
 
+        // ── Entrance transition (C1) ─────────────────────────────────────
+        // A brief slide-in-and-settle plus a background-tint fade, driven
+        // by `consent_panel_anim` (advanced 16ms at a time by
+        // `ConsentPanelTick`, see `subscription()`) through `ease_out_cubic`.
+        // Purely decorative: every item's own text above is already at full
+        // opacity/its final position from the very first frame — only this
+        // outer wrapper's background tint and top inset animate, so nothing
+        // about what the user is being asked to approve is ever delayed,
+        // dimmed, or obscured while this plays out (~200ms total).
+        let anim_t = ease_out_cubic(state.consent_panel_anim);
+        let slide_offset = (1.0 - anim_t) * 16.0;
+
         scrollable(
-            container(column(panel_items).spacing(8).padding([8, 12]))
-                .width(Length::Fill)
-                .style(|_: &Theme| container::Style {
-                    background: Some(Background::Color(Color {
-                        r: C_WARN.r,
-                        g: C_WARN.g,
-                        b: C_WARN.b,
-                        a: 0.08,
-                    })),
-                    ..container::Style::default()
-                }),
+            container(column(panel_items).spacing(8).padding(Padding {
+                top: 8.0 + slide_offset,
+                right: 12.0,
+                bottom: 8.0,
+                left: 12.0,
+            }))
+            .width(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(Color {
+                    r: C_WARN.r,
+                    g: C_WARN.g,
+                    b: C_WARN.b,
+                    a: 0.08 * anim_t,
+                })),
+                ..container::Style::default()
+            }),
         )
         .height(Length::Fill)
         .into()
@@ -3783,6 +4006,40 @@ mod tests {
             dry_run_evidence_lines(&record),
             vec!["No tool calls were recorded during the dry run."]
         );
+    }
+
+    // ── ease_out_cubic: the consent panel's entrance-transition curve ────
+
+    #[test]
+    fn ease_out_cubic_starts_at_zero_and_ends_at_one() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+    }
+
+    #[test]
+    fn ease_out_cubic_clamps_out_of_range_input() {
+        assert_eq!(ease_out_cubic(-1.0), 0.0);
+        assert_eq!(ease_out_cubic(2.0), 1.0);
+    }
+
+    #[test]
+    fn ease_out_cubic_is_monotonically_non_decreasing() {
+        let mut prev = ease_out_cubic(0.0);
+        let mut t = 0.0_f32;
+        while t <= 1.0 {
+            let cur = ease_out_cubic(t);
+            assert!(cur >= prev, "not monotonic at t={t}: {cur} < {prev}");
+            prev = cur;
+            t += 0.05;
+        }
+    }
+
+    #[test]
+    fn ease_out_cubic_is_ahead_of_linear_partway_through_an_ease_out_curve() {
+        // The defining property of ease-*out*: it front-loads progress, so
+        // at the midpoint it's already past halfway (unlike a linear or
+        // ease-in curve).
+        assert!(ease_out_cubic(0.5) > 0.5);
     }
 
     // ── Page-content decoupling: structural argument, not merely asserted ─
