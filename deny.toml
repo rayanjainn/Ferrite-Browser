@@ -148,6 +148,17 @@ skip = [
   { name = "windows_x86_64_gnu" },
   { name = "windows_x86_64_gnullvm" },
   { name = "windows_x86_64_msvc" },
+
+  # A third batch (C1, T-231): enabling `iced_widget`'s `svg` feature pulls
+  # in `resvg`/`usvg` 0.42.0 via `iced_tiny_skia`/`iced_wgpu`, which depend
+  # on one version newer of `fontdb`/`kurbo` than `iced_tiny_skia`/
+  # `cosmic-text` already carry elsewhere in the same iced 0.13 stack. Same
+  # structural situation as both batches above (two versions of the same
+  # crate meeting inside one dependency tree, not a real security
+  # concern) — called out separately since its cause (the `svg` feature
+  # flag, not Servo or the OS-keyring crates) is different from either.
+  { name = "fontdb" },
+  { name = "kurbo" },
 ]
 
 [sources]
