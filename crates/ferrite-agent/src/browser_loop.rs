@@ -208,7 +208,16 @@ fn describe_wait(condition: &AgentAction) -> WaitCondition {
 /// human-readable observation string to feed back to the model — or the
 /// action's own [`AgentAction::Finish`] answer, which the caller must
 /// intercept before calling this (there is no engine call for `Finish`).
-fn execute_action(engine: &mut dyn BrowserEngine, action: &AgentAction) -> String {
+///
+/// `pub` (not crate-private) so a caller whose own engine cannot cross a
+/// `tokio::spawn` boundary — `ferrite-ui`'s live `BorrowedServoEngine`,
+/// which wraps a `!Send` `HeadlessServoSession` — can still reuse this
+/// exact per-action dispatch logic from a message-driven step loop of its
+/// own, rather than duplicating it, even though it cannot call
+/// [`run_agent_loop`] directly for the reason [`BrowserEngine`]'s own
+/// module docs give (no `Send` bound, by design). See
+/// `docs/handoffs/b03.md` for the full reasoning.
+pub fn execute_action(engine: &mut dyn BrowserEngine, action: &AgentAction) -> String {
     let result = match action {
         AgentAction::Navigate { url } => engine
             .navigate(url)
@@ -291,7 +300,13 @@ fn execute_action(engine: &mut dyn BrowserEngine, action: &AgentAction) -> Strin
 /// plain constant (not versioned/cached like `ferrite-model`'s §10.3
 /// system prompts) because this loop does not yet route through the
 /// content-addressed cache — see the module docs' scope note.
-const SYSTEM_PROMPT: &str = r#"You are Ferrite, an agentic browser assistant.
+///
+/// `pub` so a caller that cannot call [`run_agent_loop`] directly (e.g.
+/// `ferrite-ui`'s live loop, driven step-by-step because its engine cannot
+/// cross a `tokio::spawn` boundary — see [`execute_action`]'s own doc
+/// comment) can still ask the model with the exact same prompt this loop
+/// uses, rather than a second, independently-maintained copy of the text.
+pub const SYSTEM_PROMPT: &str = r#"You are Ferrite, an agentic browser assistant.
 Respond with exactly one JSON object describing your next action, matching
 this shape: {"action": "<name>", ...fields}. Valid actions: navigate{url},
 go_back, go_forward, reload, read_dom, query{selector}, read_text{selector},
@@ -301,16 +316,40 @@ wait_idle, screenshot, download{url}, clipboard_read,
 clipboard_write{text}, js_execute{script}, finish{answer}.
 Respond with the JSON object only, no other text."#;
 
+/// Version tag passed to [`ferrite_model::CompletionRequest::with_system_prompt`]
+/// alongside [`SYSTEM_PROMPT`] — kept as a named constant so both this
+/// module and any external caller reusing the same prompt text pass the
+/// identical version rather than two independently-chosen literals.
+pub const SYSTEM_PROMPT_VERSION: u32 = 1;
+
 /// Runs the plan → select tool → act → observe → repeat loop until the
 /// model finishes, or a budget/loop-detection stop fires.
 ///
-/// Engine-agnostic (`&mut dyn BrowserEngine`) and provider-agnostic
-/// (`&dyn ModelProvider`), per the directive. `clock` is injected so a test
-/// can enforce the wall-clock budget deterministically (R8) — production
-/// callers pass `&ferrite_core::SystemClock`.
-pub async fn run_agent_loop(
+/// Engine-agnostic and provider-agnostic (`&dyn ModelProvider`), per the
+/// directive. `clock` is injected so a test can enforce the wall-clock
+/// budget deterministically (R8) — production callers pass
+/// `&ferrite_core::SystemClock`.
+///
+/// # Why `<E: BrowserEngine>` rather than `&mut dyn BrowserEngine`
+///
+/// A trait object erases its concrete type's auto traits: even though
+/// `ferrite_ipi::dry_run::DryRunEngine` is `Send` (plain owned fields, no
+/// `Rc`), calling a function whose *signature* names `&mut dyn
+/// BrowserEngine` produces a future that is unconditionally `!Send`,
+/// because `dyn BrowserEngine` itself carries no `Send` bound (deliberately
+/// — see that trait's own module docs, for `ServoEngine`'s sake). Being
+/// generic instead lets the caller's own monomorphized type's `Send`-ness
+/// propagate: `run_agent_loop::<DryRunEngine>`'s future is `Send` (so
+/// `ferrite-ui`'s `BrowserLoopDryRunDriver` can call it inside a
+/// `tokio::spawn`ed dry-run task), while `run_agent_loop::<ServoEngine>`
+/// correctly stays `!Send`, exactly reflecting that engine's real
+/// constraint. `E` stays `Sized` (no `?Sized`): the internal call to
+/// [`execute_action`] (which takes `&mut dyn BrowserEngine`) needs an
+/// unsized-coercion site, and that coercion itself requires a `Sized`
+/// source type.
+pub async fn run_agent_loop<E: BrowserEngine>(
     provider: &dyn ModelProvider,
-    engine: &mut dyn BrowserEngine,
+    engine: &mut E,
     clock: &dyn Clock,
     model_tag: &str,
     tier: ModelTier,
@@ -335,7 +374,7 @@ pub async fn run_agent_loop(
         }
 
         let request = CompletionRequest::new(model_tag, tier, messages.clone())
-            .with_system_prompt(SYSTEM_PROMPT, 1);
+            .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION);
         let response = match provider.complete(request).await {
             Ok(r) => r,
             Err(e) => {

@@ -1,5 +1,6 @@
-//! `ServoEngine`: the real, Servo-backed [`BrowserEngine`] embedding
-//! (`docs/REBUILD_DIRECTIVE.md` §6/A9, T-109).
+//! `ServoEngine`/[`BorrowedServoEngine`]: the real, Servo-backed
+//! [`BrowserEngine`] embeddings (`docs/REBUILD_DIRECTIVE.md` §6/A9, T-109;
+//! `BorrowedServoEngine` added by B3, T-220/T-224).
 //!
 //! This crate wraps `ferrite_servo::session::HeadlessServoSession` — an
 //! **existing**, feature-gated, real Servo integration — rather than
@@ -14,10 +15,47 @@
 //! engine-servo = ["ferrite-servo/servo"]
 //! ```
 //!
-//! so `ServoEngine` compiles unconditionally (as part of a normal
-//! `cargo build --workspace`, with zero Servo dependency cost — directive
-//! §7.1), and only becomes a *real* browser when built with
-//! `--features engine-servo` (`just build-servo`).
+//! so `ServoEngine`/`BorrowedServoEngine` compile unconditionally (as part
+//! of a normal `cargo build --workspace`, with zero Servo dependency cost —
+//! directive §7.1), and only become a *real* browser when built with
+//! `--features engine-servo` (`just build-servo`) — or, for
+//! `BorrowedServoEngine`, whenever the process that constructs the
+//! `HeadlessServoSession` it borrows was itself built with
+//! `ferrite-servo/servo` (e.g. `cargo run -p ferrite-shell --features
+//! ferrite-servo/servo`, which is how `ferrite-ui` gets a real one).
+//!
+//! # Two engines, one implementation (`mod ops`)
+//!
+//! [`ServoEngine`] **owns** one or more `HeadlessServoSession`s (one per
+//! tab) and is the right choice for a caller that has no session of its own
+//! yet and wants this crate to create and manage them — `ferrite-eval`'s
+//! conformance suite, `ferrite-shell`'s `agent-smoke`.
+//!
+//! [`BorrowedServoEngine`] wraps a single **externally-owned**
+//! `&mut HeadlessServoSession` instead of constructing one. This exists for
+//! `ferrite-ui` (T-220/T-224, `docs/TO-DO.md`): the live app already owns a
+//! `HeadlessServoSession` per tab, already drives it correctly via Iced's
+//! real winit event loop (`FerriteBrowser::servo_sessions`, ticked every
+//! 16ms by the `ServoFrame` subscription) — the exact ingredient T-220 found
+//! missing from `ServoEngine`'s own standalone conformance-test environment,
+//! which never had a real winit `EventLoop` in the process at all. Rather
+//! than have `ferrite-ui` hand its live, correctly-driven session over to a
+//! *second*, engine-owned session (duplicating Servo state, or requiring
+//! `ferrite-ui`'s own navigation/rendering code to go through the engine
+//! too), `BorrowedServoEngine` gives that exact session a `BrowserEngine`
+//! face directly — one session, two views onto it (the tab UI's direct
+//! calls, and the agent loop's `BrowserEngine` calls), never two sessions.
+//!
+//! Both engines share one implementation of every DOM/JS/navigation method
+//! (the private `ops` module below, parameterized over `&mut
+//! HeadlessServoSession` rather than `&mut self`) — no method's script or
+//! logic is duplicated between them. `ServoEngine`'s own tab-management
+//! methods (`open_tab`/`close_tab`/`switch_tab`) have no equivalent on
+//! `BorrowedServoEngine`, which wraps exactly one, externally-managed tab —
+//! see that impl's own methods for why they return
+//! [`EngineError::Unsupported`] rather than silently doing something a
+//! caller would not expect (opening a second, engine-owned session behind
+//! the host application's back).
 //!
 //! # Mapping decisions — read before assuming a method "just works"
 //!
@@ -47,11 +85,7 @@
 //!   escaping coincide for the common ASCII/BMP case). This is a real,
 //!   working mechanism, not a placeholder — but it depends on
 //!   `execute_js`'s current, untyped return channel, and breaks if that
-//!   channel's underlying type ever changes. It could not be exercised
-//!   against a real running `WebView` in this session (see
-//!   `docs/handoffs/a09.md` for why); `unwrap_js_string_result`'s own unit
-//!   tests cover the shape this session's reading of `ferrite-servo`'s
-//!   source predicts.
+//!   channel's underlying type ever changes.
 //! - **`js_execute` itself does *not* attempt this unwrapping.** A
 //!   caller's arbitrary script can return any JS value type, each
 //!   Debug-formatted differently, and guessing at all of them is out of
@@ -77,14 +111,17 @@
 //!   a missing feature dressed up as one: it makes reading another
 //!   origin's cookies/storage impossible through this path, which is the
 //!   security property `cookies_read`/`storage_read` scoping exists for.
-//! - **Tabs are real**: each open tab is its own
+//! - **`ServoEngine` tabs are real**: each open tab is its own
 //!   `HeadlessServoSession`, sharing the same process-wide Servo engine
 //!   (`ferrite-servo`'s own `get_or_init_servo` singleton) — this mirrors
-//!   how `ferrite-shell` already runs multiple tabs.
-//! - **A fresh tab starts at `about:blank`**, a real, opaque origin — see
-//!   `ferrite_engine`'s module docs for why this is a typed
+//!   how `ferrite-shell` already runs multiple tabs. `BorrowedServoEngine`
+//!   has no tab model of its own at all — see the module docs above.
+//! - **A fresh `ServoEngine` tab starts at `about:blank`**, a real, opaque
+//!   origin — see `ferrite_engine`'s module docs for why this is a typed
 //!   [`EngineError::OpaqueOrigin`] here, unlike `MockEngine`'s synthetic
-//!   placeholder home origin.
+//!   placeholder home origin. A `BorrowedServoEngine` reports whatever
+//!   origin its borrowed session is already showing, which may likewise be
+//!   `about:blank` on a freshly opened tab.
 
 #![deny(missing_docs)]
 
@@ -100,13 +137,335 @@ use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 const NAV_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 
+// ---------------------------------------------------------------------------
+// ops: the one implementation of every BrowserEngine method, over a borrowed
+// `&mut HeadlessServoSession`. `ServoEngine` and `BorrowedServoEngine` both
+// call into this — see the module docs above for why.
+// ---------------------------------------------------------------------------
+mod ops {
+    use super::{
+        Cookie, ElementHandle, EngineError, HeadlessServoSession, Instant, LoadStatus, Origin,
+        WaitCondition, NAV_TIMEOUT, POLL_INTERVAL,
+    };
+    use ferrite_engine::DomSnapshot;
+
+    pub(crate) fn current_origin(session: &HeadlessServoSession) -> Result<Origin, EngineError> {
+        let url = session.current_url().to_string();
+        Origin::parse(&url).map_err(|e| EngineError::OpaqueOrigin(format!("{url}: {e}")))
+    }
+
+    /// Pumps `session` until it reports a settled load state or
+    /// `NAV_TIMEOUT` elapses — mirrors
+    /// `HeadlessServoSession::test_js_compat`'s own drive loop.
+    pub(crate) fn drive_until_loaded(
+        session: &mut HeadlessServoSession,
+    ) -> Result<(), EngineError> {
+        let deadline = Instant::now() + NAV_TIMEOUT;
+        loop {
+            session.spin();
+            let done = matches!(
+                session.load_status(),
+                LoadStatus::Complete | LoadStatus::Failed(_)
+            );
+            if done || Instant::now() >= deadline {
+                return Ok(());
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    /// Runs `script` (which must itself call `JSON.stringify(...)`) and
+    /// returns the unwrapped, unescaped JSON text it produced.
+    pub(crate) fn run_json_js(
+        session: &mut HeadlessServoSession,
+        script: &str,
+    ) -> Result<String, EngineError> {
+        let raw = session.execute_js(script).map_err(EngineError::Internal)?;
+        super::unwrap_js_string_result(&raw)
+    }
+
+    pub(crate) fn navigate(
+        session: &mut HeadlessServoSession,
+        url: &str,
+    ) -> Result<((), Origin), EngineError> {
+        session.navigate(url);
+        drive_until_loaded(session)?;
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn go_back(session: &mut HeadlessServoSession) -> Result<((), Origin), EngineError> {
+        session.go_back();
+        drive_until_loaded(session)?;
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn go_forward(
+        session: &mut HeadlessServoSession,
+    ) -> Result<((), Origin), EngineError> {
+        session.go_forward();
+        drive_until_loaded(session)?;
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn reload(session: &mut HeadlessServoSession) -> Result<((), Origin), EngineError> {
+        session.reload();
+        drive_until_loaded(session)?;
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn current_url(
+        session: &HeadlessServoSession,
+    ) -> Result<(String, Origin), EngineError> {
+        let url = session.current_url().to_string();
+        Ok((url, current_origin(session)?))
+    }
+
+    pub(crate) fn dom_snapshot(
+        session: &mut HeadlessServoSession,
+    ) -> Result<(DomSnapshot, Origin), EngineError> {
+        let json = run_json_js(session, super::SNAPSHOT_SCRIPT)?;
+        let snapshot: DomSnapshot = serde_json::from_str(&json).map_err(|e| {
+            EngineError::Internal(format!(
+                "dom_snapshot: malformed JSON from page script: {e}"
+            ))
+        })?;
+        Ok((snapshot, current_origin(session)?))
+    }
+
+    pub(crate) fn query(
+        session: &mut HeadlessServoSession,
+        selector: &str,
+    ) -> Result<(Vec<ElementHandle>, Origin), EngineError> {
+        let script = format!(
+            "(function(sel){{ var out=[]; document.querySelectorAll(sel).forEach(function(el,i){{ \
+             out.push({{selector: sel+':nth-match('+i+')', role: el.getAttribute('role')||el.tagName.toLowerCase(), \
+             text: el.textContent?el.textContent.trim():null}}); }}); return JSON.stringify(out); }})({})",
+            super::js_string_literal(selector)
+        );
+        let json = run_json_js(session, &script)?;
+        let handles: Vec<ElementHandle> = serde_json::from_str(&json).map_err(|e| {
+            EngineError::Internal(format!("query: malformed JSON from page script: {e}"))
+        })?;
+        Ok((handles, current_origin(session)?))
+    }
+
+    pub(crate) fn read_text(
+        session: &mut HeadlessServoSession,
+        selector: &str,
+    ) -> Result<(String, Origin), EngineError> {
+        let script = format!(
+            "(function(sel){{ var el=document.querySelector(sel); return JSON.stringify(el ? (el.textContent||'').trim() : null); }})({})",
+            super::js_string_literal(selector)
+        );
+        let json = run_json_js(session, &script)?;
+        let text: Option<String> = serde_json::from_str(&json).map_err(|e| {
+            EngineError::Internal(format!("read_text: malformed JSON from page script: {e}"))
+        })?;
+        match text {
+            Some(t) => Ok((t, current_origin(session)?)),
+            None => Err(EngineError::ElementNotFound(selector.to_string())),
+        }
+    }
+
+    pub(crate) fn click(
+        session: &mut HeadlessServoSession,
+        selector: &str,
+    ) -> Result<((), Origin), EngineError> {
+        let script = format!(
+            "(function(sel){{ var el=document.querySelector(sel); if(!el) return JSON.stringify(false); el.click(); return JSON.stringify(true); }})({})",
+            super::js_string_literal(selector)
+        );
+        let json = run_json_js(session, &script)?;
+        let found: bool = serde_json::from_str(&json).unwrap_or(false);
+        if !found {
+            return Err(EngineError::ElementNotFound(selector.to_string()));
+        }
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn type_text(
+        session: &mut HeadlessServoSession,
+        selector: &str,
+        text: &str,
+    ) -> Result<((), Origin), EngineError> {
+        let script = format!(
+            "(function(sel,val){{ var el=document.querySelector(sel); if(!el) return JSON.stringify(false); \
+             el.value=val; el.dispatchEvent(new Event('input',{{bubbles:true}})); return JSON.stringify(true); }})({},{})",
+            super::js_string_literal(selector),
+            super::js_string_literal(text)
+        );
+        let json = run_json_js(session, &script)?;
+        let found: bool = serde_json::from_str(&json).unwrap_or(false);
+        if !found {
+            return Err(EngineError::ElementNotFound(selector.to_string()));
+        }
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn fill_form(
+        session: &mut HeadlessServoSession,
+        fields: &[(String, String)],
+    ) -> Result<((), Origin), EngineError> {
+        for (selector, value) in fields {
+            type_text(session, selector, value)?;
+        }
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn select_option(
+        session: &mut HeadlessServoSession,
+        selector: &str,
+        value: &str,
+    ) -> Result<((), Origin), EngineError> {
+        let script = format!(
+            "(function(sel,val){{ var el=document.querySelector(sel); if(!el) return JSON.stringify(false); \
+             el.value=val; el.dispatchEvent(new Event('change',{{bubbles:true}})); return JSON.stringify(true); }})({},{})",
+            super::js_string_literal(selector),
+            super::js_string_literal(value)
+        );
+        let json = run_json_js(session, &script)?;
+        let found: bool = serde_json::from_str(&json).unwrap_or(false);
+        if !found {
+            return Err(EngineError::ElementNotFound(selector.to_string()));
+        }
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn scroll(
+        session: &mut HeadlessServoSession,
+        width: u32,
+        height: u32,
+        dx: i64,
+        dy: i64,
+    ) -> Result<((), Origin), EngineError> {
+        let (cx, cy) = (width as f32 / 2.0, height as f32 / 2.0);
+        session.send_scroll(cx, cy, dx as f64, dy as f64);
+        session.spin();
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn wait_for(
+        session: &mut HeadlessServoSession,
+        condition: WaitCondition,
+    ) -> Result<((), Origin), EngineError> {
+        match condition {
+            WaitCondition::Idle => {
+                drive_until_loaded(session)?;
+                Ok(((), current_origin(session)?))
+            }
+            WaitCondition::Timeout(duration) => {
+                let deadline = Instant::now() + duration;
+                while Instant::now() < deadline {
+                    session.spin();
+                    std::thread::sleep(POLL_INTERVAL.min(duration));
+                }
+                Ok(((), current_origin(session)?))
+            }
+            WaitCondition::Selector(selector) => {
+                let deadline = Instant::now() + NAV_TIMEOUT;
+                loop {
+                    if query(session, &selector)
+                        .map(|(h, _)| !h.is_empty())
+                        .unwrap_or(false)
+                    {
+                        return Ok(((), current_origin(session)?));
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(EngineError::WaitTimedOut);
+                    }
+                    session.spin();
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn screenshot(
+        session: &mut HeadlessServoSession,
+    ) -> Result<(super::Frame, Origin), EngineError> {
+        session.spin();
+        let frame = session
+            .get_frame()
+            .ok_or_else(|| EngineError::Internal("no frame has been rendered yet".to_string()))?;
+        Ok((frame, current_origin(session)?))
+    }
+
+    pub(crate) fn cookies_read(
+        session: &mut HeadlessServoSession,
+        scope: &Origin,
+    ) -> Result<(Vec<Cookie>, Origin), EngineError> {
+        let origin = current_origin(session)?;
+        if scope != &origin {
+            return Err(EngineError::Unsupported(
+                "cookies_read: scope must be the currently loaded page's own origin",
+            ));
+        }
+        let json = run_json_js(
+            session,
+            "(function(){ return JSON.stringify(document.cookie); })()",
+        )?;
+        let raw: String = serde_json::from_str(&json).map_err(|e| {
+            EngineError::Internal(format!(
+                "cookies_read: malformed JSON from page script: {e}"
+            ))
+        })?;
+        let cookies = raw
+            .split(';')
+            .filter_map(|pair| {
+                let pair = pair.trim();
+                if pair.is_empty() {
+                    return None;
+                }
+                let (name, value) = pair.split_once('=')?;
+                Some(Cookie {
+                    name: name.trim().to_string(),
+                    value: value.trim().to_string(),
+                })
+            })
+            .collect();
+        Ok((cookies, origin))
+    }
+
+    pub(crate) fn storage_read(
+        session: &mut HeadlessServoSession,
+        scope: &Origin,
+    ) -> Result<(Vec<(String, String)>, Origin), EngineError> {
+        let origin = current_origin(session)?;
+        if scope != &origin {
+            return Err(EngineError::Unsupported(
+                "storage_read: scope must be the currently loaded page's own origin",
+            ));
+        }
+        let json = run_json_js(
+            session,
+            "(function(){ var out=[]; for (var i=0;i<localStorage.length;i++){ \
+             var k=localStorage.key(i); out.push([k, localStorage.getItem(k)]); } \
+             return JSON.stringify(out); })()",
+        )?;
+        let kv: Vec<(String, String)> = serde_json::from_str(&json).map_err(|e| {
+            EngineError::Internal(format!(
+                "storage_read: malformed JSON from page script: {e}"
+            ))
+        })?;
+        Ok((kv, origin))
+    }
+
+    pub(crate) fn js_execute(
+        session: &mut HeadlessServoSession,
+        script: &str,
+    ) -> Result<(String, Origin), EngineError> {
+        let raw = session.execute_js(script).map_err(EngineError::Internal)?;
+        Ok((raw, current_origin(session)?))
+    }
+}
+
 struct Tab {
     session: HeadlessServoSession,
 }
 
-/// The real, Servo-backed [`BrowserEngine`].
-///
-/// See the [module docs](self) for the full method-by-method mapping onto
+/// The real, Servo-backed [`BrowserEngine`] that **owns** every tab's
+/// session. See the [module docs](self) for when to use this vs.
+/// [`BorrowedServoEngine`], and for the full method-by-method mapping onto
 /// `HeadlessServoSession`, including the methods this engine honestly
 /// cannot support today (`download`, `clipboard_*`, cross-origin
 /// `cookies_read`/`storage_read`).
@@ -164,42 +523,296 @@ impl ServoEngine {
             .get_mut(&self.active)
             .ok_or(EngineError::NoSuchTab(self.active))
     }
+}
 
-    fn current_origin(&self) -> Result<Origin, EngineError> {
-        let url = self.active_tab()?.session.current_url().to_string();
-        Origin::parse(&url).map_err(|e| EngineError::OpaqueOrigin(format!("{url}: {e}")))
+impl BrowserEngine for ServoEngine {
+    fn navigate(&mut self, url: &str) -> Result<((), Origin), EngineError> {
+        ops::navigate(&mut self.active_tab_mut()?.session, url)
     }
 
-    /// Pumps the active tab's session until it reports a settled load
-    /// state or `NAV_TIMEOUT` elapses — mirrors
-    /// `HeadlessServoSession::test_js_compat`'s own drive loop.
-    fn drive_until_loaded(&mut self) -> Result<(), EngineError> {
-        let deadline = Instant::now() + NAV_TIMEOUT;
-        loop {
-            let done = {
-                let tab = self.active_tab_mut()?;
-                tab.session.spin();
-                matches!(
-                    tab.session.load_status(),
-                    LoadStatus::Complete | LoadStatus::Failed(_)
-                )
-            };
-            if done || Instant::now() >= deadline {
-                return Ok(());
+    fn go_back(&mut self) -> Result<((), Origin), EngineError> {
+        ops::go_back(&mut self.active_tab_mut()?.session)
+    }
+
+    fn go_forward(&mut self) -> Result<((), Origin), EngineError> {
+        ops::go_forward(&mut self.active_tab_mut()?.session)
+    }
+
+    fn reload(&mut self) -> Result<((), Origin), EngineError> {
+        ops::reload(&mut self.active_tab_mut()?.session)
+    }
+
+    fn current_url(&mut self) -> Result<(String, Origin), EngineError> {
+        ops::current_url(&self.active_tab()?.session)
+    }
+
+    fn dom_snapshot(&mut self) -> Result<(DomSnapshot, Origin), EngineError> {
+        ops::dom_snapshot(&mut self.active_tab_mut()?.session)
+    }
+
+    fn query(&mut self, selector: &str) -> Result<(Vec<ElementHandle>, Origin), EngineError> {
+        ops::query(&mut self.active_tab_mut()?.session, selector)
+    }
+
+    fn read_text(&mut self, selector: &str) -> Result<(String, Origin), EngineError> {
+        ops::read_text(&mut self.active_tab_mut()?.session, selector)
+    }
+
+    fn click(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
+        ops::click(&mut self.active_tab_mut()?.session, selector)
+    }
+
+    fn type_text(&mut self, selector: &str, text: &str) -> Result<((), Origin), EngineError> {
+        ops::type_text(&mut self.active_tab_mut()?.session, selector, text)
+    }
+
+    fn fill_form(&mut self, fields: &[(String, String)]) -> Result<((), Origin), EngineError> {
+        ops::fill_form(&mut self.active_tab_mut()?.session, fields)
+    }
+
+    fn select_option(&mut self, selector: &str, value: &str) -> Result<((), Origin), EngineError> {
+        ops::select_option(&mut self.active_tab_mut()?.session, selector, value)
+    }
+
+    fn scroll(&mut self, dx: i64, dy: i64) -> Result<((), Origin), EngineError> {
+        let (width, height) = (self.width, self.height);
+        ops::scroll(&mut self.active_tab_mut()?.session, width, height, dx, dy)
+    }
+
+    fn wait_for(&mut self, condition: WaitCondition) -> Result<((), Origin), EngineError> {
+        ops::wait_for(&mut self.active_tab_mut()?.session, condition)
+    }
+
+    fn screenshot(&mut self) -> Result<(Frame, Origin), EngineError> {
+        ops::screenshot(&mut self.active_tab_mut()?.session)
+    }
+
+    fn download(&mut self, _url: &str) -> Result<(String, Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "download: HeadlessServoSession has no download manager wired up",
+        ))
+    }
+
+    fn open_tab(&mut self, url: Option<&str>) -> Result<(TabId, Origin), EngineError> {
+        let session =
+            HeadlessServoSession::new(self.width, self.height).map_err(EngineError::Internal)?;
+        let id = TabId(self.next_tab);
+        self.next_tab += 1;
+        self.tabs.insert(id, Tab { session });
+        self.active = id;
+        if let Some(url) = url {
+            ops::navigate(&mut self.active_tab_mut()?.session, url)?;
+        }
+        Ok((id, ops::current_origin(&self.active_tab()?.session)?))
+    }
+
+    fn close_tab(&mut self, tab: TabId) -> Result<((), Origin), EngineError> {
+        if self.tabs.remove(&tab).is_none() {
+            return Err(EngineError::NoSuchTab(tab));
+        }
+        if self.active == tab {
+            if let Some(&next) = self.tabs.keys().next() {
+                self.active = next;
+            } else {
+                let session = HeadlessServoSession::new(self.width, self.height)
+                    .map_err(EngineError::Internal)?;
+                let id = TabId(self.next_tab);
+                self.next_tab += 1;
+                self.tabs.insert(id, Tab { session });
+                self.active = id;
             }
-            std::thread::sleep(POLL_INTERVAL);
+        }
+        Ok(((), ops::current_origin(&self.active_tab()?.session)?))
+    }
+
+    fn switch_tab(&mut self, tab: TabId) -> Result<((), Origin), EngineError> {
+        if !self.tabs.contains_key(&tab) {
+            return Err(EngineError::NoSuchTab(tab));
+        }
+        self.active = tab;
+        Ok(((), ops::current_origin(&self.active_tab()?.session)?))
+    }
+
+    fn cookies_read(&mut self, scope: &Origin) -> Result<(Vec<Cookie>, Origin), EngineError> {
+        ops::cookies_read(&mut self.active_tab_mut()?.session, scope)
+    }
+
+    fn storage_read(
+        &mut self,
+        scope: &Origin,
+    ) -> Result<(Vec<(String, String)>, Origin), EngineError> {
+        ops::storage_read(&mut self.active_tab_mut()?.session, scope)
+    }
+
+    fn clipboard_read(&mut self) -> Result<(String, Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "clipboard_read: HeadlessServoSession exposes no synchronous clipboard API",
+        ))
+    }
+
+    fn clipboard_write(&mut self, _text: &str) -> Result<((), Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "clipboard_write: HeadlessServoSession exposes no synchronous clipboard API",
+        ))
+    }
+
+    fn js_execute(&mut self, script: &str) -> Result<(String, Origin), EngineError> {
+        ops::js_execute(&mut self.active_tab_mut()?.session, script)
+    }
+}
+
+/// A [`BrowserEngine`] face over a single, **externally-owned**
+/// `HeadlessServoSession` — see the [module docs](self) for why this exists
+/// alongside [`ServoEngine`] (T-220/T-224).
+///
+/// Wraps the session by mutable reference rather than taking ownership: the
+/// host application (`ferrite-ui`) keeps driving the session's rendering
+/// and navigation exactly as it already does (its own `ServoFrame`
+/// subscription tick, its own tab bookkeeping) — this type only adds a
+/// second way to *act* on the same session, for the duration of one
+/// borrow, never a second session to keep in sync.
+pub struct BorrowedServoEngine<'a> {
+    session: &'a mut HeadlessServoSession,
+    width: u32,
+    height: u32,
+}
+
+impl<'a> BorrowedServoEngine<'a> {
+    /// Wraps `session` (sized `width × height`, matching whatever the host
+    /// last called `session.resize(width, height)` with) in a
+    /// [`BrowserEngine`] face for the duration of this borrow.
+    #[must_use]
+    pub fn new(session: &'a mut HeadlessServoSession, width: u32, height: u32) -> Self {
+        Self {
+            session,
+            width,
+            height,
         }
     }
+}
 
-    /// Runs `script` (which must itself call `JSON.stringify(...)`) and
-    /// returns the unwrapped, unescaped JSON text it produced.
-    fn run_json_js(&mut self, script: &str) -> Result<String, EngineError> {
-        let raw = self
-            .active_tab_mut()?
-            .session
-            .execute_js(script)
-            .map_err(EngineError::Internal)?;
-        unwrap_js_string_result(&raw)
+impl<'a> std::fmt::Debug for BorrowedServoEngine<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BorrowedServoEngine")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
+}
+
+impl<'a> BrowserEngine for BorrowedServoEngine<'a> {
+    fn navigate(&mut self, url: &str) -> Result<((), Origin), EngineError> {
+        ops::navigate(self.session, url)
+    }
+
+    fn go_back(&mut self) -> Result<((), Origin), EngineError> {
+        ops::go_back(self.session)
+    }
+
+    fn go_forward(&mut self) -> Result<((), Origin), EngineError> {
+        ops::go_forward(self.session)
+    }
+
+    fn reload(&mut self) -> Result<((), Origin), EngineError> {
+        ops::reload(self.session)
+    }
+
+    fn current_url(&mut self) -> Result<(String, Origin), EngineError> {
+        ops::current_url(self.session)
+    }
+
+    fn dom_snapshot(&mut self) -> Result<(DomSnapshot, Origin), EngineError> {
+        ops::dom_snapshot(self.session)
+    }
+
+    fn query(&mut self, selector: &str) -> Result<(Vec<ElementHandle>, Origin), EngineError> {
+        ops::query(self.session, selector)
+    }
+
+    fn read_text(&mut self, selector: &str) -> Result<(String, Origin), EngineError> {
+        ops::read_text(self.session, selector)
+    }
+
+    fn click(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
+        ops::click(self.session, selector)
+    }
+
+    fn type_text(&mut self, selector: &str, text: &str) -> Result<((), Origin), EngineError> {
+        ops::type_text(self.session, selector, text)
+    }
+
+    fn fill_form(&mut self, fields: &[(String, String)]) -> Result<((), Origin), EngineError> {
+        ops::fill_form(self.session, fields)
+    }
+
+    fn select_option(&mut self, selector: &str, value: &str) -> Result<((), Origin), EngineError> {
+        ops::select_option(self.session, selector, value)
+    }
+
+    fn scroll(&mut self, dx: i64, dy: i64) -> Result<((), Origin), EngineError> {
+        ops::scroll(self.session, self.width, self.height, dx, dy)
+    }
+
+    fn wait_for(&mut self, condition: WaitCondition) -> Result<((), Origin), EngineError> {
+        ops::wait_for(self.session, condition)
+    }
+
+    fn screenshot(&mut self) -> Result<(Frame, Origin), EngineError> {
+        ops::screenshot(self.session)
+    }
+
+    fn download(&mut self, _url: &str) -> Result<(String, Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "download: HeadlessServoSession has no download manager wired up",
+        ))
+    }
+
+    fn open_tab(&mut self, _url: Option<&str>) -> Result<(TabId, Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "open_tab: BorrowedServoEngine wraps a single, externally-managed tab — open a new \
+             tab through the host application instead",
+        ))
+    }
+
+    fn close_tab(&mut self, _tab: TabId) -> Result<((), Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "close_tab: BorrowedServoEngine wraps a single, externally-managed tab — close it \
+             through the host application instead",
+        ))
+    }
+
+    fn switch_tab(&mut self, _tab: TabId) -> Result<((), Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "switch_tab: BorrowedServoEngine wraps a single, externally-managed tab — switch \
+             tabs through the host application instead",
+        ))
+    }
+
+    fn cookies_read(&mut self, scope: &Origin) -> Result<(Vec<Cookie>, Origin), EngineError> {
+        ops::cookies_read(self.session, scope)
+    }
+
+    fn storage_read(
+        &mut self,
+        scope: &Origin,
+    ) -> Result<(Vec<(String, String)>, Origin), EngineError> {
+        ops::storage_read(self.session, scope)
+    }
+
+    fn clipboard_read(&mut self) -> Result<(String, Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "clipboard_read: HeadlessServoSession exposes no synchronous clipboard API",
+        ))
+    }
+
+    fn clipboard_write(&mut self, _text: &str) -> Result<((), Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "clipboard_write: HeadlessServoSession exposes no synchronous clipboard API",
+        ))
+    }
+
+    fn js_execute(&mut self, script: &str) -> Result<(String, Origin), EngineError> {
+        ops::js_execute(self.session, script)
     }
 }
 
@@ -252,301 +865,6 @@ const SNAPSHOT_SCRIPT: &str = r#"(function(){
   return JSON.stringify({root: nodeInfo(document.documentElement, 0) || {role:'generic',children:[]}});
 })()"#;
 
-impl BrowserEngine for ServoEngine {
-    fn navigate(&mut self, url: &str) -> Result<((), Origin), EngineError> {
-        self.active_tab_mut()?.session.navigate(url);
-        self.drive_until_loaded()?;
-        Ok(((), self.current_origin()?))
-    }
-
-    fn go_back(&mut self) -> Result<((), Origin), EngineError> {
-        self.active_tab_mut()?.session.go_back();
-        self.drive_until_loaded()?;
-        Ok(((), self.current_origin()?))
-    }
-
-    fn go_forward(&mut self) -> Result<((), Origin), EngineError> {
-        self.active_tab_mut()?.session.go_forward();
-        self.drive_until_loaded()?;
-        Ok(((), self.current_origin()?))
-    }
-
-    fn reload(&mut self) -> Result<((), Origin), EngineError> {
-        self.active_tab_mut()?.session.reload();
-        self.drive_until_loaded()?;
-        Ok(((), self.current_origin()?))
-    }
-
-    fn current_url(&mut self) -> Result<(String, Origin), EngineError> {
-        let url = self.active_tab()?.session.current_url().to_string();
-        let origin = self.current_origin()?;
-        Ok((url, origin))
-    }
-
-    fn dom_snapshot(&mut self) -> Result<(DomSnapshot, Origin), EngineError> {
-        let json = self.run_json_js(SNAPSHOT_SCRIPT)?;
-        let snapshot: DomSnapshot = serde_json::from_str(&json).map_err(|e| {
-            EngineError::Internal(format!(
-                "dom_snapshot: malformed JSON from page script: {e}"
-            ))
-        })?;
-        Ok((snapshot, self.current_origin()?))
-    }
-
-    fn query(&mut self, selector: &str) -> Result<(Vec<ElementHandle>, Origin), EngineError> {
-        let script = format!(
-            "(function(sel){{ var out=[]; document.querySelectorAll(sel).forEach(function(el,i){{ \
-             out.push({{selector: sel+':nth-match('+i+')', role: el.getAttribute('role')||el.tagName.toLowerCase(), \
-             text: el.textContent?el.textContent.trim():null}}); }}); return JSON.stringify(out); }})({})",
-            js_string_literal(selector)
-        );
-        let json = self.run_json_js(&script)?;
-        let handles: Vec<ElementHandle> = serde_json::from_str(&json).map_err(|e| {
-            EngineError::Internal(format!("query: malformed JSON from page script: {e}"))
-        })?;
-        Ok((handles, self.current_origin()?))
-    }
-
-    fn read_text(&mut self, selector: &str) -> Result<(String, Origin), EngineError> {
-        let script = format!(
-            "(function(sel){{ var el=document.querySelector(sel); return JSON.stringify(el ? (el.textContent||'').trim() : null); }})({})",
-            js_string_literal(selector)
-        );
-        let json = self.run_json_js(&script)?;
-        let text: Option<String> = serde_json::from_str(&json).map_err(|e| {
-            EngineError::Internal(format!("read_text: malformed JSON from page script: {e}"))
-        })?;
-        match text {
-            Some(t) => Ok((t, self.current_origin()?)),
-            None => Err(EngineError::ElementNotFound(selector.to_string())),
-        }
-    }
-
-    fn click(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
-        let script = format!(
-            "(function(sel){{ var el=document.querySelector(sel); if(!el) return JSON.stringify(false); el.click(); return JSON.stringify(true); }})({})",
-            js_string_literal(selector)
-        );
-        let json = self.run_json_js(&script)?;
-        let found: bool = serde_json::from_str(&json).unwrap_or(false);
-        if !found {
-            return Err(EngineError::ElementNotFound(selector.to_string()));
-        }
-        Ok(((), self.current_origin()?))
-    }
-
-    fn type_text(&mut self, selector: &str, text: &str) -> Result<((), Origin), EngineError> {
-        let script = format!(
-            "(function(sel,val){{ var el=document.querySelector(sel); if(!el) return JSON.stringify(false); \
-             el.value=val; el.dispatchEvent(new Event('input',{{bubbles:true}})); return JSON.stringify(true); }})({},{})",
-            js_string_literal(selector),
-            js_string_literal(text)
-        );
-        let json = self.run_json_js(&script)?;
-        let found: bool = serde_json::from_str(&json).unwrap_or(false);
-        if !found {
-            return Err(EngineError::ElementNotFound(selector.to_string()));
-        }
-        Ok(((), self.current_origin()?))
-    }
-
-    fn fill_form(&mut self, fields: &[(String, String)]) -> Result<((), Origin), EngineError> {
-        for (selector, value) in fields {
-            self.type_text(selector, value)?;
-        }
-        Ok(((), self.current_origin()?))
-    }
-
-    fn select_option(&mut self, selector: &str, value: &str) -> Result<((), Origin), EngineError> {
-        let script = format!(
-            "(function(sel,val){{ var el=document.querySelector(sel); if(!el) return JSON.stringify(false); \
-             el.value=val; el.dispatchEvent(new Event('change',{{bubbles:true}})); return JSON.stringify(true); }})({},{})",
-            js_string_literal(selector),
-            js_string_literal(value)
-        );
-        let json = self.run_json_js(&script)?;
-        let found: bool = serde_json::from_str(&json).unwrap_or(false);
-        if !found {
-            return Err(EngineError::ElementNotFound(selector.to_string()));
-        }
-        Ok(((), self.current_origin()?))
-    }
-
-    fn scroll(&mut self, dx: i64, dy: i64) -> Result<((), Origin), EngineError> {
-        let (cx, cy) = (self.width as f32 / 2.0, self.height as f32 / 2.0);
-        self.active_tab_mut()?
-            .session
-            .send_scroll(cx, cy, dx as f64, dy as f64);
-        self.active_tab_mut()?.session.spin();
-        Ok(((), self.current_origin()?))
-    }
-
-    fn wait_for(&mut self, condition: WaitCondition) -> Result<((), Origin), EngineError> {
-        match condition {
-            WaitCondition::Idle => {
-                self.drive_until_loaded()?;
-                Ok(((), self.current_origin()?))
-            }
-            WaitCondition::Timeout(duration) => {
-                let deadline = Instant::now() + duration;
-                while Instant::now() < deadline {
-                    self.active_tab_mut()?.session.spin();
-                    std::thread::sleep(POLL_INTERVAL.min(duration));
-                }
-                Ok(((), self.current_origin()?))
-            }
-            WaitCondition::Selector(selector) => {
-                let deadline = Instant::now() + NAV_TIMEOUT;
-                loop {
-                    if self
-                        .query(&selector)
-                        .map(|(h, _)| !h.is_empty())
-                        .unwrap_or(false)
-                    {
-                        return Ok(((), self.current_origin()?));
-                    }
-                    if Instant::now() >= deadline {
-                        return Err(EngineError::WaitTimedOut);
-                    }
-                    self.active_tab_mut()?.session.spin();
-                    std::thread::sleep(POLL_INTERVAL);
-                }
-            }
-        }
-    }
-
-    fn screenshot(&mut self) -> Result<(Frame, Origin), EngineError> {
-        let tab = self.active_tab_mut()?;
-        tab.session.spin();
-        let frame = tab
-            .session
-            .get_frame()
-            .ok_or_else(|| EngineError::Internal("no frame has been rendered yet".to_string()))?;
-        Ok((frame, self.current_origin()?))
-    }
-
-    fn download(&mut self, _url: &str) -> Result<(String, Origin), EngineError> {
-        Err(EngineError::Unsupported(
-            "download: HeadlessServoSession has no download manager wired up",
-        ))
-    }
-
-    fn open_tab(&mut self, url: Option<&str>) -> Result<(TabId, Origin), EngineError> {
-        let session =
-            HeadlessServoSession::new(self.width, self.height).map_err(EngineError::Internal)?;
-        let id = TabId(self.next_tab);
-        self.next_tab += 1;
-        self.tabs.insert(id, Tab { session });
-        self.active = id;
-        if let Some(url) = url {
-            self.active_tab_mut()?.session.navigate(url);
-            self.drive_until_loaded()?;
-        }
-        Ok((id, self.current_origin()?))
-    }
-
-    fn close_tab(&mut self, tab: TabId) -> Result<((), Origin), EngineError> {
-        if self.tabs.remove(&tab).is_none() {
-            return Err(EngineError::NoSuchTab(tab));
-        }
-        if self.active == tab {
-            if let Some(&next) = self.tabs.keys().next() {
-                self.active = next;
-            } else {
-                let session = HeadlessServoSession::new(self.width, self.height)
-                    .map_err(EngineError::Internal)?;
-                let id = TabId(self.next_tab);
-                self.next_tab += 1;
-                self.tabs.insert(id, Tab { session });
-                self.active = id;
-            }
-        }
-        Ok(((), self.current_origin()?))
-    }
-
-    fn switch_tab(&mut self, tab: TabId) -> Result<((), Origin), EngineError> {
-        if !self.tabs.contains_key(&tab) {
-            return Err(EngineError::NoSuchTab(tab));
-        }
-        self.active = tab;
-        Ok(((), self.current_origin()?))
-    }
-
-    fn cookies_read(&mut self, scope: &Origin) -> Result<(Vec<Cookie>, Origin), EngineError> {
-        let origin = self.current_origin()?;
-        if scope != &origin {
-            return Err(EngineError::Unsupported(
-                "cookies_read: scope must be the currently loaded page's own origin",
-            ));
-        }
-        let json = self.run_json_js("(function(){ return JSON.stringify(document.cookie); })()")?;
-        let raw: String = serde_json::from_str(&json).map_err(|e| {
-            EngineError::Internal(format!(
-                "cookies_read: malformed JSON from page script: {e}"
-            ))
-        })?;
-        let cookies = raw
-            .split(';')
-            .filter_map(|pair| {
-                let pair = pair.trim();
-                if pair.is_empty() {
-                    return None;
-                }
-                let (name, value) = pair.split_once('=')?;
-                Some(Cookie {
-                    name: name.trim().to_string(),
-                    value: value.trim().to_string(),
-                })
-            })
-            .collect();
-        Ok((cookies, origin))
-    }
-
-    fn storage_read(
-        &mut self,
-        scope: &Origin,
-    ) -> Result<(Vec<(String, String)>, Origin), EngineError> {
-        let origin = self.current_origin()?;
-        if scope != &origin {
-            return Err(EngineError::Unsupported(
-                "storage_read: scope must be the currently loaded page's own origin",
-            ));
-        }
-        let json = self.run_json_js(
-            "(function(){ var out=[]; for (var i=0;i<localStorage.length;i++){ \
-             var k=localStorage.key(i); out.push([k, localStorage.getItem(k)]); } \
-             return JSON.stringify(out); })()",
-        )?;
-        let kv: Vec<(String, String)> = serde_json::from_str(&json).map_err(|e| {
-            EngineError::Internal(format!(
-                "storage_read: malformed JSON from page script: {e}"
-            ))
-        })?;
-        Ok((kv, origin))
-    }
-
-    fn clipboard_read(&mut self) -> Result<(String, Origin), EngineError> {
-        Err(EngineError::Unsupported(
-            "clipboard_read: HeadlessServoSession exposes no synchronous clipboard API",
-        ))
-    }
-
-    fn clipboard_write(&mut self, _text: &str) -> Result<((), Origin), EngineError> {
-        Err(EngineError::Unsupported(
-            "clipboard_write: HeadlessServoSession exposes no synchronous clipboard API",
-        ))
-    }
-
-    fn js_execute(&mut self, script: &str) -> Result<(String, Origin), EngineError> {
-        let raw = self
-            .active_tab_mut()?
-            .session
-            .execute_js(script)
-            .map_err(EngineError::Internal)?;
-        Ok((raw, self.current_origin()?))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,13 +902,38 @@ mod tests {
     // With `engine-servo` off, `HeadlessServoSession::new` is the stub from
     // `ferrite-servo`, which always returns `Err`. This is exercised here
     // (not `#[ignore]`d) precisely because it needs no real Servo build —
-    // it proves ServoEngine::new surfaces that stub failure as a typed
-    // EngineError rather than panicking, which is the one thing about this
-    // crate that *is* testable in every environment.
+    // it proves `ServoEngine::new`/`BorrowedServoEngine::new` surface that
+    // stub failure/behavior in a typed, non-panicking way.
     #[cfg(not(feature = "engine-servo"))]
     #[test]
     fn without_the_engine_servo_feature_construction_fails_cleanly() {
         let err = ServoEngine::new(800, 600).unwrap_err();
         assert!(matches!(err, EngineError::Internal(_)));
+    }
+
+    #[cfg(not(feature = "engine-servo"))]
+    #[test]
+    fn without_the_engine_servo_feature_borrowed_engine_reports_unsupported_actions_not_panics() {
+        // The stub `HeadlessServoSession` is a real, always-`Err`/no-op
+        // type (see `ferrite_servo::session`'s `#[cfg(not(feature =
+        // "servo"))]` stub impl) — constructing one needs no real Servo.
+        let mut session = HeadlessServoSession;
+        let mut engine = BorrowedServoEngine::new(&mut session, 800, 600);
+        assert!(matches!(
+            engine.open_tab(None),
+            Err(EngineError::Unsupported(_))
+        ));
+        assert!(matches!(
+            engine.clipboard_read(),
+            Err(EngineError::Unsupported(_))
+        ));
+        // navigate() itself is a no-op against the stub and current_url()
+        // always reports "about:blank" — current_origin() should therefore
+        // report a real, parseable http(s)... no: "about:blank" is opaque,
+        // so this must be a typed OpaqueOrigin error, not a panic.
+        assert!(matches!(
+            engine.navigate("https://example.com"),
+            Err(EngineError::OpaqueOrigin(_))
+        ));
     }
 }

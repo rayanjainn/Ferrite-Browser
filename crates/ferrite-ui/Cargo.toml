@@ -13,10 +13,19 @@ ferrite-audit-log = { workspace = true }
 ferrite-servo = { workspace = true }
 ferrite-agent = { workspace = true }
 ferrite-ipi = { workspace = true }
+# B3 (docs/TO-DO.md T-224/T-220): BorrowedServoEngine gives the live tab's
+# HeadlessServoSession a BrowserEngine face; ferrite_agent::browser_loop
+# drives it (AgentAction/execute_action/run_agent_loop).
+ferrite-engine = { workspace = true }
+ferrite-engine-servo = { workspace = true }
 # B1 (docs/TO-DO.md T-221): ToolDecisionEngine::{generate_fingerprint,
-# fingerprint_from_task} now take a &dyn ModelProvider explicitly.
+# fingerprint_from_task} now take a &dyn ModelProvider explicitly. B3
+# (T-224/T-229): also used to construct the real live ModelProvider at
+# startup (Ollama/Gemini via ModelConfig — mirrors
+# ferrite-eval::harness::try_real_provider()).
 ferrite-model = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 urlencoding = { workspace = true }
 url = { workspace = true }
+serde_json = { workspace = true }

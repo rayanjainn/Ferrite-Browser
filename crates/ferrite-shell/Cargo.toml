@@ -10,6 +10,8 @@ ferrite-audit-log = { workspace = true }
 ferrite-servo = { workspace = true }
 ferrite-ui = { workspace = true }
 ferrite-agent = { workspace = true }
+ferrite-core = { workspace = true }
+ferrite-engine = { workspace = true }
+ferrite-model = { workspace = true }
 tokio = { workspace = true }
-async-trait = { workspace = true }
 uuid = { workspace = true }

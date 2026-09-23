@@ -8,11 +8,7 @@ publish = false
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
-thiserror = { workspace = true }
-async-trait = { workspace = true }
 tokio = { workspace = true }
-reqwest = { workspace = true }
 chrono = { workspace = true }
 ferrite-core = { workspace = true }
 ferrite-engine = { workspace = true }

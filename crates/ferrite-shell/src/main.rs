@@ -110,45 +110,91 @@ fn run_js_compat_test() {
     }
 }
 
+/// Constructs a real, configured `ferrite_model::ModelProvider` — the same
+/// pattern `ferrite-eval::harness::try_real_provider()` and
+/// `ferrite-ui`'s `try_real_model_provider()` both use (`ModelConfig::
+/// from_env()`, Ollama first via the OS keyring, Gemini fallback). Kept
+/// local rather than shared: each of the three call sites already
+/// duplicates this exact ~15-line pattern by this project's own established
+/// convention (see `ferrite-ui/src/lib.rs`'s own copy for the precedent),
+/// so a fourth copy here is consistent, not a new smell.
+fn try_real_model_provider() -> Option<(
+    std::sync::Arc<dyn ferrite_model::ModelProvider>,
+    ferrite_model::ModelConfig,
+)> {
+    let config = ferrite_model::ModelConfig::from_env().ok()?;
+
+    if let Ok(ollama) = ferrite_model::backends::shared_ollama(
+        &config,
+        ferrite_model::ModelTier::Main,
+        &ferrite_model::SystemEnv,
+        &ferrite_model::OsKeyring,
+    ) {
+        let provider: std::sync::Arc<dyn ferrite_model::ModelProvider> = ollama;
+        return Some((provider, config));
+    }
+
+    if let Ok(gemini) = ferrite_model::GeminiProvider::from_config(
+        &config,
+        ferrite_model::ModelTier::Main,
+        &ferrite_model::SystemEnv,
+        &ferrite_model::OsKeyring,
+    ) {
+        let provider: std::sync::Arc<dyn ferrite_model::ModelProvider> =
+            std::sync::Arc::new(gemini);
+        return Some((provider, config));
+    }
+
+    None
+}
+
+/// Demonstrates the new post-B3 agent stack end to end: a real
+/// `ferrite_model::ModelProvider` driving `ferrite_agent::browser_loop::
+/// run_agent_loop` against `ferrite_engine::MockEngine` (a real, in-process
+/// `BrowserEngine` — no live Servo needed for a fast smoke check; the live
+/// app itself, `ferrite-ui`, is what exercises the real Servo-backed
+/// `BorrowedServoEngine`). Replaces this subcommand's old GeminiAgent/
+/// BrowserTool/AgentRuntime/ToolExecutor demonstration, deleted alongside
+/// the rest of that vocabulary (`docs/TO-DO.md` T-224).
 fn run_agent_smoke() {
-    use ferrite_agent::{
-        AgentRuntime, AgentTask, AgentToolCall, AgentToolResult, GeminiAgent, ToolExecutor,
-    };
+    use ferrite_agent::browser_loop::{LoopBudget, LoopStopReason, run_agent_loop};
+    use ferrite_engine::MockEngine;
+    use ferrite_model::ModelTier;
 
-    if std::env::var("FERRITE_GEMINI_API_KEY").is_err() {
-        eprintln!("[agent-smoke] FERRITE_GEMINI_API_KEY is not set — skipping");
+    let Some((provider, config)) = try_real_model_provider() else {
+        eprintln!(
+            "[agent-smoke] no ModelProvider configured/reachable (FERRITE_MODEL_SMALL/\
+             FERRITE_MODEL_MAIN unset, or no Ollama/Gemini credential found) — skipping"
+        );
         std::process::exit(0);
-    }
-
-    struct StubExecutor;
-
-    #[async_trait::async_trait]
-    impl ToolExecutor for StubExecutor {
-        async fn execute(&self, call: &AgentToolCall) -> AgentToolResult {
-            let data = format!("stub result for {}", call.tool.tool_id());
-            AgentToolResult::ok(call.call_id, data)
-        }
-    }
+    };
+    let model_tag = config.tag(ModelTier::Main).to_string();
 
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async {
-        let agent = GeminiAgent::from_env();
-        let task = AgentTask::new(
+        let mut engine = MockEngine::new();
+        let clock = ferrite_core::SystemClock;
+        let result = run_agent_loop(
+            provider.as_ref(),
+            &mut engine,
+            &clock,
+            &model_tag,
+            ModelTier::Main,
             "What is the title of the page at https://example.com?",
-            Some("https://example.com".to_string()),
-        );
-        let executor = StubExecutor;
+            LoopBudget::default(),
+        )
+        .await;
 
-        match agent.run_turn(&task, &[], &executor).await {
-            Ok(turn) => {
-                println!(
-                    "[agent-smoke] final_response: {}",
-                    turn.final_response.as_deref().unwrap_or("<none>")
-                );
-                println!("[agent-smoke] tool calls made: {}", turn.tool_calls.len());
+        println!(
+            "[agent-smoke] actions taken: {}",
+            result.actions_taken.len()
+        );
+        match result.stop_reason {
+            LoopStopReason::Finished(answer) => {
+                println!("[agent-smoke] final_response: {}", answer);
             }
-            Err(e) => {
-                eprintln!("[agent-smoke] error: {}", e);
+            other => {
+                eprintln!("[agent-smoke] did not finish cleanly: {:?}", other);
                 std::process::exit(1);
             }
         }

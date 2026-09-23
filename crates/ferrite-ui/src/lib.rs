@@ -13,128 +13,147 @@
 // wheel events and forwards them to `HeadlessServoSession` as native Servo
 // input events (`InputEvent::MouseMove`, `MouseButton`, `Wheel`).
 //
+// ## Live agent execution (B3, docs/TO-DO.md T-224/T-220/T-229)
+//
+// The agent loop drives `ferrite_agent::browser_loop::{AgentAction,
+// execute_action}` against a `ferrite_engine_servo::BorrowedServoEngine`
+// wrapping the active tab's own `HeadlessServoSession` — the same session
+// this file's own Servo-frame code already drives correctly via a real
+// winit event loop (Iced's), which is exactly the ingredient
+// `ferrite_engine_servo::ServoEngine`'s own standalone conformance tests
+// found missing (`docs/TO-DO.md` T-220).
+//
+// `ferrite_engine::BrowserEngine` deliberately has no `Send` bound (see
+// that trait's own module docs) because the real engine wraps `Rc`-based
+// Servo state — so it cannot be moved into a `tokio::spawn`ed background
+// task, which rules out calling `browser_loop::run_agent_loop` directly
+// against the live engine (unlike the dry run's `DryRunEngine`, which holds
+// no such state and *is* driven by a direct `run_agent_loop` call — see
+// `BrowserLoopDryRunDriver` below). Instead, only the per-step model round
+// trip (`&dyn ModelProvider`, `Send + Sync`) is spawned in the background;
+// each returned `AgentAction` is dispatched against the live engine
+// synchronously, on the Iced update thread, via `execute_action` — see the
+// `AgentStepReady` handler in `update()`. `docs/handoffs/b03.md` has the
+// full reasoning for this deviation from calling `run_agent_loop` directly.
+//
 // ## Keyboard shortcuts (platform-aware)
 //   macOS : Cmd+T/W/R/L/J, F5, F12, Alt+←/→, Esc
 //   other : Ctrl+T/W/R/L/J, F5, F12, Alt+←/→, Esc
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use ferrite_agent::{
-    AgentRuntime, AgentTask, AgentToolCall, AgentToolResult, BrowserTool, GeminiAgent,
+use ferrite_agent::browser_loop::{
+    execute_action, run_agent_loop, AgentAction, LoopBudget, LoopStopReason, SYSTEM_PROMPT,
+    SYSTEM_PROMPT_VERSION,
 };
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
+use ferrite_engine_servo::BorrowedServoEngine;
 use ferrite_ipi::comparator::{compare, ConsentDecision, ExpectedFingerprint, FingerprintDiff};
 use ferrite_ipi::dry_run::DryRunRecord;
 use ferrite_ipi::tool_decision::{DefenseMode, LoopOutcome, ToolDecisionEngine, ToolId};
+use ferrite_ipi::IpiTask;
+use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{
     keyboard, time, Background, Border, Color, Element, Length, Size, Subscription, Task, Theme,
 };
 use iced_widget::image::{Handle as ImageHandle, Image as ServoImage};
-use tokio::sync::oneshot;
 
 // ---------------------------------------------------------------------------
-// Tool-execution bridge types (agent ↔ Iced main thread)
+// Real ModelProvider construction (T-229)
 // ---------------------------------------------------------------------------
 
-/// A single tool call request from the agent runtime, plus a one-shot channel
-/// for the reply.  Wrapped in `Arc<Mutex<Option<...>>>` so this type is
-/// `Clone` (required by `FerriteBrowserMessage`).
-pub struct ToolRequest {
-    pub call: AgentToolCall,
-    reply: std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<AgentToolResult>>>>,
-}
-
-impl ToolRequest {
-    pub fn new(call: AgentToolCall, reply: oneshot::Sender<AgentToolResult>) -> Self {
-        Self {
-            call,
-            reply: std::sync::Arc::new(std::sync::Mutex::new(Some(reply))),
-        }
-    }
-
-    /// Take the one-shot sender.  Returns `None` if already consumed.
-    pub fn take_reply(&self) -> Option<oneshot::Sender<AgentToolResult>> {
-        self.reply.lock().unwrap().take()
-    }
-}
-
-impl Clone for ToolRequest {
-    fn clone(&self) -> Self {
-        Self {
-            call: self.call.clone(),
-            reply: self.reply.clone(),
-        }
-    }
-}
-
-impl std::fmt::Debug for ToolRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolRequest")
-            .field("call", &self.call)
-            .finish_non_exhaustive()
-    }
-}
-
-pub type ToolRequestSender = tokio::sync::mpsc::UnboundedSender<ToolRequest>;
-pub type ToolRequestReceiver = tokio::sync::mpsc::UnboundedReceiver<ToolRequest>;
-
-/// Implements `ferrite_agent::ToolExecutor` by forwarding calls to the Iced
-/// main thread via the unbounded channel and awaiting a one-shot reply.
-pub struct BrowserToolExecutor {
-    pub tx: ToolRequestSender,
-}
-
-#[async_trait::async_trait]
-impl ferrite_agent::ToolExecutor for BrowserToolExecutor {
-    async fn execute(&self, call: &AgentToolCall) -> AgentToolResult {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let req = ToolRequest::new(call.clone(), reply_tx);
-        let _ = self.tx.send(req);
-        reply_rx
-            .await
-            .unwrap_or_else(|_| AgentToolResult::err(call.call_id, "channel closed"))
-    }
-}
-
-/// Wraps `BrowserToolExecutor` and blocks tools the user rejected in the
-/// consent dialog — this is the enforcement point, not the consent panel's
-/// UI state, which only *records* the user's decision. A rejected primitive
-/// never reaches `inner` (see `filtered_executor_blocks_rejected_tool_without_reaching_inner`).
+/// Constructs a real, configured `ferrite_model::ModelProvider` — mirrors
+/// `ferrite-eval::harness::try_real_provider()` exactly (that function is
+/// this project's own tested, live-verified reference implementation, see
+/// `docs/EVALUATION.md` §2.6): `ModelConfig::from_env()`, Ollama first
+/// (keyring-backed, service `"ferrite"`), Gemini as the fallback.
 ///
-/// `rejected_origins` is a second, independent block list for out-of-scope
-/// origin decisions. The comparator's `FingerprintDiff::out_of_scope_origins`
-/// only ever records the offending *origin* string, not which tool was used
-/// there (a pre-existing shape kept for `ferrite-eval`/`dataset` compatibility
-/// — see `ferrite_ipi::comparator::diff`'s module docs), so this executor can
-/// only enforce an origin-scoped rejection for calls whose `BrowserTool`
-/// variant itself carries a URL (`Navigate`, `DownloadFile`) — `tool_url`
-/// below. Calls with no URL of their own (e.g. `ReadPage`, `ClickElement`)
-/// act on "whatever the active tab currently is", which this executor has no
-/// way to observe from the call alone; T-2xx (filed in this session's
-/// `docs/TO-DO.md` entry) tracks closing that gap for real.
-struct FilteredToolExecutor {
-    inner: BrowserToolExecutor,
-    rejected: std::collections::HashSet<ToolId>,
-    rejected_origins: std::collections::HashSet<String>,
+/// Returns `None` — never an `Err` — for any construction failure (unset
+/// `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN`, no key anywhere, no keyring
+/// on this machine). `FerriteBrowser::default()` falls back to
+/// `ferrite_model::MockProvider::new()` when this returns `None`, giving
+/// the fingerprint's `may_use` layer the same fail-to-empty behavior
+/// `CLAUDE.md`'s invariant requires (`must_use`, the rule layer, and
+/// therefore containment itself, is unaffected either way). The live agent
+/// loop itself still needs a real, reachable provider to choose actions at
+/// all — with none configured it surfaces as a model error on the first
+/// step, never as a bypass of the fingerprint/dry-run/consent gate in front
+/// of it.
+fn try_real_model_provider() -> Option<(Arc<dyn ModelProvider>, ferrite_model::ModelConfig)> {
+    let config = ferrite_model::ModelConfig::from_env().ok()?;
+
+    if let Ok(ollama) = ferrite_model::backends::shared_ollama(
+        &config,
+        ModelTier::Small,
+        &ferrite_model::SystemEnv,
+        &ferrite_model::OsKeyring,
+    ) {
+        let provider: Arc<dyn ModelProvider> = ollama;
+        return Some((provider, config));
+    }
+
+    if let Ok(gemini) = ferrite_model::GeminiProvider::from_config(
+        &config,
+        ModelTier::Small,
+        &ferrite_model::SystemEnv,
+        &ferrite_model::OsKeyring,
+    ) {
+        let provider: Arc<dyn ModelProvider> = Arc::new(gemini);
+        return Some((provider, config));
+    }
+
+    None
 }
 
-/// `ToolId` for a live `BrowserTool` call. Moved here from
-/// `ferrite_ipi::tool_decision` (B1, `docs/TO-DO.md` T-221): that crate no
-/// longer depends on `ferrite-agent`, and this conversion — from
-/// `ferrite_agent::BrowserTool` specifically — was the one piece of
-/// `ferrite-ipi`'s old `ToolId` API that actually needed it. This is its
-/// only remaining caller.
-fn tool_id_of(tool: &BrowserTool) -> ToolId {
-    ToolId::new(tool.tool_id())
+// ---------------------------------------------------------------------------
+// Live agent-action vocabulary helpers — map `AgentAction` (the loop's real
+// action enum) onto `ferrite_core::Primitive`/`ToolId`, the same wire
+// vocabulary the fingerprint/comparator/consent machinery already speaks,
+// rather than a second, independent one.
+// ---------------------------------------------------------------------------
+
+fn primitive_of_action(action: &AgentAction) -> ferrite_core::Primitive {
+    use ferrite_core::Primitive;
+    match action {
+        AgentAction::Navigate { .. }
+        | AgentAction::GoBack
+        | AgentAction::GoForward
+        | AgentAction::Reload => Primitive::Navigate,
+        AgentAction::ReadDom | AgentAction::ReadText { .. } => Primitive::DomRead,
+        AgentAction::Query { .. } => Primitive::DomQuery,
+        AgentAction::Click { .. } => Primitive::Click,
+        AgentAction::TypeText { .. } | AgentAction::SelectOption { .. } => Primitive::DomWrite,
+        AgentAction::FillForm { .. } => Primitive::FormFill,
+        AgentAction::Scroll { .. } => Primitive::Scroll,
+        AgentAction::WaitForSelector { .. } | AgentAction::WaitIdle => Primitive::Wait,
+        AgentAction::Screenshot => Primitive::Screenshot,
+        AgentAction::Download { .. } => Primitive::Download,
+        AgentAction::ClipboardRead => Primitive::ClipboardRead,
+        AgentAction::ClipboardWrite { .. } => Primitive::ClipboardWrite,
+        AgentAction::JsExecute { .. } => Primitive::JsExecute,
+        AgentAction::Finish { .. } => {
+            unreachable!("Finish is intercepted before an action is ever dispatched or logged")
+        }
+    }
 }
 
-/// The URL a `BrowserTool` call itself carries, if any — the only calls this
-/// executor can check against `rejected_origins` without a live session.
-fn tool_url(tool: &BrowserTool) -> Option<&str> {
-    match tool {
-        BrowserTool::Navigate(url) | BrowserTool::DownloadFile(url) => Some(url.as_str()),
+/// `ToolId` for a live `AgentAction` — the same string vocabulary the
+/// comparator/consent panel already key on (`ferrite_core::Primitive::as_str()`).
+fn action_tool_id(action: &AgentAction) -> ToolId {
+    ToolId::new(primitive_of_action(action).as_str())
+}
+
+/// The URL an `AgentAction` itself carries, if any — the only actions that
+/// can be checked against a rejected origin without a live session (the
+/// same honest limitation the pre-B3 `FilteredToolExecutor::tool_url` had:
+/// an action with no URL of its own acts on "whatever the active tab
+/// currently is," which cannot be checked from the action alone).
+fn action_url(action: &AgentAction) -> Option<&str> {
+    match action {
+        AgentAction::Navigate { url } | AgentAction::Download { url } => Some(url.as_str()),
         _ => None,
     }
 }
@@ -149,45 +168,103 @@ fn origin_of_url(url: &str) -> Option<String> {
     Some(format!("{}://{}", parsed.scheme(), host).to_ascii_lowercase())
 }
 
-/// Bridges an existing `ferrite_agent::AgentRuntime` (the live `GeminiAgent`)
-/// onto `ferrite_ipi::dry_run::DryRunDriver` — B1's replacement for this
-/// crate's old direct `DryRunOrchestrator::run<R: AgentRuntime>` call
-/// (`docs/TO-DO.md` T-221; see `docs/handoffs/b01.md`, and
-/// `ferrite-eval::harness::AgentRuntimeDriver` for the identical pattern
-/// used there). Wraps `ferrite_agent::engine_bridge::EngineToolExecutor`.
-struct DryRunAgentDriver<'a, R: AgentRuntime> {
-    agent: &'a R,
-    task: AgentTask,
+/// Whether `action` is blocked by the user's consent decision — checked
+/// before every live-loop step executes. Real enforcement, not only a UI
+/// filter: a rejected action never reaches `execute_action` (see
+/// `a_rejected_tool_id_blocks_the_action_before_it_reaches_the_engine` and
+/// `a_rejected_origin_blocks_a_navigate_before_it_reaches_the_engine`).
+fn is_action_rejected(
+    action: &AgentAction,
+    rejected: &std::collections::HashSet<ToolId>,
+    rejected_origins: &std::collections::HashSet<String>,
+) -> bool {
+    if rejected.contains(&action_tool_id(action)) {
+        return true;
+    }
+    if let Some(origin) = action_url(action).and_then(origin_of_url) {
+        if rejected_origins.contains(&origin) {
+            return true;
+        }
+    }
+    false
 }
 
-#[async_trait::async_trait]
-impl<'a, R: AgentRuntime> ferrite_ipi::dry_run::DryRunDriver for DryRunAgentDriver<'a, R> {
-    async fn drive(&self, engine: &mut ferrite_ipi::dry_run::DryRunEngine) -> Result<(), String> {
-        let executor = ferrite_agent::engine_bridge::EngineToolExecutor::new(engine);
-        self.agent
-            .run_turn(&self.task, &[], &executor)
-            .await
-            .map(|_turn| ())
-            .map_err(|e| e.to_string())
+/// A short, human-readable progress-log label for `action` — shown in the
+/// agent sidebar's tool log, in the same `[primitive] detail` shape the
+/// pre-B3 log used.
+fn action_log_label(action: &AgentAction) -> String {
+    match action {
+        AgentAction::Navigate { url } => format!("[navigate] {url}"),
+        AgentAction::GoBack => "[navigate] back".to_string(),
+        AgentAction::GoForward => "[navigate] forward".to_string(),
+        AgentAction::Reload => "[navigate] reload".to_string(),
+        AgentAction::ReadDom => "[dom.read] snapshot".to_string(),
+        AgentAction::Query { selector } => format!("[dom.query] {selector}"),
+        AgentAction::ReadText { selector } => format!("[dom.read] {selector}"),
+        AgentAction::Click { selector } => format!("[click] {selector}"),
+        AgentAction::TypeText { selector, .. } => format!("[dom.write] type into {selector}"),
+        AgentAction::FillForm { fields } => format!("[form.fill] {} field(s)", fields.len()),
+        AgentAction::SelectOption { selector, .. } => format!("[dom.write] select in {selector}"),
+        AgentAction::Scroll { dx, dy } => format!("[scroll] ({dx}, {dy})"),
+        AgentAction::WaitForSelector { selector } => format!("[wait] for {selector}"),
+        AgentAction::WaitIdle => "[wait] idle".to_string(),
+        AgentAction::Screenshot => "[screenshot]".to_string(),
+        AgentAction::Download { url } => format!("[download] {url}"),
+        AgentAction::ClipboardRead => "[clipboard.read]".to_string(),
+        AgentAction::ClipboardWrite { text } => format!("[clipboard.write] {text}"),
+        AgentAction::JsExecute { script } => {
+            format!("[js.execute] {}", &script[..script.len().min(40)])
+        }
+        AgentAction::Finish { .. } => "[finish]".to_string(),
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dry-run driver: runs the real agent-decision loop
+// (`ferrite_agent::browser_loop::run_agent_loop`) directly against
+// `ferrite_ipi::dry_run::DryRunEngine`.
+//
+// This is the simplification B1's own handoff anticipated (docs/handoffs/
+// b01.md, b02.md): `DryRunEngine` (unlike the live `BorrowedServoEngine`)
+// holds no `Rc`/thread-local state — it is a plain, `Send`-safe recorder —
+// so `run_agent_loop` can drive it directly inside the background tokio
+// task the dry run already runs on, with zero bridging code. This replaces
+// the old GeminiAgent/`EngineToolExecutor`-bridged `DryRunAgentDriver`.
+// ---------------------------------------------------------------------------
+
+struct BrowserLoopDryRunDriver<'a> {
+    provider: &'a dyn ModelProvider,
+    model_tag: String,
+    prompt: String,
+}
+
 #[async_trait::async_trait]
-impl ferrite_agent::ToolExecutor for FilteredToolExecutor {
-    async fn execute(&self, call: &AgentToolCall) -> AgentToolResult {
-        let tool_id = tool_id_of(&call.tool);
-        if self.rejected.contains(&tool_id) {
-            return AgentToolResult::err(call.call_id, "blocked by user consent");
+impl<'a> ferrite_ipi::dry_run::DryRunDriver for BrowserLoopDryRunDriver<'a> {
+    async fn drive(&self, engine: &mut ferrite_ipi::dry_run::DryRunEngine) -> Result<(), String> {
+        let clock = ferrite_core::SystemClock;
+        let result = run_agent_loop(
+            self.provider,
+            engine,
+            &clock,
+            &self.model_tag,
+            ModelTier::Main,
+            &self.prompt,
+            LoopBudget::default(),
+        )
+        .await;
+        // A model error means the dry run genuinely could not decide what
+        // to do (e.g. no provider configured/reachable) — surfaced as a
+        // real error so the caller does not mistake "the model never
+        // answered" for "the plan was clean" (CLAUDE.md's "fail to empty,
+        // never a bypass": an empty dry-run record must never be produced
+        // by a silently-swallowed model failure). Every other stop reason
+        // (finished, a budget exhausted, a repeated action, an unparseable
+        // action) is real, honest partial-or-complete data for the
+        // orchestrator's own record — not an error.
+        match result.stop_reason {
+            LoopStopReason::ModelError(e) => Err(e),
+            _ => Ok(()),
         }
-        if let Some(origin) = tool_url(&call.tool).and_then(origin_of_url) {
-            if self.rejected_origins.contains(&origin) {
-                return AgentToolResult::err(
-                    call.call_id,
-                    "blocked by user consent: out-of-scope origin",
-                );
-            }
-        }
-        self.inner.execute(call).await
     }
 }
 
@@ -293,6 +370,33 @@ const C_DANGER: Color = Color {
 // State
 // ---------------------------------------------------------------------------
 
+/// State of an in-progress live agent-action loop (post-fingerprint, either
+/// bypassed straight through or after a clean/consented dry run). Lives on
+/// `FerriteBrowser` between the per-step background model calls
+/// (`AgentStepReady`) that drive it — see this file's module docs for why
+/// the loop is message-driven rather than a direct `run_agent_loop` call.
+pub struct LiveAgentLoop {
+    /// Conversation history sent to the model on every step — starts as
+    /// `[Message::user(prompt)]`, then grows by one assistant (action) /
+    /// user (observation) pair per completed step.
+    messages: Vec<Message>,
+    /// Every action actually executed so far, in order — used for
+    /// step-budget accounting and repeated-action detection, mirroring
+    /// `browser_loop::run_agent_loop`'s own bookkeeping exactly.
+    actions_taken: Vec<AgentAction>,
+    /// When this loop started — checked against `budget.max_wall_clock`
+    /// before every step's model call.
+    started_at: std::time::Instant,
+    budget: LoopBudget,
+    /// Tool ids the user rejected in the consent panel, if this loop is the
+    /// post-consent real run — empty for a bypassed/clean-dry-run loop that
+    /// never needed consent.
+    rejected: std::collections::HashSet<ToolId>,
+    /// Origins the user rejected in the consent panel, if this loop is the
+    /// post-consent real run.
+    rejected_origins: std::collections::HashSet<String>,
+}
+
 pub struct FerriteBrowser {
     pub tabs: Vec<String>,
     pub active_tab: usize,
@@ -319,13 +423,34 @@ pub struct FerriteBrowser {
     /// Y offset of the Servo content area inside the window (toolbar + tab bar heights).
     pub content_y_offset: f32,
     // ── Agent bridge ──────────────────────────────────────────────────────────
-    /// Sender side cloned when spawning agent tasks; `None` only if channel closed.
-    pub tool_tx: Option<ToolRequestSender>,
-    /// Receiver side wrapped in `Arc<tokio::sync::Mutex<...>>` so the
-    /// `subscription::channel` `Fn` closure can clone it per invocation.
-    pub tool_rx: Option<std::sync::Arc<tokio::sync::Mutex<ToolRequestReceiver>>>,
-    /// Handle to a running agent tokio task, if any.
+    /// The real `ferrite_model::ModelProvider` constructed at startup
+    /// (`try_real_model_provider`), or `ferrite_model::MockProvider::new()`
+    /// (fail-to-empty) when none is configured/reachable — T-224/T-229.
+    pub model_provider: Arc<dyn ferrite_model::ModelProvider>,
+    /// Configured tag for `ModelTier::Small` (the fingerprint's `may_use`
+    /// prediction) — `"unconfigured"` when `model_provider` is the mock
+    /// fallback, harmless since `MockProvider` ignores the tag entirely.
+    pub model_tag_small: String,
+    /// Configured tag for `ModelTier::Main` (the live agent loop's plan/act
+    /// reasoning).
+    pub model_tag_main: String,
+    /// Handle to the currently in-flight background task (a dry run, or one
+    /// live-loop step's model call), if any.
     pub agent_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Bumped on every fresh run (`AgentTaskSubmitted`, the post-consent
+    /// run) and on every stop (`StopAgent`, `ConsentCancelled`). Each
+    /// background step stamps the `run_id` it was spawned under onto its
+    /// reply message; `update()` drops a `LiveRunReady`/`AgentStepReady`
+    /// whose `run_id` no longer matches, so a step already in flight when
+    /// the user hits Stop (or starts a new task) can never execute a live
+    /// browser action after that point, even though `JoinHandle::abort()`
+    /// cannot guarantee the in-flight future was actually cancelled before
+    /// it sent its reply.
+    pub run_id: u64,
+    /// State of the in-progress live agent-action loop, if one is running —
+    /// `None` whenever the agent is idle, in the middle of a dry run, or
+    /// waiting on a pending consent decision.
+    pub live_loop: Option<LiveAgentLoop>,
     // ── Agent sidebar UI ─────────────────────────────────────────────────────
     pub show_agent_sidebar: bool,
     pub agent_task_input: String,
@@ -361,17 +486,31 @@ pub struct FerriteBrowser {
     /// open, covering both `pending_diff.extra_primitives` and
     /// `pending_diff.out_of_scope_origins` (see `consent_items`).
     pub pending_decision: ConsentDecision,
-    /// Original task preserved between dry run and consent resolution.
-    pub pending_task: Option<AgentTask>,
+    /// Original task prompt preserved between dry run and consent
+    /// resolution — just the prompt (not a full `IpiTask`): the live loop
+    /// always starts a fresh message history from this prompt regardless of
+    /// what the dry run itself did, so nothing else needs to be carried.
+    pub pending_task: Option<String>,
     /// Whether the dry-run evidence section is expanded.
     pub show_evidence: bool,
 }
 
 impl Default for FerriteBrowser {
     fn default() -> Self {
-        let (tool_tx, tool_rx) = tokio::sync::mpsc::unbounded_channel::<ToolRequest>();
         let (agent_event_tx, agent_event_rx) =
             tokio::sync::mpsc::unbounded_channel::<FerriteBrowserMessage>();
+        // Test-safe by construction (R7, matching
+        // `ferrite-eval::harness::try_real_provider()`'s own convention:
+        // never called from a `Default`/test-reachable path — only from the
+        // real app entry point, `launch()` below, which overwrites these
+        // three fields with a real provider when one is configured/reachable
+        // *before* the window ever opens). Every `FerriteBrowser::default()`
+        // in this crate's own test suite therefore never touches the
+        // environment or the OS keyring at all, let alone the network.
+        let model_provider: Arc<dyn ferrite_model::ModelProvider> =
+            Arc::new(ferrite_model::MockProvider::new());
+        let model_tag_small = "unconfigured".to_string();
+        let model_tag_main = "unconfigured".to_string();
         Self {
             tabs: vec!["New Tab".to_string()],
             active_tab: 0,
@@ -393,9 +532,12 @@ impl Default for FerriteBrowser {
             js_output: Vec::new(),
             cursor_pos: (0.0, 0.0),
             content_y_offset: TAB_BAR_HEIGHT + TOOLBAR_HEIGHT + 4.0,
-            tool_tx: Some(tool_tx),
-            tool_rx: Some(std::sync::Arc::new(tokio::sync::Mutex::new(tool_rx))),
+            model_provider,
+            model_tag_small,
+            model_tag_main,
             agent_handle: None,
+            run_id: 0,
+            live_loop: None,
             show_agent_sidebar: false,
             agent_task_input: String::new(),
             agent_tool_log: Vec::new(),
@@ -464,9 +606,22 @@ pub enum FerriteBrowserMessage {
     ContentAreaResized {
         height: f32,
     },
-    // ── Agent bridge ──────────────────────────────────────────────────────────
-    /// A tool call request has arrived from the agent runtime.
-    ToolRequestArrived(ToolRequest),
+    // ── Live agent loop (T-224) ──────────────────────────────────────────────
+    /// The dry run found nothing unexpected (or the defense mode bypassed
+    /// it entirely) — begin the live loop from scratch with `prompt`. Not
+    /// sent for the post-consent run, which `ConsentSubmitted` starts
+    /// directly (it already has the prompt and the user's decision on
+    /// hand, no round trip needed).
+    LiveRunReady {
+        run_id: u64,
+        prompt: String,
+    },
+    /// One step's background model call returned the next `AgentAction` to
+    /// take (or `Err` if the model call itself failed/was unparseable).
+    AgentStepReady {
+        run_id: u64,
+        action: Result<AgentAction, String>,
+    },
     // ── Agent sidebar ─────────────────────────────────────────────────────────
     ToggleAgentSidebar,
     AgentTaskInputChanged(String),
@@ -731,37 +886,23 @@ pub fn update(
             state.agent_tool_log.clear();
             state.agent_response = None;
             state.agent_is_running = true;
+            state.run_id += 1;
+            let run_id = state.run_id;
 
             let prompt = state.agent_task_input.clone();
             let context_url = state.tab_urls.get(state.active_tab).cloned();
-            let agent_task = AgentTask::new(prompt, context_url);
-            state.pending_task = Some(agent_task.clone());
-            let ipi_task = ferrite_ipi::IpiTask {
-                session_id: agent_task.session_id,
-                task_id: agent_task.task_id,
-                prompt: agent_task.prompt.clone(),
-                context_url: agent_task.context_url.clone(),
-            };
+            let ipi_task = IpiTask::new(prompt.clone(), context_url.clone());
+            state.pending_task = Some(prompt.clone());
 
-            let executor = match state.tool_tx.clone() {
-                Some(tx) => BrowserToolExecutor { tx },
-                None => return Task::none(),
-            };
+            let provider = state.model_provider.clone();
+            let model_tag_small = state.model_tag_small.clone();
+            let model_tag_main = state.model_tag_main.clone();
             let event_tx = match state.agent_event_tx.clone() {
                 Some(tx) => tx,
                 None => return Task::none(),
             };
 
             let handle = tokio::task::spawn(async move {
-                let api_key = match ferrite_agent::gemini::read_api_key() {
-                    Ok(k) => k,
-                    Err(e) => {
-                        let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(e));
-                        return;
-                    }
-                };
-                let agent = GeminiAgent::from_key(api_key);
-
                 // ── Defense-mode single decision point (Task 18) ──────────────
                 // ToolDecisionEngine::new() reads FERRITE_DEFENSE once; On is the
                 // unchanged default everywhere. Off skips straight to the real run
@@ -772,12 +913,11 @@ pub fn update(
                 let engine = ToolDecisionEngine::new();
                 let loop_outcome = engine.prepare_task(&ipi_task);
                 let defense_mode = match &loop_outcome {
-                    LoopOutcome::Bypassed => {
-                        run_agent_loop(&agent_task, &agent, &executor, &event_tx).await;
-                        return;
-                    }
-                    LoopOutcome::RanSanitizerOnly { .. } => {
-                        run_agent_loop(&agent_task, &agent, &executor, &event_tx).await;
+                    LoopOutcome::Bypassed | LoopOutcome::RanSanitizerOnly { .. } => {
+                        let _ = event_tx.send(FerriteBrowserMessage::LiveRunReady {
+                            run_id,
+                            prompt: prompt.clone(),
+                        });
                         return;
                     }
                     // LoopOnly and On both continue into the fingerprint/dry-run/
@@ -790,22 +930,13 @@ pub fn update(
                 };
 
                 // ── IPI dry run ──────────────────────────────────────────────
-                // B1 (docs/TO-DO.md T-221): `fingerprint_from_task` now takes
-                // an explicit `&dyn ModelProvider` instead of reading
-                // FERRITE_GEMINI_API_KEY itself via the deleted
-                // `LlmMayUsePredictor`. This live path has no configured
-                // `ferrite_model::ModelProvider` of its own yet — wiring one
-                // in (Ollama/Gemini via `ferrite_model::ModelConfig`) is
-                // T-224's job, not this charter's (see docs/handoffs/b01.md).
-                // `MockProvider` with no scripted response means the live
-                // app's `may_use` layer is rules-only for now — a real,
-                // flagged regression from the old ad hoc Gemini call (which
-                // was never the tested A4 predictor to begin with), not a
-                // silent one: `must_use` (the rule layer, and therefore
-                // containment itself) is completely unaffected.
-                let no_provider = ferrite_model::MockProvider::new();
+                // T-224/T-229: `provider` is the real, live-configured
+                // ModelProvider constructed at startup (or MockProvider,
+                // fail-to-empty, if none is configured/reachable) — no
+                // longer a hardcoded MockProvider::new() regardless of what
+                // is actually available (T-229's exact fix).
                 let fingerprint = engine
-                    .fingerprint_from_task(&no_provider, "ferrite-ui", &ipi_task)
+                    .fingerprint_from_task(provider.as_ref(), &model_tag_small, &ipi_task)
                     .await;
                 let twin_path = std::env::temp_dir().join("ferrite-ipi-twin.enc");
                 let mut orch = ferrite_ipi::dry_run::DryRunOrchestrator::new(twin_path);
@@ -814,9 +945,16 @@ pub fn update(
                 // leaving both at DryRunOrchestrator::new's defaults
                 // (detect-only, strip off) regardless of mode.
                 orch.set_defense_mode(defense_mode);
-                let driver = DryRunAgentDriver {
-                    agent: &agent,
-                    task: agent_task.clone(),
+                // BrowserLoopDryRunDriver runs the real
+                // `browser_loop::run_agent_loop` directly against the
+                // synthetic `DryRunEngine` — see that type's own docs for
+                // why this needs no GeminiAgent/EngineToolExecutor bridge
+                // now that neither this loop nor the dry run's engine
+                // depends on the old vocabulary.
+                let driver = BrowserLoopDryRunDriver {
+                    provider: provider.as_ref(),
+                    model_tag: model_tag_main.clone(),
+                    prompt: prompt.clone(),
                 };
                 let dry_record = match orch.run(&ipi_task, &driver).await {
                     Ok(r) => r,
@@ -834,12 +972,11 @@ pub fn update(
                 // No per-task per-capability origin-scope authoring exists yet
                 // (T-001's live-path bridge, see ferrite_ipi::comparator's
                 // module docs). The task's own declared context URL — already
-                // threaded in above as `agent_task.context_url` — narrows
-                // every capability to an exact scope on it; task_open (which
-                // admits any origin) is used only when no context URL is
-                // known at all, never unconditionally.
-                let context_origin = agent_task
-                    .context_url
+                // threaded in above as `context_url` — narrows every
+                // capability to an exact scope on it; task_open (which admits
+                // any origin) is used only when no context URL is known at
+                // all, never unconditionally.
+                let context_origin = context_url
                     .as_deref()
                     .and_then(|url| ferrite_core::Origin::parse(url).ok());
                 let expected =
@@ -855,7 +992,7 @@ pub fn update(
                 }
 
                 // ── Real run ─────────────────────────────────────────────────
-                run_agent_loop(&agent_task, &agent, &executor, &event_tx).await;
+                let _ = event_tx.send(FerriteBrowserMessage::LiveRunReady { run_id, prompt });
             });
             state.agent_handle = Some(handle);
         }
@@ -871,9 +1008,11 @@ pub fn update(
             state.agent_is_running = false;
         }
         FerriteBrowserMessage::StopAgent => {
+            state.run_id += 1;
             if let Some(handle) = state.agent_handle.take() {
                 handle.abort();
             }
+            state.live_loop = None;
             state.agent_is_running = false;
         }
         // ── IPI consent handlers ──────────────────────────────────────────────
@@ -929,30 +1068,13 @@ pub fn update(
             state.pending_decision = ConsentDecision::default();
             state.show_evidence = false;
 
-            let task = match state.pending_task.take() {
-                Some(t) => t,
+            let prompt = match state.pending_task.take() {
+                Some(p) => p,
                 None => return Task::none(),
             };
-            state.agent_is_running = true;
-
-            let executor = match state.tool_tx.clone() {
-                Some(tx) => FilteredToolExecutor {
-                    inner: BrowserToolExecutor { tx },
-                    rejected,
-                    rejected_origins,
-                },
-                None => return Task::none(),
-            };
-            let event_tx = match state.agent_event_tx.clone() {
-                Some(tx) => tx,
-                None => return Task::none(),
-            };
-
-            let handle = tokio::task::spawn(async move {
-                let agent = GeminiAgent::from_env();
-                run_agent_loop(&task, &agent, &executor, &event_tx).await;
-            });
-            state.agent_handle = Some(handle);
+            state.run_id += 1;
+            let run_id = state.run_id;
+            start_live_loop(state, run_id, prompt, rejected, rejected_origins);
         }
         FerriteBrowserMessage::ConsentCancelled => {
             // Same clearing as ConsentSubmitted — cancelling must leave no
@@ -964,41 +1086,83 @@ pub fn update(
             state.pending_task = None;
             state.show_evidence = false;
             state.agent_is_running = false;
+            state.run_id += 1;
+        }
+        // ── Live agent loop (T-224) ──────────────────────────────────────────
+        FerriteBrowserMessage::LiveRunReady { run_id, prompt } => {
+            if run_id != state.run_id {
+                return Task::none();
+            }
+            start_live_loop(
+                state,
+                run_id,
+                prompt,
+                std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+            );
+        }
+        FerriteBrowserMessage::AgentStepReady { run_id, action } => {
+            if run_id != state.run_id {
+                return Task::none();
+            }
+            let Some(mut live) = state.live_loop.take() else {
+                return Task::none();
+            };
+
+            let action = match action {
+                Ok(a) => a,
+                Err(reason) => {
+                    state.agent_response = Some(format!("[error] {reason}"));
+                    state.agent_is_running = false;
+                    return Task::none();
+                }
+            };
+
+            if let AgentAction::Finish { answer } = action {
+                state.agent_response = Some(answer);
+                state.agent_is_running = false;
+                return Task::none();
+            }
+
+            // Repeated-identical-action hard stop — mirrors
+            // `browser_loop::run_agent_loop`'s own check exactly (fires
+            // *before* executing the would-be Nth repeat).
+            if live.budget.max_repeated_identical > 0 {
+                let window = live.budget.max_repeated_identical - 1;
+                if window <= live.actions_taken.len()
+                    && live.actions_taken[live.actions_taken.len() - window..]
+                        .iter()
+                        .all(|a| a == &action)
+                {
+                    state.agent_response =
+                        Some("[stopped: the same action was about to repeat]".to_string());
+                    state.agent_is_running = false;
+                    return Task::none();
+                }
+            }
+
+            let label = action_log_label(&action);
+            let observation = if is_action_rejected(&action, &live.rejected, &live.rejected_origins)
+            {
+                "blocked by user consent".to_string()
+            } else if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
+                let mut engine = BorrowedServoEngine::new(session, 1280, 700);
+                execute_action(&mut engine, &action)
+            } else {
+                "error: no active browser session".to_string()
+            };
+
+            state.agent_tool_log.push(label);
+            live.messages.push(Message::assistant(
+                serde_json::to_string(&action).unwrap_or_default(),
+            ));
+            live.messages
+                .push(Message::user(format!("Observation: {observation}")));
+            live.actions_taken.push(action);
+
+            spawn_next_step(state, run_id, live);
         }
         // ── Agent bridge ──────────────────────────────────────────────────────
-        FerriteBrowserMessage::ToolRequestArrived(req) => {
-            if let Some(reply_tx) = req.take_reply() {
-                let result = if let Some(session) = state.servo_sessions.get_mut(&state.active_tab)
-                {
-                    match &req.call.tool {
-                        BrowserTool::Navigate(url) => {
-                            session.navigate(url);
-                            AgentToolResult::ok(req.call.call_id, "")
-                        }
-                        BrowserTool::ReadPage => {
-                            // current_page_text not yet on session
-                            AgentToolResult::ok(req.call.call_id, "not yet implemented")
-                        }
-                        BrowserTool::ClickElement(_sel) => {
-                            AgentToolResult::ok(req.call.call_id, "")
-                        }
-                        BrowserTool::FillForm { .. } => AgentToolResult::ok(req.call.call_id, ""),
-                        BrowserTool::ExtractData(_sel) => {
-                            AgentToolResult::ok(req.call.call_id, "not yet implemented")
-                        }
-                        BrowserTool::ExecuteJs(code) => match session.execute_js(code) {
-                            Ok(r) => AgentToolResult::ok(req.call.call_id, r),
-                            Err(e) => AgentToolResult::err(req.call.call_id, e),
-                        },
-                        BrowserTool::WriteClipboard(_) => AgentToolResult::ok(req.call.call_id, ""),
-                        _ => AgentToolResult::ok(req.call.call_id, "not yet implemented"),
-                    }
-                } else {
-                    AgentToolResult::err(req.call.call_id, "no active session")
-                };
-                let _ = reply_tx.send(result);
-            }
-        }
         FerriteBrowserMessage::ServoReady => {}
         FerriteBrowserMessage::ServoFrame => {
             state.progress_offset = (state.progress_offset + 0.02) % 1.0;
@@ -1438,51 +1602,82 @@ fn resolve_url(input: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Agent loop helper — shared by the initial run and the post-consent real run.
+// Live agent loop — message-driven step loop shared by the initial
+// (bypassed/clean-dry-run) run and the post-consent real run.
+//
+// See this file's module docs for why this is a step-by-step message loop
+// rather than one call to `browser_loop::run_agent_loop`: the live engine
+// (`BorrowedServoEngine`, wrapping a real, `!Send` `HeadlessServoSession`)
+// cannot cross the `tokio::spawn` boundary a single long-running background
+// task would need. Only the model round trip (`&dyn ModelProvider`, `Send +
+// Sync`) is ever spawned; every actual browser action executes synchronously
+// on the Iced update thread, via the exact same `execute_action` dispatch
+// `run_agent_loop` itself uses.
 // ---------------------------------------------------------------------------
 
-async fn run_agent_loop(
-    task: &AgentTask,
-    agent: &GeminiAgent,
-    executor: &dyn ferrite_agent::ToolExecutor,
-    event_tx: &tokio::sync::mpsc::UnboundedSender<FerriteBrowserMessage>,
+/// Initializes `state.live_loop` from `prompt` (a fresh message history) —
+/// used both for a bypassed/clean-dry-run task (empty `rejected`/
+/// `rejected_origins`) and for the post-consent real run (the user's actual
+/// decisions) — then spawns the first step's background model call.
+fn start_live_loop(
+    state: &mut FerriteBrowser,
+    run_id: u64,
+    prompt: String,
+    rejected: std::collections::HashSet<ToolId>,
+    rejected_origins: std::collections::HashSet<String>,
 ) {
-    let mut history = vec![];
-    loop {
-        match agent.run_turn(task, &history, executor).await {
-            Ok(turn) => {
-                for call in &turn.tool_calls {
-                    let label = match &call.tool {
-                        BrowserTool::Navigate(url) => format!("[navigate] {}", url),
-                        BrowserTool::ReadPage => "[dom.read] read page".to_string(),
-                        BrowserTool::ClickElement(sel) => format!("[dom.write] click {}", sel),
-                        BrowserTool::FillForm { selector, value } => {
-                            format!("[form.fill] {}={}", selector, value)
-                        }
-                        BrowserTool::ExtractData(sel) => format!("[dom.read] extract {}", sel),
-                        BrowserTool::ExecuteJs(code) => {
-                            format!("[js.execute] {}", &code[..code.len().min(40)])
-                        }
-                        BrowserTool::ReadClipboard => "[clipboard.read]".to_string(),
-                        BrowserTool::WriteClipboard(s) => format!("[clipboard.write] {}", s),
-                        BrowserTool::DownloadFile(url) => format!("[download.file] {}", url),
-                    };
-                    let _ = event_tx.send(FerriteBrowserMessage::AgentToolLogged(label));
-                }
-                let is_complete = turn.is_complete;
-                let response = turn.final_response.clone().unwrap_or_default();
-                history.push(turn);
-                if is_complete {
-                    let _ = event_tx.send(FerriteBrowserMessage::AgentCompleted(response));
-                    break;
-                }
-            }
-            Err(e) => {
-                let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(e.to_string()));
-                break;
-            }
-        }
+    state.agent_is_running = true;
+    let live = LiveAgentLoop {
+        messages: vec![Message::user(prompt)],
+        actions_taken: Vec::new(),
+        started_at: std::time::Instant::now(),
+        budget: LoopBudget::default(),
+        rejected,
+        rejected_origins,
+    };
+    spawn_next_step(state, run_id, live);
+}
+
+/// Checks the step/wall-clock budget (mirroring
+/// `browser_loop::run_agent_loop`'s own pre-request checks exactly), then
+/// spawns the background model call for the next step. `live` is stored
+/// back onto `state.live_loop` for the resulting `AgentStepReady` to pick
+/// up; a budget stop instead ends the run with a benign, visible message —
+/// not an error, since a budget cutoff is a designed safety limit, not a
+/// failure.
+fn spawn_next_step(state: &mut FerriteBrowser, run_id: u64, live: LiveAgentLoop) {
+    if live.actions_taken.len() >= live.budget.max_steps {
+        state.agent_response = Some("[stopped: step budget exhausted]".to_string());
+        state.agent_is_running = false;
+        return;
     }
+    if live.started_at.elapsed() >= live.budget.max_wall_clock {
+        state.agent_response = Some("[stopped: wall-clock budget exhausted]".to_string());
+        state.agent_is_running = false;
+        return;
+    }
+
+    let provider = state.model_provider.clone();
+    let model_tag_main = state.model_tag_main.clone();
+    let messages = live.messages.clone();
+    let event_tx = match state.agent_event_tx.clone() {
+        Some(tx) => tx,
+        None => return,
+    };
+
+    let handle = tokio::task::spawn(async move {
+        let request = CompletionRequest::new(model_tag_main, ModelTier::Main, messages)
+            .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION);
+        let action = match provider.complete(request).await {
+            Ok(response) => serde_json::from_str::<AgentAction>(response.content.trim())
+                .map_err(|e| format!("{e} (raw: {})", response.content)),
+            Err(e) => Err(e.to_string()),
+        };
+        let _ = event_tx.send(FerriteBrowserMessage::AgentStepReady { run_id, action });
+    });
+
+    state.agent_handle = Some(handle);
+    state.live_loop = Some(live);
 }
 
 // ---------------------------------------------------------------------------
@@ -2382,35 +2577,7 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
             Subscription::none()
         };
 
-    // Drain tool call requests from the agent runtime and emit them as messages.
-    // iced 0.13 API: iced::stream::channel -> Stream, wrapped via Subscription::run_with_id.
-    let tool_sub: Subscription<FerriteBrowserMessage> = if let Some(rx_arc) = &state.tool_rx {
-        let rx_arc = rx_arc.clone();
-        Subscription::run_with_id(
-            std::any::TypeId::of::<ToolRequest>(),
-            iced::stream::channel(64, move |mut sender| async move {
-                use iced::futures::SinkExt;
-                loop {
-                    let req = rx_arc.lock().await.recv().await;
-                    match req {
-                        Some(req) => {
-                            let _ = sender
-                                .send(FerriteBrowserMessage::ToolRequestArrived(req))
-                                .await;
-                        }
-                        None => {
-                            // channel closed — park forever
-                            std::future::pending::<()>().await;
-                        }
-                    }
-                }
-            }),
-        )
-    } else {
-        Subscription::none()
-    };
-
-    Subscription::batch([keyboard_sub, servo_tick, tool_sub, agent_event_sub])
+    Subscription::batch([keyboard_sub, servo_tick, agent_event_sub])
 }
 
 // ---------------------------------------------------------------------------
@@ -2804,6 +2971,23 @@ pub fn launch() -> iced::Result {
         .subscription(subscription)
         .run_with(|| {
             let mut state = FerriteBrowser::default();
+            // T-224/T-229: construct the real ModelProvider here, at actual
+            // app startup — never inside `FerriteBrowser::default()` itself
+            // (kept test-safe/R7, see that impl's own comment) — and only
+            // once, since `try_real_model_provider()` does a real OS-keyring
+            // lookup that a test must never trigger even indirectly.
+            if let Some((provider, config)) = try_real_model_provider() {
+                state.model_tag_small = config.tag(ModelTier::Small).to_string();
+                state.model_tag_main = config.tag(ModelTier::Main).to_string();
+                state.model_provider = provider;
+            } else {
+                eprintln!(
+                    "[ferrite-ui] no ModelProvider configured/reachable (FERRITE_MODEL_SMALL/\
+                     FERRITE_MODEL_MAIN unset, or no Ollama/Gemini credential found) — the \
+                     fingerprint's may_use layer and the live agent loop will both fail to \
+                     empty/fail closed rather than run against a real model"
+                );
+            }
             match HeadlessServoSession::new(1280, 700) {
                 Ok(session) => {
                     state.servo_sessions.insert(0, session);
@@ -2824,21 +3008,26 @@ pub fn launch() -> iced::Result {
 // No test here constructs a `HeadlessServoSession` (R7/no live resources) —
 // `FerriteBrowser::default()` never does either, so `update()` is directly
 // testable with a plain `FerriteBrowser` and no window, matching the
-// directive's "no rendering needed" requirement.
+// directive's "no rendering needed" requirement. `FerriteBrowser::default()`
+// also never calls `try_real_model_provider()` (that only happens in
+// `launch()`, the real app entry point — see that impl's own comment), so
+// every test's `model_provider` is `MockProvider`, scripted with nothing —
+// R7 holds even for the tests below that do trigger a `tokio::task::spawn`.
 //
 // `#[tokio::test]` is used wherever a message handler calls
-// `tokio::task::spawn` (`ConsentSubmitted`) — spawning requires an active
-// Tokio runtime context or it panics, even though the test never awaits the
-// spawned future into existence. Since none of these tests `.await` anything
-// after triggering the spawn, the current-thread test runtime never actually
-// polls the spawned task before the test ends, so `GeminiAgent::from_env()`
-// and `run_agent_loop`'s real network call inside it never execute — no live
-// call is made, per R7.
+// `tokio::task::spawn` (`ConsentSubmitted`/`LiveRunReady`/`AgentStepReady`)
+// — spawning requires an active Tokio runtime context or it panics, even
+// though the test never awaits the spawned future into existence. Since
+// none of these tests `.await` anything after triggering the spawn, the
+// current-thread test runtime never actually polls the spawned task before
+// the test ends, so the step's `ModelProvider::complete` call inside it
+// never executes at all — and even if it somehow did, `MockProvider` with
+// nothing scripted only ever returns a typed `ModelError`, never reaches a
+// socket. No live call is made, per R7.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrite_agent::ToolExecutor as _;
 
     // ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -2879,8 +3068,70 @@ mod tests {
 
     /// Builds an empty `DryRunRecord` tied to `task`'s ids, without needing a
     /// direct `uuid` dependency in this crate.
-    fn evidence_for(task: &AgentTask) -> DryRunRecord {
+    fn evidence_for(task: &IpiTask) -> DryRunRecord {
         DryRunRecord::new(task.session_id, task.task_id)
+    }
+
+    // ── R7: no automated test call reaches a live ModelProvider ──────────
+
+    /// Mirrors `ferrite-eval::harness::no_automated_test_calls_try_real_provider`
+    /// (same technique, scoped to this crate's one source file): scans this
+    /// module's own source for every non-comment, non-definition call site
+    /// of `try_real_model_provider(` and fails if more than the one real
+    /// caller (`launch()`) exists. `FerriteBrowser::default()` itself never
+    /// names the function at all (it constructs `MockProvider` inline —
+    /// see that impl), so this test's job is only to catch a future edit
+    /// that accidentally adds a second call site somewhere a test could
+    /// reach.
+    #[test]
+    fn no_automated_test_calls_try_real_model_provider_outside_launch() {
+        const NEEDLE: &str = "try_real_model_provider(";
+        let src = include_str!("lib.rs");
+        let mut real_call_sites = 0;
+        for (i, line) in src.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            let mut search_from = 0;
+            while let Some(rel) = line[search_from..].find(NEEDLE) {
+                let idx = search_from + rel;
+                let preceded_by_ident_char = line[..idx]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let is_definition = line[..idx].trim_end().ends_with("fn");
+                let in_string_literal = line[..idx].matches('"').count() % 2 == 1;
+                if !preceded_by_ident_char && !is_definition && !in_string_literal {
+                    real_call_sites += 1;
+                    assert!(
+                        line.contains("try_real_model_provider()"),
+                        "line {}: unexpected call shape: {line}",
+                        i + 1
+                    );
+                }
+                search_from = idx + NEEDLE.len();
+            }
+        }
+        assert_eq!(
+            real_call_sites, 1,
+            "expected exactly one real call site (launch()) — found {real_call_sites}; a new \
+             one would risk a live OS-keyring lookup reaching cargo test (R7)"
+        );
+    }
+
+    /// A fresh `LiveAgentLoop` with the default budget and no consent
+    /// rejections — the shape `start_live_loop` builds for a
+    /// bypassed/clean-dry-run task.
+    fn fresh_live_loop() -> LiveAgentLoop {
+        LiveAgentLoop {
+            messages: vec![Message::user("go")],
+            actions_taken: Vec::new(),
+            started_at: std::time::Instant::now(),
+            budget: LoopBudget::default(),
+            rejected: Default::default(),
+            rejected_origins: Default::default(),
+        }
     }
 
     // ── consent_items: the plain-English summary snapshot ───────────────
@@ -2957,7 +3208,7 @@ mod tests {
             agent_is_running: true,
             ..FerriteBrowser::default()
         };
-        let task = AgentTask::new("check my inbox", Some("https://example.com".to_string()));
+        let task = IpiTask::new("check my inbox", Some("https://example.com".to_string()));
         let diff = diff_with_extra_primitive();
         let expected = sample_expected();
 
@@ -2981,8 +3232,8 @@ mod tests {
     #[tokio::test]
     async fn consent_submitted_is_a_no_op_while_any_item_is_undecided() {
         let mut state = FerriteBrowser::default();
-        let task = AgentTask::new("t", None);
-        state.pending_task = Some(task.clone());
+        let task = IpiTask::new("t", None);
+        state.pending_task = Some(task.prompt.clone());
         let diff = diff_with_extra_primitive();
         let _ = update(
             &mut state,
@@ -3009,8 +3260,8 @@ mod tests {
     #[tokio::test]
     async fn consent_flow_extra_primitive_only_reject_then_submit_clears_all_pending_state() {
         let mut state = FerriteBrowser::default();
-        let task = AgentTask::new("t", None);
-        state.pending_task = Some(task.clone());
+        let task = IpiTask::new("t", None);
+        state.pending_task = Some(task.prompt.clone());
         let diff = diff_with_extra_primitive();
         let _ = update(
             &mut state,
@@ -3045,8 +3296,8 @@ mod tests {
     #[tokio::test]
     async fn consent_flow_out_of_scope_origin_only_approve_then_submit() {
         let mut state = FerriteBrowser::default();
-        let task = AgentTask::new("t", None);
-        state.pending_task = Some(task.clone());
+        let task = IpiTask::new("t", None);
+        state.pending_task = Some(task.prompt.clone());
         let diff = diff_with_out_of_scope_origin();
         let _ = update(
             &mut state,
@@ -3069,8 +3320,8 @@ mod tests {
     #[tokio::test]
     async fn consent_flow_mixed_diff_requires_both_items_decided_before_submit_succeeds() {
         let mut state = FerriteBrowser::default();
-        let task = AgentTask::new("t", None);
-        state.pending_task = Some(task.clone());
+        let task = IpiTask::new("t", None);
+        state.pending_task = Some(task.prompt.clone());
         let diff = mixed_diff();
         let _ = update(
             &mut state,
@@ -3100,8 +3351,8 @@ mod tests {
     #[test]
     fn consent_cancelled_clears_all_pending_state_without_spawning_a_run() {
         let mut state = FerriteBrowser::default();
-        let task = AgentTask::new("t", None);
-        state.pending_task = Some(task.clone());
+        let task = IpiTask::new("t", None);
+        state.pending_task = Some(task.prompt.clone());
         let _ = update(
             &mut state,
             FerriteBrowserMessage::ConsentRequired {
@@ -3135,8 +3386,8 @@ mod tests {
         let mut state = FerriteBrowser::default();
 
         // Task 1: flagged with js.execute, approved, submitted.
-        let task1 = AgentTask::new("task one", None);
-        state.pending_task = Some(task1.clone());
+        let task1 = IpiTask::new("task one", None);
+        state.pending_task = Some(task1.prompt.clone());
         let diff1 = diff_with_extra_primitive();
         let _ = update(
             &mut state,
@@ -3156,8 +3407,8 @@ mod tests {
         // Task 2: flagged with the SAME tool id, but never decided this time
         // — if approval leaked across tasks this would wrongly read as
         // already-decided.
-        let task2 = AgentTask::new("task two", None);
-        state.pending_task = Some(task2.clone());
+        let task2 = IpiTask::new("task two", None);
+        state.pending_task = Some(task2.prompt.clone());
         let diff2 = diff_with_extra_primitive();
         let _ = update(
             &mut state,
@@ -3176,82 +3427,332 @@ mod tests {
         assert!(state.pending_decision.rejected.is_empty());
     }
 
-    // ── Real enforcement: a rejected item is actually blocked ────────────
+    // ── is_action_rejected: the pure enforcement predicate ────────────────
 
-    #[tokio::test]
-    async fn filtered_executor_blocks_a_rejected_tool_without_reaching_the_inner_executor() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ToolRequest>();
-        let executor = FilteredToolExecutor {
-            inner: BrowserToolExecutor { tx },
-            rejected: [ToolId::new("js.execute")].into_iter().collect(),
-            rejected_origins: Default::default(),
+    #[test]
+    fn is_action_rejected_matches_on_tool_id() {
+        let rejected: std::collections::HashSet<ToolId> =
+            [ToolId::new("js.execute")].into_iter().collect();
+        let action = AgentAction::JsExecute {
+            script: "1+1".to_string(),
         };
-
-        let call = AgentToolCall::new(BrowserTool::ExecuteJs("1+1".to_string()));
-        let result = executor.execute(&call).await;
-
-        assert!(!result.success, "a rejected tool call must be refused");
-        assert_eq!(result.error.as_deref(), Some("blocked by user consent"));
-        assert!(
-            rx.try_recv().is_err(),
-            "the real executor must never forward a rejected call to the inner channel — \
-             rejection must be actual enforcement, not just UI state"
-        );
+        assert!(is_action_rejected(&action, &rejected, &Default::default()));
     }
 
-    #[tokio::test]
-    async fn filtered_executor_blocks_a_download_whose_url_origin_was_rejected() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ToolRequest>();
-        let executor = FilteredToolExecutor {
-            inner: BrowserToolExecutor { tx },
-            rejected: Default::default(),
-            rejected_origins: ["https://attacker.example".to_string()]
+    #[test]
+    fn is_action_rejected_matches_on_navigate_origin() {
+        let rejected_origins: std::collections::HashSet<String> =
+            ["https://attacker.example".to_string()]
                 .into_iter()
-                .collect(),
+                .collect();
+        let action = AgentAction::Navigate {
+            url: "https://attacker.example/payload".to_string(),
         };
-
-        let call = AgentToolCall::new(BrowserTool::DownloadFile(
-            "https://attacker.example/payload".to_string(),
+        assert!(is_action_rejected(
+            &action,
+            &Default::default(),
+            &rejected_origins
         ));
-        let result = executor.execute(&call).await;
+    }
 
-        assert!(
-            !result.success,
-            "an out-of-scope-origin download must be refused"
+    #[test]
+    fn is_action_rejected_is_false_for_an_undecided_action() {
+        let action = AgentAction::ReadDom;
+        assert!(!is_action_rejected(
+            &action,
+            &Default::default(),
+            &Default::default()
+        ));
+    }
+
+    // ── Real enforcement: a rejected live-loop step is actually blocked,
+    // never reaching `execute_action`/the engine ──────────────────────────
+    //
+    // The automated suite has no real Servo session (R7 — see
+    // `FerriteBrowser::default()`'s `servo_sessions: HashMap::new()`, never
+    // populated outside a real `AddTab` against a real `servo` feature
+    // build), so `AgentStepReady`'s handler always falls through to its own
+    // "no active browser session" branch once past the rejection check.
+    // These tests still prove real enforcement, not just the pure
+    // predicate above: the handler's branch order means the observation
+    // string can only say "blocked by user consent" if the rejection
+    // branch fired *before* the no-session branch — "no active browser
+    // session" is a structurally distinct string the handler would have
+    // produced instead had the action not been rejected.
+
+    #[tokio::test]
+    async fn a_rejected_tool_id_blocks_the_action_before_it_reaches_the_engine() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        let mut live = fresh_live_loop();
+        live.rejected = [ToolId::new("js.execute")].into_iter().collect();
+        state.live_loop = Some(live);
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Ok(AgentAction::JsExecute {
+                    script: "1+1".to_string(),
+                }),
+            },
         );
-        assert!(rx.try_recv().is_err());
+
+        let live = state
+            .live_loop
+            .expect("the loop continues after a blocked, non-Finish action");
+        let last = live.messages.last().expect("an observation was recorded");
+        assert!(
+            last.content.contains("blocked by user consent"),
+            "rejected tool id must be blocked, not executed: {last:?}"
+        );
     }
 
     #[tokio::test]
-    async fn filtered_executor_allows_a_non_rejected_tool_to_reach_the_inner_executor() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ToolRequest>();
-        let executor = FilteredToolExecutor {
-            inner: BrowserToolExecutor { tx },
-            rejected: Default::default(),
-            rejected_origins: Default::default(),
+    async fn a_rejected_origin_blocks_a_navigate_before_it_reaches_the_engine() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
         };
+        let mut live = fresh_live_loop();
+        live.rejected_origins = ["https://attacker.example".to_string()]
+            .into_iter()
+            .collect();
+        state.live_loop = Some(live);
 
-        let call = AgentToolCall::new(BrowserTool::ReadPage);
-        let (result, _) = tokio::join!(executor.execute(&call), async {
-            let req = rx
-                .recv()
-                .await
-                .expect("inner executor must receive the call");
-            let reply_tx = req.take_reply().expect("reply channel available");
-            let _ = reply_tx.send(AgentToolResult::ok(req.call.call_id, "ok"));
-        });
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Ok(AgentAction::Navigate {
+                    url: "https://attacker.example/payload".to_string(),
+                }),
+            },
+        );
+
+        let live = state.live_loop.expect("the loop continues");
+        let last = live.messages.last().expect("an observation was recorded");
+        assert!(
+            last.content.contains("blocked by user consent"),
+            "rejected-origin navigate must be blocked, not executed: {last:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_rejected_action_reaches_the_no_session_fallback_not_the_consent_block() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        state.live_loop = Some(fresh_live_loop());
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Ok(AgentAction::ReadDom),
+            },
+        );
+
+        let live = state.live_loop.expect("the loop continues");
+        let last = live.messages.last().expect("an observation was recorded");
+        assert!(
+            !last.content.contains("blocked by user consent"),
+            "a non-rejected action must not be reported as consent-blocked: {last:?}"
+        );
+    }
+
+    // ── AgentStepReady/LiveRunReady: message-driven step-loop plumbing ────
+
+    #[test]
+    fn a_stale_run_id_is_ignored_by_live_run_ready() {
+        let mut state = FerriteBrowser {
+            run_id: 2,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::LiveRunReady {
+                run_id: 1,
+                prompt: "go".to_string(),
+            },
+        );
+        assert!(
+            state.live_loop.is_none(),
+            "a stale run_id must never start a live loop"
+        );
+        assert!(!state.agent_is_running);
+    }
+
+    #[test]
+    fn a_stale_run_id_is_ignored_by_agent_step_ready() {
+        let mut state = FerriteBrowser {
+            run_id: 2,
+            ..FerriteBrowser::default()
+        };
+        state.live_loop = Some(fresh_live_loop());
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Ok(AgentAction::Finish {
+                    answer: "should never apply".to_string(),
+                }),
+            },
+        );
+        assert!(
+            state.live_loop.is_some(),
+            "a stale run_id's step must not be allowed to finish the current loop"
+        );
+        assert!(state.agent_response.is_none());
+    }
+
+    #[tokio::test]
+    async fn live_run_ready_with_a_current_run_id_starts_the_loop() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::LiveRunReady {
+                run_id: 1,
+                prompt: "go".to_string(),
+            },
+        );
+        assert!(state.live_loop.is_some());
+        assert!(state.agent_is_running);
+    }
+
+    #[test]
+    fn agent_step_ready_with_finish_completes_the_task() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        state.live_loop = Some(fresh_live_loop());
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Ok(AgentAction::Finish {
+                    answer: "done".to_string(),
+                }),
+            },
+        );
+        assert_eq!(state.agent_response.as_deref(), Some("done"));
+        assert!(!state.agent_is_running);
+        assert!(state.live_loop.is_none());
+    }
+
+    #[test]
+    fn agent_step_ready_with_a_model_error_fails_the_task() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        state.live_loop = Some(fresh_live_loop());
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Err("no provider configured".to_string()),
+            },
+        );
+        assert_eq!(
+            state.agent_response.as_deref(),
+            Some("[error] no provider configured")
+        );
+        assert!(!state.agent_is_running);
+    }
+
+    #[test]
+    fn repeated_identical_actions_stop_the_live_loop_before_a_third_execution() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        let action = AgentAction::Click {
+            selector: "#retry".to_string(),
+        };
+        let mut live = fresh_live_loop();
+        live.actions_taken = vec![action.clone(), action.clone()];
+        live.budget.max_repeated_identical = 3;
+        state.live_loop = Some(live);
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Ok(action),
+            },
+        );
 
         assert!(
-            result.success,
-            "a non-rejected call must reach the inner executor"
+            state.live_loop.is_none(),
+            "the loop must stop, not repeat a third time"
         );
+        assert!(!state.agent_is_running);
+        assert!(state
+            .agent_response
+            .as_deref()
+            .unwrap_or_default()
+            .contains("repeat"));
+    }
+
+    #[tokio::test]
+    async fn step_budget_exhausted_stops_the_loop_instead_of_spawning_another_step() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        let mut live = fresh_live_loop();
+        live.budget.max_steps = 1;
+        state.live_loop = Some(live);
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Ok(AgentAction::ReadDom),
+            },
+        );
+
+        assert!(
+            state.live_loop.is_none(),
+            "the loop must stop once its one allowed step has executed"
+        );
+        assert!(!state.agent_is_running);
+        assert!(state
+            .agent_response
+            .as_deref()
+            .unwrap_or_default()
+            .contains("step budget"));
+    }
+
+    #[test]
+    fn stop_agent_bumps_run_id_and_clears_the_live_loop() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        state.live_loop = Some(fresh_live_loop());
+        state.agent_is_running = true;
+
+        let _ = update(&mut state, FerriteBrowserMessage::StopAgent);
+
+        assert_eq!(state.run_id, 2);
+        assert!(state.live_loop.is_none());
+        assert!(!state.agent_is_running);
     }
 
     // ── Dry-run evidence rendering ────────────────────────────────────────
 
     #[test]
     fn dry_run_evidence_lines_render_ordered_call_log() {
-        let task = AgentTask::new("t", None);
+        let task = IpiTask::new("t", None);
         let mut record = evidence_for(&task);
         record.record_tool(
             ferrite_core::Primitive::Navigate,
@@ -3276,7 +3777,7 @@ mod tests {
 
     #[test]
     fn dry_run_evidence_lines_says_so_honestly_when_nothing_was_recorded() {
-        let task = AgentTask::new("t", None);
+        let task = IpiTask::new("t", None);
         let record = evidence_for(&task);
         assert_eq!(
             dry_run_evidence_lines(&record),
@@ -3322,7 +3823,7 @@ mod tests {
         }
         let diff = FingerprintDiff::default();
         let expected = ExpectedFingerprint::empty();
-        let task = AgentTask::new("t", None);
+        let task = IpiTask::new("t", None);
         let evidence = evidence_for(&task);
         let decision = ConsentDecision::default();
         assert_consent_panel_inputs_are_plain_data(&diff, &expected, &evidence, &decision);
