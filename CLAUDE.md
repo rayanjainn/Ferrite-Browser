@@ -69,11 +69,10 @@ previously hid a real bug for months (`docs/TO-DO.md` T-207).
   scripts/hooks`) — see that file if a commit is being rejected.
 - **Dependency direction is strictly downward** per the rebuild directive's
   target architecture (`core ← {model, audit, engine} ← ipi ← agent ← {ui,
-  eval, cli}`). No cycles, no new upward imports. **Known, tracked
-  exception:** `ferrite-ipi` currently depends on `ferrite-agent`
-  (backwards) — `docs/TO-DO.md` T-221, found by A9, still open. Do not
-  treat this as license to add another upward edge; it is a real debt this
-  invariant statement now names rather than silently contradicts.
+  eval, cli}`). No cycles, no new upward imports. T-221 (`ferrite-ipi`
+  depending on `ferrite-agent`, backwards) is fixed — closed by B1/B2/B3;
+  see `docs/TO-DO.md`'s T-221 row for exactly what changed. This invariant
+  now holds everywhere in the workspace; keep it that way.
 - **No dead code.** If a function exists, something reachable calls it.
   `OriginScope::admission_rank()` being computed and never consumed by
   `compare()` was exactly this failure mode — see `docs/TO-DO.md` T-001/T-002.
