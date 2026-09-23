@@ -2714,3 +2714,158 @@ defect (T-220's literal original bug) is unchanged — see that row.
 
 **Explicitly not done, per the charter's own instruction:** did not attempt
 T-204; did not merge to `main`.
+
+## 2026-09-23 — C1 (Design system / icon set) — hand-authored SVG icons, chrome visual polish, tab bar hover, consent-panel entrance transition
+
+**Known hazard, confirmed again:** the worktree started on an unrelated tree
+(`65b6d67`/`46b2177`/`3c08dde`, an "Initial test case designing" branch).
+Recreated `rebuild/c01-design-system` from local `main` (`a8099b6`, B3's
+merge) before any work — working tree was clean, so no work was lost.
+
+**Scope:** first charter in the C1-C4 post-B3 UI/feature sequence. Purely
+visual/UX — no security-relevant decision, per the charter itself. File
+scope: `crates/ferrite-ui/` plus the one `iced_widget` feature-flag line in
+root `Cargo.toml`.
+
+**1. Real SVG icon set.** `crates/ferrite-ui/assets/icons/` — 14
+hand-authored, original `.svg` files (back, forward, reload, close, add,
+stop, play, approve, reject, warning, audit, console, agent, origin), one
+consistent 24x24 viewBox, outlined/stroke-based (a few filled shapes —
+stop/play — for their media-player convention). Not copied from any named
+icon pack. `iced_widget`'s `svg` feature was enabled (`Cargo.toml`, root):
+confirmed against the pinned `iced_widget` 0.13.4's own `Cargo.toml`
+(`svg = ["iced_renderer/svg"]`) and `iced_core::svg::Style` (`color:
+Option<Color>`, doc'd "useful for coloring a symbolic icon") that recoloring
+at render time is real, supported API on this exact pinned version — not
+assumed. `iced` itself needs no matching feature: `ferrite-ui` imports
+`iced_widget::svg` directly, the same pattern the file already used for
+`iced_widget::image` (the Servo frame).
+
+**2. `icon()` rendering helper.** `crates/ferrite-ui/src/icons.rs`: an
+`Icon` enum, a pure `icon_bytes(kind) -> &'static [u8]` mapping (bytes
+embedded via `include_bytes!` — no filesystem lookup at runtime, so `cargo
+run`'s CWD never matters), and `icon(kind, size, color) -> Element` — the
+one path every view call site in this crate uses, so sizing/color/hover
+tint go through one place. `svg::Handle::from_memory`'s cache identity is a
+content hash (confirmed against `iced_core::svg::Handle::from_data`), so
+calling `icon()` fresh every `view()` tick is cheap — same tint+bytes hits
+the renderer's existing cache. Two icons (`bookmark`, `settings`) were
+drawn for C3's known future needs but **not** added to the `Icon` enum:
+rustc's `dead_code` lint flags an unconstructed variant on the crate's real
+*lib*-target compilation regardless of test-only construction (verified —
+adding them and a test that constructs both still failed `cargo clippy
+--all-targets -- -D warnings`), and `CLAUDE.md`'s no-dead-code invariant
+rules out `#[allow(dead_code)]` as the fix. Filed nowhere since it's not a
+defect — `icons.rs`'s own comment documents the reasoning at the point a
+future charter would look for it.
+
+**3. Applied to the chrome**, every existing message/click target
+preserved: Back/Forward/Reload/Stop-loading buttons, the tab close button,
+the new-tab "+" (now a real `button` sharing `nav_btn_style`, not a bare
+`mouse_area`), the Audit/JS/Agent toggle buttons (dropped their leading
+"v"/"+" text glyph — the active/inactive background already carried that
+state), the agent sidebar's Run Task/Stop buttons, and the consent panel's
+header (warning icon), per-item Approve/Reject buttons, and — the one
+`Icon::Origin` call site — a small external-link glyph on out-of-scope-
+origin rows specifically (`origin_item_origin(&item.id).is_some()`),
+visually distinguishing "contacted an unauthorized origin" from "used an
+unexpected tool" beyond the text difference alone.
+
+**4. Tab bar polish** (the coordinator's own stated dev-tool-looking
+concern): close-button-on-hover — visible on the active tab or whichever
+tab the pointer is over (`hovered_tab: Option<usize>`, new
+`TabHoverEnter(usize)`/`TabHoverExit(usize)` messages via `mouse_area`'s
+`on_enter`/`on_exit`), a same-size transparent spacer otherwise so the row
+never jumps width; a hover background tint on inactive tabs; `hovered_tab`
+reset on `CloseTab` (a close shifts every later tab's index — a stale
+hovered index would show the close button on the wrong tab until the next
+real hover event). `AddTab`/`CloseTab`/`SelectTab` messages and their
+`update()` handling are byte-for-byte unchanged.
+
+**5. Consent panel entrance transition.** New `consent_panel_anim: f32`
+field (`0.0..=1.0`) and `ConsentPanelTick` message, advanced 16ms at a time
+(`CONSENT_ANIM_STEP = 16.0/200.0`, same tick shape `ServoFrame` already
+establishes) by a `subscription()` tick gated on `pending_diff.is_some() &&
+consent_panel_anim < 1.0` — so it only runs while actually animating, not
+for the rest of the app's lifetime. Reset to `0.0` on `ConsentRequired`
+(`pending_diff` transitioning `None` -> `Some`). A new pure helper,
+`ease_out_cubic(t)`, turns the linear tick progress into the panel's
+background-alpha fade (`0.0 -> 0.08`) and a shrinking top-padding slide
+(`16px -> 0px`), over ~200ms. **Every item's own text is at full opacity
+and its final position from the very first frame** — only the outer
+wrapper's background tint and top inset animate — so the transition never
+delays, dims, or obscures what the user is being asked to approve; this
+was checked deliberately, not merely asserted, per the charter's own
+explicit constraint on this exact panel.
+`page_content_cannot_reach_the_consent_panels_inputs` (unchanged, still
+passing) is unaffected — the transition's inputs are `consent_panel_anim`
+(a `f32` this crate's own tick advances) and `ease_out_cubic` (a pure
+`f32 -> f32` function), neither of which touches page content in any way.
+
+**6. Not changed, verified by reading the diff before committing:** no
+`FerriteBrowserMessage` variant's meaning, no `update()` logic for any
+*pre-existing* message, `consent_items`/`consent_is_complete`/
+`FingerprintDiff` handling, the B3 agent-execution wiring, dry-run/audit/
+twin logic, anything in `ferrite-ipi`/`ferrite-agent`/`ferrite-engine`/
+`ferrite-model`/`ferrite-servo`.
+
+**Tests:** `cargo test -p ferrite-ui` — 35 passed, 0 failed (up from 29
+pre-charter: `icons::tests::every_icon_variant_embeds_non_empty_well_formed_svg`,
+`icons::tests::every_icon_shares_the_same_viewbox`,
+`tests::ease_out_cubic_starts_at_zero_and_ends_at_one`,
+`tests::ease_out_cubic_clamps_out_of_range_input`,
+`tests::ease_out_cubic_is_monotonically_non_decreasing`,
+`tests::ease_out_cubic_is_ahead_of_linear_partway_through_an_ease_out_curve`
+new; every one of the 29 pre-existing tests, including
+`page_content_cannot_reach_the_consent_panels_inputs` and
+`no_automated_test_calls_try_real_model_provider_outside_launch`, passes
+unmodified — no test's assertion text needed to change, since no button
+label string it checks was among the ones replaced by icons). `cargo fmt -p
+ferrite-ui --check`, `cargo clippy -p ferrite-ui --all-targets -- -D
+warnings`, `just check` (fmt + clippy --workspace --all-targets + `cargo
+machete`), `just test` (full workspace, every crate's test binary green),
+`cargo build --workspace` — all clean.
+
+**Found, not silently fixed — filed as T-231 (docs/TO-DO.md):** enabling
+`iced_widget`'s `svg` feature makes `cargo deny check` fail
+(`[bans] multiple-versions = "deny"`): `resvg`/`usvg` 0.42.0 (pinned by
+`iced_renderer` 0.13.0's own `svg` feature) pin `fontdb` 0.18.0/`kurbo`
+0.11.3, one version newer than `iced_tiny_skia`/`cosmic-text`'s existing
+0.16.2/0.10.4. Same structural class `deny.toml`'s own `[bans] skip`
+comment already documents for two earlier batches. The fix (two more
+`skip` entries) lives in root `deny.toml`, outside this charter's stated
+file scope — deliberately left unfixed and filed rather than silently
+expanding scope. `just check`/`just test` are unaffected (`just check`
+does not run `cargo deny`, by that recipe's own design).
+
+**Also found, fixed as an unrelated one-line dependency cleanup:**
+`ferrite-ui`'s `Cargo.toml` had an unused direct `ferrite-engine` dependency
+(pre-existing since B3 — `cargo machete`, run for the first time as part of
+getting `just check` green for this charter, caught it). Removed; confirmed
+nothing in `ferrite-ui`'s source names `ferrite_engine::` outside a doc
+comment.
+
+**App launch, confirmed observed this session:** `cargo run -p ferrite-shell
+-- ui` (default features, no real Servo) — builds, starts, prints the same
+two expected warnings B3's session did (`no ModelProvider configured`,
+`Servo unavailable: ferrite-servo compiled without the 'servo' feature`),
+enters the real winit event loop and stays running (`timeout 20 ...; echo
+EXIT: $?` -> `EXIT: 124`, killed by the timeout while still alive, not a
+crash). **Not attempted this session:** the real-Servo feature build
+(`--features ferrite-servo/servo`, 15-26 minutes per A9/B3's own
+precedent) — B3 already verified that combination works pre-C1, and
+nothing in this charter touches Servo-session or engine code, only view
+code around it, so re-running that specific, expensive build was judged
+unnecessary rather than skipped for time. **This agent cannot visually
+verify the aesthetic result** — no attached display, cannot drive a GUI.
+Every claim above about what changed is a description of the diff (file
+list, icon list, which widgets changed), not an assertion about how it
+looks; the coordinator's own visual review with the user is still the next
+real checkpoint for that.
+
+**Commits:** `61ed9f0` (svg feature + unused-dep cleanup), `3981f8a` (icon
+set + visual polish).
+
+**Known issues discovered, not fixed:** T-231 (above). Everything else
+already tracked (T-212/T-217/T-218/T-219/T-222/T-223/T-227/T-228/T-230)
+untouched, as before.
