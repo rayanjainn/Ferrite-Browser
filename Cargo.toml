@@ -71,8 +71,18 @@ rustls = { version = "0.23", features = ["aws_lc_rs"] }
 libservo = { git = "https://github.com/servo/servo", tag = "v0.0.5" }
 
 # ── ferrite-ui ───────────────────────────────────────────────────────────
+# C1 (docs/handoffs/c01.md): "svg" adds the hand-authored icon set
+# (crates/ferrite-ui/assets/icons/), rendered via iced_widget::svg. iced
+# itself needs no matching feature flag here — ferrite-ui imports
+# `iced_widget::svg` directly (as it already does for `iced_widget::image`,
+# see lib.rs), not `iced::widget::svg`, and iced_widget's "svg" feature is a
+# real Cargo feature on the `iced_widget` crate itself (confirmed against
+# the pinned iced_widget 0.13.4's own Cargo.toml: `svg = ["iced_renderer/svg"]`)
+# — enabling it here is sufficient regardless of what `iced`'s own "svg"
+# feature (which only forwards to iced_widget/svg for `iced::widget::svg`
+# call sites) is set to.
 iced = { version = "0.13", features = ["tokio"] }
-iced_widget = { version = "0.13", features = ["image"] }
+iced_widget = { version = "0.13", features = ["image", "svg"] }
 urlencoding = "2"
 
 # ── path deps (in-workspace crates) ──────────────────────────────────────
