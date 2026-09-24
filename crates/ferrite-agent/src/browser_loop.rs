@@ -355,6 +355,40 @@ IMPORTANT:
 /// identical version rather than two independently-chosen literals.
 pub const SYSTEM_PROMPT_VERSION: u32 = 1;
 
+/// `options.num_predict` for every agent-loop step (`ModelTier::Main`).
+///
+/// `ferrite_model::SamplingOptions::default()`'s `num_predict = 128` is
+/// correct for the fingerprint call (§10.2: "a short JSON array... capped
+/// around 128"), but this loop's own responses are a full `AgentAction`
+/// JSON object — for `Finish`, a freeform prose `answer` that can easily
+/// run well past 128 tokens. Left at the default, a real Ollama backend
+/// hard-truncates mid-generation once the cap is hit, so a longer answer
+/// comes back as invalid JSON with an unterminated string — a directly
+/// observed, reproduced failure (`serde_json`'s "EOF while parsing a
+/// string"), not a hypothetical one. `2048` is generous headroom for a
+/// realistic answer or a `fill_form`/`js_execute` payload while still
+/// being a real, finite cap, per §10.3's "cap `num_predict` on every
+/// call" — never uncapped.
+pub const AGENT_LOOP_NUM_PREDICT: u32 = 2048;
+
+/// How many *consecutive* unparseable model responses [`run_agent_loop`]
+/// tolerates, by feeding the parse error back to the model as an
+/// observation and asking it to try again, before giving up with
+/// [`LoopStopReason::MalformedAction`].
+///
+/// A single malformed response — truncation, stray prose around the JSON,
+/// a markdown code fence — is exactly the kind of mistake a model often
+/// self-corrects from on the very next turn once told what was wrong with
+/// its last one. Ending the whole task on the first such glitch (the prior
+/// behavior) turned a recoverable hiccup into a hard failure surfaced
+/// straight to the user as a raw parser error. Retries do not count
+/// against `LoopBudget::max_steps` (a retry takes no real browser action,
+/// so it should not cost part of the user's step budget); they are
+/// instead independently bounded by this constant, and reset to zero the
+/// moment a valid action is parsed, so a model stuck producing garbage
+/// still fails fast rather than looping forever.
+pub const MAX_CONSECUTIVE_MALFORMED_STEPS: u32 = 2;
+
 /// Maximum approximate character budget for the conversation history sent
 /// to the model on each step.
 ///
@@ -469,8 +503,18 @@ pub async fn run_agent_loop<E: BrowserEngine>(
     let mut actions_taken: Vec<AgentAction> = Vec::new();
     let mut observations: Vec<String> = Vec::new();
     let mut messages = vec![Message::user(task_prompt)];
+    let mut steps_taken: usize = 0;
+    let mut consecutive_malformed: u32 = 0;
 
-    for _ in 0..budget.max_steps {
+    loop {
+        if steps_taken >= budget.max_steps {
+            return AgentLoopResult {
+                stop_reason: LoopStopReason::StepBudgetExhausted,
+                actions_taken,
+                observations,
+            };
+        }
+
         let elapsed = clock.now() - start;
         let budget_delta =
             chrono::TimeDelta::from_std(budget.max_wall_clock).unwrap_or(chrono::TimeDelta::MAX);
@@ -483,7 +527,10 @@ pub async fn run_agent_loop<E: BrowserEngine>(
         }
 
         let request = CompletionRequest::new(model_tag, tier, messages.clone())
-            .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION);
+            .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION)
+            .with_options(
+                ferrite_model::SamplingOptions::default().with_num_predict(AGENT_LOOP_NUM_PREDICT),
+            );
         let response = match provider.complete(request).await {
             Ok(r) => r,
             Err(e) => {
@@ -496,16 +543,41 @@ pub async fn run_agent_loop<E: BrowserEngine>(
         };
 
         let action: AgentAction = match serde_json::from_str(response.content.trim()) {
-            Ok(a) => a,
+            Ok(a) => {
+                consecutive_malformed = 0;
+                a
+            }
             Err(e) => {
-                return AgentLoopResult {
-                    stop_reason: LoopStopReason::MalformedAction(format!(
-                        "{e} (raw: {})",
-                        response.content
-                    )),
-                    actions_taken,
-                    observations,
+                consecutive_malformed += 1;
+                if consecutive_malformed > MAX_CONSECUTIVE_MALFORMED_STEPS {
+                    return AgentLoopResult {
+                        stop_reason: LoopStopReason::MalformedAction(format!(
+                            "{e} (raw: {})",
+                            response.content
+                        )),
+                        actions_taken,
+                        observations,
+                    };
                 }
+                // Give the model a chance to self-correct: feed the raw
+                // (possibly truncated) response back as its own turn, then
+                // ask for a single complete, valid JSON object. This does
+                // not consume a step of `budget.max_steps` — no real
+                // browser action was taken — but is itself bounded by
+                // `MAX_CONSECUTIVE_MALFORMED_STEPS` above, so a model stuck
+                // producing garbage still fails fast rather than spinning
+                // forever.
+                messages.push(Message::assistant(compact_observation(
+                    response.content.trim(),
+                )));
+                messages.push(Message::user(format!(
+                    "Observation: your last response could not be parsed as a single, \
+                     complete, valid JSON action ({e}). It may have been cut off or \
+                     included extra text. Respond with EXACTLY ONE complete, valid JSON \
+                     object and nothing else."
+                )));
+                trim_message_history(&mut messages);
+                continue;
             }
         };
 
@@ -546,12 +618,7 @@ pub async fn run_agent_loop<E: BrowserEngine>(
         trim_message_history(&mut messages);
         observations.push(observation);
         actions_taken.push(action);
-    }
-
-    AgentLoopResult {
-        stop_reason: LoopStopReason::StepBudgetExhausted,
-        actions_taken,
-        observations,
+        steps_taken += 1;
     }
 }
 
@@ -767,7 +834,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_malformed_action_stops_the_loop_rather_than_panicking() {
-        let provider = MockProvider::new().push_content("not json");
+        // Every attempt (the first try plus every retry) comes back
+        // unparseable, so the retry budget itself must be what ends this,
+        // not an exhausted mock queue.
+        let provider = MockProvider::new().always_content("not json");
         let mut engine = MockEngine::new();
         let clock = ferrite_core::SystemClock;
 
@@ -786,6 +856,81 @@ mod tests {
             result.stop_reason,
             LoopStopReason::MalformedAction(_)
         ));
+        assert_eq!(
+            result.actions_taken.len(),
+            0,
+            "a retry that never produces a valid action must never be recorded as one taken"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_response_is_retried_and_recovers_on_the_next_valid_one() {
+        // First attempt: truncated/malformed JSON (the real failure mode
+        // this retry exists for — a response cut short by num_predict).
+        // Second attempt: a valid finish. The loop must recover instead of
+        // ending on the first glitch.
+        let provider = MockProvider::new()
+            .push_content(r#"{"action":"finish","answer":"This page is a"#)
+            .push_content(finish_json("done"));
+        let mut engine = MockEngine::new();
+        let clock = ferrite_core::SystemClock;
+
+        let result = run_agent_loop(
+            &provider,
+            &mut engine,
+            &clock,
+            "tag",
+            ModelTier::Main,
+            "task",
+            LoopBudget::default(),
+        )
+        .await;
+
+        assert_eq!(
+            result.stop_reason,
+            LoopStopReason::Finished("done".to_string()),
+            "a malformed response must not end the task once a later response is valid"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_response_retry_does_not_consume_the_step_budget() {
+        // Two malformed responses (within the retry budget), then two
+        // distinct real actions, then finish — with max_steps set to
+        // exactly 3 (matching the 3 real model turns: navigate, navigate,
+        // finish), this must still succeed. If the two malformed retries
+        // counted against the budget, only one real action would fit
+        // before `StepBudgetExhausted` fired.
+        let provider = MockProvider::new()
+            .push_content("not json")
+            .push_content("still not json")
+            .push_content(navigate_json("https://a.example/"))
+            .push_content(navigate_json("https://b.example/"))
+            .push_content(finish_json("done"));
+        let mut engine = MockEngine::new();
+        let clock = ferrite_core::SystemClock;
+        let budget = LoopBudget {
+            max_steps: 3,
+            ..LoopBudget::default()
+        };
+
+        let result = run_agent_loop(
+            &provider,
+            &mut engine,
+            &clock,
+            "tag",
+            ModelTier::Main,
+            "task",
+            budget,
+        )
+        .await;
+
+        assert_eq!(
+            result.stop_reason,
+            LoopStopReason::Finished("done".to_string()),
+            "the two malformed retries must not have eaten into the 3-step budget"
+        );
+        assert_eq!(result.actions_taken.len(), 2);
     }
 
     #[tokio::test]
