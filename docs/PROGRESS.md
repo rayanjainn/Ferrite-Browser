@@ -3541,3 +3541,239 @@ instantly fatal — is verified directly, independent of whether
 `num_predict` was the only ever cause of a malformed response.
 
 **Commits:** `6faeceb`.
+
+## 2026-09-24 — coordinator — C3c: real light/dark theme toggle, resolved palette, smoother loaders
+
+**Scope:** third item of the C3 UI-polish sequence (C3a: rendering/
+coordinate/resize correctness; C3b: real page favicons — landed as
+`a75d17e` on this same branch, `feat/favicons-and-theme-polish`, with no
+dedicated `PROGRESS.md` entry of its own; noted here rather than silently
+left unfiled, though backfilling it is not this entry's job). Reported
+directly by the project owner: "the UI is not browser rich... clean,
+aesthetic looking, not cheap, good colour scheme, light dark theme, smooth
+loaders... proper great ui and ux." `crates/ferrite-ui/` only, per this
+charter's stated boundary (no bookmarks/history/downloads/find-in-page/
+zoom/settings — that is C3d, explicitly out of scope here).
+
+**Problem, confirmed by reading the file before changing anything (per
+`CLAUDE.md`'s own standing instruction):** `crates/ferrite-ui/src/lib.rs`
+was hardcoded to one dark theme — twelve module-level `const C_XXX: Color`
+constants referenced by bare ident from `view()`, `view_agent_sidebar()`,
+`new_tab_page()`, and nine `.style(...)`-callback functions (`nav_btn_style`
+etc.), plus `launch()`'s `.theme(|_state| Theme::Dark)`. No toggle existed
+to build on top of, and the tab bar's loading indicator's own comment
+claimed it reused the agent sidebar's tick-driven dots pattern but the code
+next to it never actually did — `text(if spinning {"..."} else {"•"})` is a
+fixed string, not animated at all.
+
+**Fix — real palette resolution, not a bigger constant table:**
+
+1. **`Palette` struct** (`crates/ferrite-ui/src/lib.rs`) — the same twelve
+   fields as the old `C_*` constants, now struct fields (`base`/`surface`/
+   `raised`/`divider`/`text`/`text_dim`/`accent`/`accent_bright`/`input`/
+   `safe`/`warn`/`danger`), plus `DARK_PALETTE` (the exact prior values,
+   unchanged) and a new, considered `LIGHT_PALETTE` — not an RGB inversion:
+   background depth runs the same direction real browser chrome uses
+   (near-white page/toolbar, a touch grayer tab strip, grayer still for
+   hover state), the purple accent is deepened from
+   `rgb(112,97,255)`/`rgb(143,128,255)` to `rgb(89,66,235)`/
+   `rgb(107,82,250)` so it stays foreground-safe on a light background, and
+   `safe`/`warn`/`danger` are darkened from the dark theme's saturated
+   versions, which measure under ~3.2:1 contrast against near-white — well
+   under WCAG AA's 4.5:1 for the small-text badges this crate uses them for
+   (e.g. the audit log's kind column). Contrast figures (`text` on `base` ≈
+   17:1, `text_dim` ≈ 5.4:1, `accent` ≈ 6:1, `safe`/`warn`/`danger` ≈
+   5.2-5.4:1) are hand-computed against the WCAG relative-luminance formula
+   and documented inline on `LIGHT_PALETTE` — **not run through an
+   automated contrast checker**, stated as such in the code itself.
+2. **`AppTheme { Dark, Light }`** enum on `FerriteBrowser` (new
+   `theme_mode` field), `Default` is `Dark` — every existing user sees
+   exactly what they always have until they actually press the new toggle.
+   `FerriteBrowser::palette()` resolves it for the three view functions
+   that already take `state: &FerriteBrowser`; `palette_for_theme(&Theme)`
+   is the equivalent lookup for the nine `.style(...)`-callback functions,
+   which get the live `iced::Theme` handed to them by iced itself at render
+   time (whatever `AppTheme::to_iced_theme()` last returned) — no extra
+   state needed threading through those call sites at all, since the
+   `_theme` parameter they already had (previously ignored) turned out to
+   be exactly what was needed once renamed to `theme` and actually read.
+3. **Every one of the ~150 `C_XXX` call sites converted**, grep-confirmed
+   exhaustively: `grep -n "\bC_BASE\b\|...\|\bC_DANGER\b"
+   crates/ferrite-ui/src/lib.rs` after the change matches only the four
+   places those old names are still mentioned in prose (doc comments
+   explaining the pre-C3c shape), zero remaining in actual code — the
+   "half-converted theme" failure mode the charter warned about explicitly
+   did not happen.
+4. **`FerriteBrowserMessage::ToggleTheme`**, handled in `update()` by
+   flipping `state.theme_mode`; a new toolbar icon button (`theme_btn`,
+   next to the existing Audit/JS/Agent toggles) sends it, showing the icon
+   of the mode a click switches *to* (sun while dark is active, moon while
+   light is active) — the common browser/OS theme-switcher convention.
+   `launch()`'s `.theme(...)` now reads `state.theme_mode.to_iced_theme()`
+   instead of the hardcoded `Theme::Dark`.
+5. **New `Sun`/`Moon` icons** (`crates/ferrite-ui/assets/icons/sun.svg`,
+   `moon.svg`) follow C1's exact hand-authored convention (24x24 viewBox,
+   `stroke="#000000"`, stroke-based, tinted at render time by `icon()`) —
+   added to the `Icon` enum and `icon_bytes`, not left as unreferenced
+   assets.
+
+**Loader polish, same charter:** two new pure helpers next to the existing
+`ease_out_cubic` (same tick-driven `progress_offset` `ServoFrame` already
+advances every ~16ms, no new animation clock): `pulse_alpha(t, cycles,
+base, amplitude)` — a smooth breathing alpha, replacing three near-
+duplicate inline sine expressions — and `progress_segment_brightness(i,
+segments, t)` — a single bright band sweeping across `PROGRESS_SEGMENTS`
+segments and wrapping at the ring's seam. Applied: the tab bar's loading
+dot now actually pulses (`pulse_alpha`) instead of being the static,
+unanimated `"..."` string its own (now-corrected) comment had claimed was
+animated; the top-of-window progress bar is now a
+`PROGRESS_SEGMENTS`-wide row of individually-lit segments
+(`progress_segment_brightness`) instead of one strip pulsing alpha in
+lockstep — a real moving "in progress" indicator rather than a flat glow;
+the new-tab "Fe" logo's existing pulse is refactored onto `pulse_alpha`
+with its exact prior constants (cosmetically unchanged, code deduplicated).
+The agent sidebar's "Working..." dots text was already genuinely
+tick-driven (cycles through 0-3 dots off `progress_offset`) and was left
+as is — it was not the "cheap"-reading case the tab bar's static string
+was.
+
+**Tests, `crates/ferrite-ui/src/lib.rs`:** 11 new —
+`pulse_alpha_stays_within_base_and_base_plus_amplitude`,
+`pulse_alpha_at_zero_is_exactly_base`,
+`progress_segment_brightness_peaks_at_the_segment_under_the_sweep`,
+`progress_segment_brightness_wraps_around_the_segment_ring`,
+`progress_segment_brightness_is_bounded_zero_to_one`,
+`default_theme_is_dark_matching_pre_c3c_behavior`,
+`toggle_theme_flips_dark_to_light_and_back`,
+`each_theme_resolves_to_its_own_distinct_palette`,
+`light_and_dark_palettes_each_keep_text_readable_on_base`,
+`to_iced_theme_matches_app_theme`,
+`palette_for_theme_falls_back_to_dark_for_a_non_light_iced_theme` — every
+one of the 43 pre-existing tests passes unmodified (no
+`FerriteBrowser`/`FerriteBrowserMessage` struct-literal call site needed
+changing beyond the two new additions, since every existing test already
+builds state via `..FerriteBrowser::default()`, per this session's own
+read of `docs/REBUILD_DIRECTIVE.md`'s R1/R7 discipline before touching
+anything). `ferrite-ui` now 54 tests, up from 43.
+
+**Verified:** `cargo build -p ferrite-ui`, `cargo clippy -p ferrite-ui
+--all-targets -- -D warnings`, `cargo fmt -p ferrite-ui --check`, `cargo
+test -p ferrite-ui` (54 passed, 0 failed) individually, then the full
+workspace: `cargo build --workspace`, `cargo fmt --all --check`, `cargo
+clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`
+(every crate green, 0 failures), `cargo machete` (no unused deps), `cargo
+deny check` (`advisories ok, bans ok, licenses ok, sources ok`, same
+pre-existing Servo-git-source warning every agent since A3 has logged),
+`sh scripts/check_purge.sh`, `sh scripts/check_no_archive_links.sh` — all
+clean.
+
+**Not verified live — stated plainly, same limitation every UI-touching
+session before this one has stated:** this sandbox has no attached
+display and cannot build the real Servo feature, so **neither theme was
+ever actually rendered or screenshot-checked** — not the light palette's
+look, not the toggle button, not the segmented progress bar's sweep, not
+the tab-bar dot's breathing. Every claim above is a description of the
+code change and what its pure/state-machine logic does under test, not an
+assertion about how it looks or feels on screen. The contrast figures
+cited for `LIGHT_PALETTE` are hand-computed against the WCAG formula, not
+verified with an automated contrast-checking tool. The user's own relaunch
+is the real verification this entry cannot substitute for.
+
+**Commits:** `f7d20ad`.
+
+**Known issues discovered, not fixed:** C3b (`a75d17e`, real page favicons)
+landed on this branch with no `PROGRESS.md` entry of its own — noted above
+rather than silently left unfiled, but backfilling that entry (with its
+own honest verification statement, written by whoever actually did that
+work) is outside this entry's scope. Everything else already tracked
+(T-212/T-217/T-218/T-219/T-222/T-223/T-227/T-228/T-230/T-231) untouched, as
+before.
+
+## 2026-09-24 — coordinator — C3b: real page favicons in the tab bar (backfilled entry for `a75d17e`)
+
+**Scope:** second item of the C3 UI-polish sequence (C3a: rendering/
+coordinate/resize correctness, already landed to `main`; C3c: theme
+toggle + visual polish + loaders, the entry directly above this one,
+which correctly flagged that this commit had shipped without its own
+entry — filing it now, written by the same session that did the work).
+Same branch, `feat/favicons-and-theme-polish`. The tab bar previously
+showed only a placeholder glyph (`"..."` while loading, `"•"` once idle)
+for every tab — never a real site icon, one of the concrete gaps the
+project owner named explicitly ("i also dont see the page icons, like
+github icon, or etc").
+
+**Design: no new message plumbing needed, only an accessor.** Read
+directly against the pinned `libservo` source
+(`/root/.cargo/git/checkouts/servo-e53a6e7b994a25fe/301f7da`, the same
+tag this workspace pins): `Servo`'s internal `spin_event_loop()` — the
+same function `HeadlessServoSession::pump_engine()` already calls every
+tick — already drains `EmbedderMsg::NewFavicon` and calls
+`WebView::set_favicon()` internally (`components/servo/servo.rs`), which
+in turn calls the `WebViewDelegate::notify_favicon_changed` hook
+(`components/servo/webview.rs`). None of that required new code here —
+the favicon was already being captured on every tab's `WebView` the whole
+time; it just wasn't being read.
+
+**Fix, `crates/ferrite-servo/src/session.rs`:**
+- `HeadlessDelegate` (the existing `WebViewDelegate` impl already used for
+  `notify_page_title_changed`/`notify_load_status_changed`) gained
+  `notify_favicon_changed(&self, webview: servo::WebView)` — the callback
+  takes no image parameter (per `WebViewDelegate`'s own doc comment, the
+  new icon is read via `webview.favicon()` inside the hook), converted via
+  a new pure function and stored in a shared `Rc<RefCell<Option<(u32, u32,
+  Vec<u8>)>>>` cell, mirroring the existing `shared_page_title` pattern
+  exactly.
+- **`favicon_to_rgba8(width, height, format: servo::PixelFormat, data:
+  &[u8]) -> Vec<u8>`** — favicons can decode to any of Servo's five
+  `PixelFormat` variants (`K8`/`KA8`/`RGB8`/`RGBA8`/`BGRA8`) depending on
+  the source image (a `.ico`'s frame, a plain PNG, ...), not just the RGBA8
+  `iced_widget::image::Handle::from_rgba` expects — this is the one place
+  in the crate that has to handle the full set rather than assuming a
+  single decoder output, unlike `get_frame()`'s main-surface readback
+  (`rendering_context.read_to_image`), which always comes back
+  pre-converted. Covered by 5 unit tests, one per format, gated the same
+  way the rest of this module is (`#[cfg(feature = "servo")]` — see the
+  verification note below for what that means for this sandbox).
+- `HeadlessServoSession` gained `shared_favicon`/`last_favicon` fields
+  (synced in `sync_and_read()`, same tick as the title sync) and a public
+  `get_favicon() -> Option<(u32, u32, Vec<u8>)>` accessor. The
+  non-`servo`-feature stub gained a matching `get_favicon() -> None`.
+
+**Fix, `crates/ferrite-ui/src/lib.rs`:**
+- `FerriteBrowser::tab_favicons: Vec<Option<ImageHandle>>` — same indexing
+  as `tab_titles`/`tab_urls`, pushed/removed alongside them in
+  `AddTab`/`CloseTab`, synced every `ServoFrame` tick alongside the
+  existing title sync.
+- The tab bar's favicon slot now renders the real `ImageHandle` (via
+  `ServoImage::new(...)`, the same construction `ServoImage`/`ImageHandle`
+  the main content frame already uses) once a tab has one; the loading
+  pulse and the idle dot are kept as the fallback for a tab that hasn't
+  set a favicon yet or never will (`about:blank`, some error pages).
+
+**Verified:** default (Servo-free) build only — `cargo build`/`clippy
+--all-targets -D warnings`/`fmt --check`/`test` on `ferrite-servo` and
+`ferrite-ui` individually, then the same four plus `cargo machete` and
+`cargo deny check` across the full workspace, plus the doc-drift scripts —
+all clean.
+
+**Not verified — stated honestly, not glossed over:** this sandbox cannot
+build the real `servo` feature (disk/time cost, same limitation every
+prior entry this session has logged) and has no display, so `session.rs`'s
+`mod inner` — everything in this fix except the `ferrite-ui` side and the
+default stub — has never been compiler-checked here, only cross-read
+against the pinned `libservo` source function-by-function (`WebView::
+favicon`'s return type and signature, `PixelFormat`'s exact variant names,
+`WebViewDelegate::notify_favicon_changed`'s exact signature, and that
+`servo::lib.rs`'s `pub use embedder_traits::*;` makes `servo::Image`/
+`servo::PixelFormat` resolve the same way `servo::LoadStatus`/`servo::
+ConsoleLogLevel` already do elsewhere in this same file). Neither CI job
+type-checks this path either (`ci` is Servo-free by design;
+`build-servo-release` runs `cargo build`, not `clippy` or `test`) — a
+pre-existing gap in this project's own CI, not introduced here, but worth
+naming since it means this specific code's first real compiler check will
+happen on `just build-servo`/a real macOS run, not before. The 5
+`favicon_to_rgba8` unit tests exist for exactly that moment, not for this
+sandbox's `cargo test --workspace`, which never compiles them (the module
+they're in is `#[cfg(feature = "servo")]`-gated end to end).
+
+**Commits:** `a75d17e`.

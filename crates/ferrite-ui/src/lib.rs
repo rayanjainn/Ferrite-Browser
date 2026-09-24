@@ -403,82 +403,294 @@ const ICON_SIZE_SM: f32 = 12.0;
 /// the 150-250ms range typical for this kind of UI entrance transition.
 const CONSENT_ANIM_STEP: f32 = 16.0 / 200.0;
 
-// ---------------------------------------------------------------------------
-// Colour palette
-// ---------------------------------------------------------------------------
+/// Number of individually-lit segments in `view()`'s top-of-window loading
+/// bar — see [`progress_segment_brightness`]. Wide enough to read as a
+/// smooth sweep rather than a few chunky blocks, narrow enough that each
+/// segment is still a real, visible width in the toolbar's `PANEL_PADDING`-
+/// inset span.
+const PROGRESS_SEGMENTS: usize = 12;
 
-const C_BASE: Color = Color {
-    r: 0.08,
-    g: 0.08,
-    b: 0.10,
-    a: 1.0,
+// ---------------------------------------------------------------------------
+// Colour palette — C3c: real light/dark theme
+// ---------------------------------------------------------------------------
+//
+// Through C3b this crate had exactly one theme: twelve module-level `Color`
+// constants (`C_BASE`/`C_SURFACE`/.../`C_DANGER`) referenced by bare ident
+// from `view()` and its helpers. `Palette` keeps the same twelve roles
+// (lowercased, as struct fields) resolved per [`AppTheme`] instead of fixed
+// at compile time — every call site's *meaning* is unchanged, only the
+// lookup is now runtime.
+//
+// Two ways a function gets the right `&'static Palette` for the app's
+// current theme, depending on what it already has in scope:
+// - `view()`/`new_tab_page()`/`view_agent_sidebar()` already take
+//   `state: &FerriteBrowser`, so each binds `let palette = state.palette();`
+//   once near the top and every former `C_XXX` reference in that function
+//   became `palette.xxx`.
+// - The nine `*_style` functions below are passed to `.style(...)` as bare
+//   `fn` pointers (e.g. `.style(nav_btn_style)`), so iced itself calls them
+//   at render time with whatever `Theme` `launch()`'s `.theme(...)` closure
+//   currently returns. `palette_for_theme(theme)` reads the `AppTheme` back
+//   out of that `Theme`, so no extra state needs threading through the
+//   `.style()` call sites at all — the parameter those functions already
+//   had (previously named `_theme` and ignored) is now the one thing they
+//   actually need.
+
+/// One resolved colour per semantic role: background depth
+/// (`base`/`surface`/`raised`/`divider`/`input`), text
+/// (`text`/`text_dim`), the brand accent (`accent`/`accent_bright`), and the
+/// three status colours (`safe`/`warn`/`danger`) — exactly the pre-C3c
+/// `C_BASE`.../`C_DANGER` constants, as struct fields instead of bare idents.
+#[derive(Debug, Clone, Copy)]
+pub struct Palette {
+    pub base: Color,
+    pub surface: Color,
+    pub raised: Color,
+    pub divider: Color,
+    pub text: Color,
+    pub text_dim: Color,
+    pub accent: Color,
+    pub accent_bright: Color,
+    pub input: Color,
+    pub safe: Color,
+    pub warn: Color,
+    pub danger: Color,
+}
+
+/// The palette this crate shipped through C3b, unchanged value-for-value —
+/// still the default theme (see [`AppTheme`]'s `Default` impl), so a user
+/// who never touches the new toggle sees exactly what they always have.
+const DARK_PALETTE: Palette = Palette {
+    base: Color {
+        r: 0.08,
+        g: 0.08,
+        b: 0.10,
+        a: 1.0,
+    },
+    surface: Color {
+        r: 0.11,
+        g: 0.11,
+        b: 0.14,
+        a: 1.0,
+    },
+    raised: Color {
+        r: 0.17,
+        g: 0.17,
+        b: 0.21,
+        a: 1.0,
+    },
+    divider: Color {
+        r: 0.20,
+        g: 0.20,
+        b: 0.25,
+        a: 1.0,
+    },
+    text: Color {
+        r: 0.93,
+        g: 0.93,
+        b: 0.96,
+        a: 1.0,
+    },
+    text_dim: Color {
+        r: 0.50,
+        g: 0.50,
+        b: 0.58,
+        a: 1.0,
+    },
+    accent: Color {
+        r: 0.44,
+        g: 0.38,
+        b: 1.0,
+        a: 1.0,
+    },
+    accent_bright: Color {
+        r: 0.56,
+        g: 0.50,
+        b: 1.0,
+        a: 1.0,
+    },
+    input: Color {
+        r: 0.14,
+        g: 0.14,
+        b: 0.18,
+        a: 1.0,
+    },
+    safe: Color {
+        r: 0.20,
+        g: 0.84,
+        b: 0.54,
+        a: 1.0,
+    },
+    warn: Color {
+        r: 0.95,
+        g: 0.65,
+        b: 0.20,
+        a: 1.0,
+    },
+    danger: Color {
+        r: 1.0,
+        g: 0.35,
+        b: 0.35,
+        a: 1.0,
+    },
 };
-const C_SURFACE: Color = Color {
-    r: 0.11,
-    g: 0.11,
-    b: 0.14,
-    a: 1.0,
+
+/// A considered light palette, not a naive RGB inversion of
+/// [`DARK_PALETTE`]: background depth still runs the same direction real
+/// browser chrome uses (near-white page/toolbar, a touch grayer tab strip,
+/// grayer still for hover/raised state — Chrome's and Firefox's own light
+/// themes order it the same way), the accent keeps the same purple hue
+/// family but is deepened (`rgb(112,97,255)`/`rgb(143,128,255)` for
+/// `accent`/`accent_bright` in the dark palette &rarr; `rgb(89,66,235)`/
+/// `rgb(107,82,250)` here) so it still reads as foreground-safe against a
+/// light background instead of washing out, and `safe`/`warn`/`danger` are
+/// each darkened from the dark theme's saturated, light-on-dark-friendly
+/// versions for the same reason — the original mint/amber/coral are all
+/// under ~3.2:1 contrast against a near-white background, well under WCAG
+/// AA's 4.5:1 for normal text, and this crate uses all three as small-text
+/// badge/label colours (e.g. the audit log's kind column), not just as
+/// decoration.
+///
+/// Contrast figures below are hand-computed against the WCAG relative-
+/// luminance formula (sRGB-to-linear per channel, then
+/// `0.2126R+0.7152G+0.0722B`, then `(L_light+0.05)/(L_dark+0.05)`) — not run
+/// through an automated checker, so treat them as "designed with a target
+/// in mind" rather than a certified audit: `text` on `base` ≈ 17:1 (AAA),
+/// `text_dim` on `base` ≈ 5.4:1, `accent` on `base` ≈ 6:1, `safe`/`warn`/
+/// `danger` on `base` ≈ 5.2-5.4:1 — all at or above AA's 4.5:1 for normal
+/// text.
+const LIGHT_PALETTE: Palette = Palette {
+    base: Color {
+        r: 0.980,
+        g: 0.980,
+        b: 0.988,
+        a: 1.0,
+    },
+    surface: Color {
+        r: 0.949,
+        g: 0.953,
+        b: 0.969,
+        a: 1.0,
+    },
+    raised: Color {
+        r: 0.910,
+        g: 0.910,
+        b: 0.941,
+        a: 1.0,
+    },
+    divider: Color {
+        r: 0.863,
+        g: 0.863,
+        b: 0.902,
+        a: 1.0,
+    },
+    text: Color {
+        r: 0.090,
+        g: 0.090,
+        b: 0.122,
+        a: 1.0,
+    },
+    text_dim: Color {
+        r: 0.400,
+        g: 0.400,
+        b: 0.460,
+        a: 1.0,
+    },
+    accent: Color {
+        r: 0.349,
+        g: 0.259,
+        b: 0.922,
+        a: 1.0,
+    },
+    accent_bright: Color {
+        r: 0.420,
+        g: 0.322,
+        b: 0.980,
+        a: 1.0,
+    },
+    input: Color {
+        r: 1.000,
+        g: 1.000,
+        b: 1.000,
+        a: 1.0,
+    },
+    safe: Color {
+        r: 0.039,
+        g: 0.471,
+        b: 0.294,
+        a: 1.0,
+    },
+    warn: Color {
+        r: 0.647,
+        g: 0.333,
+        b: 0.020,
+        a: 1.0,
+    },
+    danger: Color {
+        r: 0.784,
+        g: 0.149,
+        b: 0.149,
+        a: 1.0,
+    },
 };
-const C_RAISED: Color = Color {
-    r: 0.17,
-    g: 0.17,
-    b: 0.21,
-    a: 1.0,
-};
-const C_DIVIDER: Color = Color {
-    r: 0.20,
-    g: 0.20,
-    b: 0.25,
-    a: 1.0,
-};
-const C_TEXT: Color = Color {
-    r: 0.93,
-    g: 0.93,
-    b: 0.96,
-    a: 1.0,
-};
-const C_TEXT_DIM: Color = Color {
-    r: 0.50,
-    g: 0.50,
-    b: 0.58,
-    a: 1.0,
-};
-const C_ACCENT: Color = Color {
-    r: 0.44,
-    g: 0.38,
-    b: 1.0,
-    a: 1.0,
-};
-const C_ACCENT_BRIGHT: Color = Color {
-    r: 0.56,
-    g: 0.50,
-    b: 1.0,
-    a: 1.0,
-};
-const C_INPUT: Color = Color {
-    r: 0.14,
-    g: 0.14,
-    b: 0.18,
-    a: 1.0,
-};
-const C_SAFE: Color = Color {
-    r: 0.20,
-    g: 0.84,
-    b: 0.54,
-    a: 1.0,
-};
-const C_WARN: Color = Color {
-    r: 0.95,
-    g: 0.65,
-    b: 0.20,
-    a: 1.0,
-};
-const C_DANGER: Color = Color {
-    r: 1.0,
-    g: 0.35,
-    b: 0.35,
-    a: 1.0,
-};
+
+/// Which of the two shipped palettes the app is currently drawing from.
+/// `Default` is `Dark` — this crate's only theme through C3b — so a user who
+/// never touches `ToggleTheme` (see `FerriteBrowserMessage`) sees the exact
+/// same app they always have; the toggle is opt-in, not a default-behavior
+/// change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl AppTheme {
+    /// Flips to the other mode — the entire behavior of `ToggleTheme` (see
+    /// `update()`).
+    fn toggled(self) -> Self {
+        match self {
+            AppTheme::Dark => AppTheme::Light,
+            AppTheme::Light => AppTheme::Dark,
+        }
+    }
+
+    /// The resolved colour set for this mode.
+    fn palette(self) -> &'static Palette {
+        match self {
+            AppTheme::Dark => &DARK_PALETTE,
+            AppTheme::Light => &LIGHT_PALETTE,
+        }
+    }
+
+    /// `launch()`'s `.theme(...)` closure reads this to pick iced's own
+    /// built-in `Theme::Dark`/`Theme::Light` (which drives iced's default
+    /// widget rendering — e.g. `text_input`'s selection/scrollbar chrome
+    /// this crate doesn't style itself) — kept in lock-step with `Palette`
+    /// selection rather than as independent state, so the two can never
+    /// point at different themes.
+    fn to_iced_theme(self) -> Theme {
+        match self {
+            AppTheme::Dark => Theme::Dark,
+            AppTheme::Light => Theme::Light,
+        }
+    }
+}
+
+/// The same lookup as [`AppTheme::palette`], keyed by iced's own `Theme`
+/// instead of `AppTheme` — for the nine `*_style` functions below, which
+/// receive `&Theme` from iced itself at render time (whatever
+/// `to_iced_theme()` last returned) rather than a `FerriteBrowser`
+/// reference. Anything other than `Theme::Light` resolves to the dark
+/// palette, so a hypothetical future `Theme::Custom(...)` (never constructed
+/// by this crate today) degrades to the existing look instead of panicking.
+fn palette_for_theme(theme: &Theme) -> &'static Palette {
+    match theme {
+        Theme::Light => &LIGHT_PALETTE,
+        _ => &DARK_PALETTE,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -586,6 +798,12 @@ pub struct FerriteBrowser {
     pub address_bar_focused: bool,
     pub tab_error: Vec<Option<String>>,
     pub tab_titles: Vec<String>,
+    /// The active page's favicon for each tab, same indexing as
+    /// `tab_titles`/`tab_urls` — `None` until `HeadlessServoSession::
+    /// get_favicon()` reports one (or forever, for a page that never sets
+    /// one, e.g. `about:blank`). Synced every `ServoFrame` tick alongside
+    /// the page title (see that handler).
+    pub tab_favicons: Vec<Option<ImageHandle>>,
     pub new_tab_search_input: String,
     pub js_input: String,
     pub js_output: Vec<(String, String)>,
@@ -748,6 +966,22 @@ pub struct FerriteBrowser {
     /// decoration only — see `view_agent_sidebar`'s consent body for why
     /// this never delays or hides any of the panel's actual content.
     pub consent_panel_anim: f32,
+    // ── C3c: theme ────────────────────────────────────────────────────────
+    /// Which palette `view()`/`new_tab_page()`/`view_agent_sidebar()`
+    /// currently draw from, and which `iced::Theme` `launch()`'s
+    /// `.theme(...)` closure returns — see [`AppTheme`]. Toggled by
+    /// `ToggleTheme`, e.g. the toolbar's sun/moon button.
+    pub theme_mode: AppTheme,
+}
+
+impl FerriteBrowser {
+    /// The resolved colour set for `self.theme_mode` — the one call every
+    /// view function that needs colours makes, once, near its own top (see
+    /// this module's "Colour palette" section header for the full
+    /// threading story).
+    pub fn palette(&self) -> &'static Palette {
+        self.theme_mode.palette()
+    }
 }
 
 impl Default for FerriteBrowser {
@@ -782,6 +1016,7 @@ impl Default for FerriteBrowser {
             address_bar_focused: false,
             tab_error: vec![None],
             tab_titles: vec!["New Tab".to_string()],
+            tab_favicons: vec![None],
             new_tab_search_input: String::new(),
             js_input: String::new(),
             js_output: Vec::new(),
@@ -811,6 +1046,7 @@ impl Default for FerriteBrowser {
             show_evidence: false,
             hovered_tab: None,
             consent_panel_anim: 0.0,
+            theme_mode: AppTheme::Dark,
         }
     }
 }
@@ -920,6 +1156,10 @@ pub enum FerriteBrowserMessage {
     /// `FerriteBrowser::consent_panel_anim` — see that field's docs and
     /// `subscription()`'s `consent_anim_tick`.
     ConsentPanelTick,
+    // ── C3c: theme ────────────────────────────────────────────────────────
+    /// Flips `FerriteBrowser::theme_mode` between `AppTheme::Dark` and
+    /// `AppTheme::Light` — sent by the toolbar's sun/moon button.
+    ToggleTheme,
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +1176,7 @@ pub fn update(
             state.tab_urls.push("about:blank".to_string());
             state.tab_error.push(None);
             state.tab_titles.push("New Tab".to_string());
+            state.tab_favicons.push(None);
             let new_idx = state.tabs.len() - 1;
             state.active_tab = new_idx;
             state.address_bar_input = String::new();
@@ -962,6 +1203,9 @@ pub fn update(
                 }
                 if i < state.tab_titles.len() {
                     state.tab_titles.remove(i);
+                }
+                if i < state.tab_favicons.len() {
+                    state.tab_favicons.remove(i);
                 }
                 state.servo_sessions.remove(&i);
                 let keys_to_shift: Vec<usize> = state
@@ -1556,6 +1800,11 @@ pub fn update(
                         state.tab_titles[active] = title.to_string();
                     }
                 }
+                if let Some((w, h, bytes)) = session.get_favicon() {
+                    if active < state.tab_favicons.len() {
+                        state.tab_favicons[active] = Some(ImageHandle::from_rgba(w, h, bytes));
+                    }
+                }
                 let is_now_loading = matches!(session.load_status(), LoadStatus::Loading);
                 let new_url = session.current_url().to_string();
                 let prev_url = state.tab_urls.get(active).cloned().unwrap_or_default();
@@ -1588,6 +1837,10 @@ pub fn update(
         }
         FerriteBrowserMessage::ConsentPanelTick => {
             state.consent_panel_anim = (state.consent_panel_anim + CONSENT_ANIM_STEP).min(1.0);
+        }
+        // ── C3c: theme ───────────────────────────────────────────────────────
+        FerriteBrowserMessage::ToggleTheme => {
+            state.theme_mode = state.theme_mode.toggled();
         }
     }
     Task::none()
@@ -1793,24 +2046,78 @@ fn ease_out_cubic(t: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// C3c: loading-indicator animation
+// ---------------------------------------------------------------------------
+//
+// Both helpers below are driven by the same `FerriteBrowser::progress_offset`
+// `ServoFrame` already advances every ~16ms tick (see that handler) —
+// consistent with `ease_out_cubic` above, no separate animation clock is
+// introduced. Kept as pure `f32 -> f32`/`(usize, usize, f32) -> f32`
+// functions rather than inlined into `view()`, the same reasoning
+// `ease_out_cubic` documents: testable without spinning up Iced at all.
+
+/// A smooth "something is happening" breathing alpha, `t` in `0.0..=1.0`
+/// (`progress_offset`) with `cycles` full breaths per `t`'s wrap-around —
+/// pulled out of what were three near-duplicate inline sine expressions
+/// (the new-tab loading placeholder's "Fe" logo, the old flat-alpha
+/// progress-bar pulse this charter replaces with
+/// [`progress_segment_brightness`], and the tab bar's loading dot, which
+/// used to just be a static, unanimated `"..."` string — see that call
+/// site) into one shared curve.
+fn pulse_alpha(t: f32, cycles: f32, base: f32, amplitude: f32) -> f32 {
+    base + amplitude * (t * std::f32::consts::TAU * cycles).sin().abs()
+}
+
+/// Brightness (`0.0..=1.0`) of progress-bar segment `i` of `segments`, at
+/// animation phase `t` (`progress_offset`, `0.0..=1.0`) — a single bright
+/// band that sweeps left to right and wraps, rather than the whole bar
+/// pulsing in lockstep, which is what makes this read as an actual
+/// "in-progress" indicator instead of a flat glow. Replaces the pre-C3c
+/// top-of-window progress bar (a single `Length::Fill` strip whose alpha
+/// pulsed uniformly via `0.55 + 0.45 * (progress_offset * TAU *
+/// 1.5).sin().abs()`) with `view()`'s new `PROGRESS_SEGMENTS`-wide row of
+/// individually-lit segments driven by this function.
+fn progress_segment_brightness(i: usize, segments: usize, t: f32) -> f32 {
+    let n = segments as f32;
+    let peak = t.clamp(0.0, 1.0) * n;
+    let raw = (i as f32 - peak).abs();
+    let wrapped = raw.min(n - raw);
+    // How many neighboring segments share the light, in segment widths —
+    // a fixed shape constant, not exposed as a parameter: nothing in this
+    // crate needs a different sweep width today, and this function's own
+    // tests below pin the resulting curve rather than treating it as a free
+    // knob.
+    const SPREAD: f32 = 1.6;
+    (1.0 - wrapped / SPREAD).clamp(0.0, 1.0)
+}
+
+// ---------------------------------------------------------------------------
 // Styling helpers
 // ---------------------------------------------------------------------------
 
-fn separator_style(_theme: &Theme) -> container::Style {
+// Every function below is passed to `.style(...)` as a bare `fn` pointer
+// (see the "Colour palette" section header above), so `theme` here is the
+// real `iced::Theme` the app is currently rendering with, supplied by iced
+// itself — not ignored the way the pre-C3c `_theme` parameter name implied.
+
+fn separator_style(theme: &Theme) -> container::Style {
+    let palette = palette_for_theme(theme);
     container::Style {
-        background: Some(Background::Color(C_DIVIDER)),
+        background: Some(Background::Color(palette.divider)),
         ..container::Style::default()
     }
 }
 
-fn tab_bar_style(_theme: &Theme) -> container::Style {
+fn tab_bar_style(theme: &Theme) -> container::Style {
+    let palette = palette_for_theme(theme);
     container::Style {
-        background: Some(Background::Color(C_SURFACE)),
+        background: Some(Background::Color(palette.surface)),
         ..container::Style::default()
     }
 }
 
-fn close_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
+fn close_btn_style(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = palette_for_theme(theme);
     button::Style {
         background: Some(Background::Color(match status {
             button::Status::Hovered | button::Status::Pressed => Color {
@@ -1822,8 +2129,8 @@ fn close_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
             _ => Color::TRANSPARENT,
         })),
         text_color: match status {
-            button::Status::Hovered | button::Status::Pressed => C_DANGER,
-            _ => C_TEXT_DIM,
+            button::Status::Hovered | button::Status::Pressed => palette.danger,
+            _ => palette.text_dim,
         },
         border: Border {
             radius: iced::border::Radius::new(4.0),
@@ -1833,14 +2140,15 @@ fn close_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-fn nav_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
+fn nav_btn_style(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = palette_for_theme(theme);
     button::Style {
         background: Some(Background::Color(match status {
-            button::Status::Hovered => C_RAISED,
+            button::Status::Hovered => palette.raised,
             button::Status::Pressed => Color {
-                r: C_RAISED.r * 0.80,
-                g: C_RAISED.g * 0.80,
-                b: C_RAISED.b * 0.80,
+                r: palette.raised.r * 0.80,
+                g: palette.raised.g * 0.80,
+                b: palette.raised.b * 0.80,
                 a: 1.0,
             },
             _ => Color::TRANSPARENT,
@@ -1848,9 +2156,9 @@ fn nav_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
         text_color: match status {
             button::Status::Disabled => Color {
                 a: 0.20,
-                ..C_TEXT_DIM
+                ..palette.text_dim
             },
-            _ => C_TEXT,
+            _ => palette.text,
         },
         border: Border {
             radius: iced::border::Radius::new(BORDER_RADIUS),
@@ -1860,16 +2168,18 @@ fn nav_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-fn toolbar_style(_theme: &Theme) -> container::Style {
+fn toolbar_style(theme: &Theme) -> container::Style {
+    let palette = palette_for_theme(theme);
     container::Style {
-        background: Some(Background::Color(C_BASE)),
+        background: Some(Background::Color(palette.base)),
         ..container::Style::default()
     }
 }
 
-fn panel_btn_active(_theme: &Theme, _status: button::Status) -> button::Style {
+fn panel_btn_active(theme: &Theme, _status: button::Status) -> button::Style {
+    let palette = palette_for_theme(theme);
     button::Style {
-        background: Some(Background::Color(C_ACCENT)),
+        background: Some(Background::Color(palette.accent)),
         text_color: Color::WHITE,
         border: Border {
             radius: iced::border::Radius::new(BORDER_RADIUS),
@@ -1879,30 +2189,32 @@ fn panel_btn_active(_theme: &Theme, _status: button::Status) -> button::Style {
     }
 }
 
-fn panel_btn_inactive(_theme: &Theme, status: button::Status) -> button::Style {
+fn panel_btn_inactive(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = palette_for_theme(theme);
     button::Style {
         background: Some(Background::Color(match status {
-            button::Status::Hovered | button::Status::Pressed => C_RAISED,
-            _ => C_SURFACE,
+            button::Status::Hovered | button::Status::Pressed => palette.raised,
+            _ => palette.surface,
         })),
         text_color: match status {
-            button::Status::Hovered => C_TEXT,
-            _ => C_TEXT_DIM,
+            button::Status::Hovered => palette.text,
+            _ => palette.text_dim,
         },
         border: Border {
             radius: iced::border::Radius::new(BORDER_RADIUS),
             width: 1.0,
-            color: C_DIVIDER,
+            color: palette.divider,
         },
         ..button::Style::default()
     }
 }
 
-fn accent_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
+fn accent_btn_style(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = palette_for_theme(theme);
     button::Style {
         background: Some(Background::Color(match status {
-            button::Status::Hovered | button::Status::Pressed => C_ACCENT_BRIGHT,
-            _ => C_ACCENT,
+            button::Status::Hovered | button::Status::Pressed => palette.accent_bright,
+            _ => palette.accent,
         })),
         text_color: Color::WHITE,
         border: Border {
@@ -1913,11 +2225,12 @@ fn accent_btn_style(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-fn bottom_panel_style(_theme: &Theme) -> container::Style {
+fn bottom_panel_style(theme: &Theme) -> container::Style {
+    let palette = palette_for_theme(theme);
     container::Style {
-        background: Some(Background::Color(C_SURFACE)),
+        background: Some(Background::Color(palette.surface)),
         border: Border {
-            color: C_DIVIDER,
+            color: palette.divider,
             width: 1.0,
             radius: iced::border::Radius {
                 top_left: BORDER_RADIUS,
@@ -1944,13 +2257,38 @@ fn bottom_panel_style(_theme: &Theme) -> container::Style {
 // Audit helpers
 // ---------------------------------------------------------------------------
 
-fn kind_label(kind: &AuditEventKind) -> (&'static str, Color) {
+/// `palette` supplies three of the five colours directly (`safe`/`warn`/
+/// `danger`); "USED"/"EVAL" have no dedicated palette role (an informational
+/// blue and a neutral gray, not one of the twelve semantic colours), so they
+/// stay literal here — but still theme-aware via the separate `is_light`
+/// flag (rather than inferring it by comparing `palette`'s address against
+/// `&LIGHT_PALETTE`: both are `const`, not `static`, so the language gives
+/// no guarantee two references to the same `const` item share an address —
+/// an explicit `bool` the caller already has on hand is the safe way to ask
+/// this), since the dark palette's light, saturated versions would fail the
+/// light theme's contrast target the same way the pre-theme `C_SAFE`/
+/// `C_WARN`/`C_DANGER` values did (see `LIGHT_PALETTE`'s doc comment).
+fn kind_label(kind: &AuditEventKind, palette: &Palette, is_light: bool) -> (&'static str, Color) {
     match kind {
-        AuditEventKind::CapabilityGranted => ("GRANTED", C_SAFE),
-        AuditEventKind::CapabilityDenied => ("DENIED", C_DANGER),
-        AuditEventKind::CapabilityExercised => ("USED", Color::from_rgb(0.4, 0.7, 1.0)),
-        AuditEventKind::ContentBlocked => ("BLOCKED", C_WARN),
-        AuditEventKind::EvalExecutionRecorded => ("EVAL", Color::from_rgb(0.6, 0.6, 0.6)),
+        AuditEventKind::CapabilityGranted => ("GRANTED", palette.safe),
+        AuditEventKind::CapabilityDenied => ("DENIED", palette.danger),
+        AuditEventKind::CapabilityExercised => (
+            "USED",
+            if is_light {
+                Color::from_rgb(0.10, 0.40, 0.75)
+            } else {
+                Color::from_rgb(0.4, 0.7, 1.0)
+            },
+        ),
+        AuditEventKind::ContentBlocked => ("BLOCKED", palette.warn),
+        AuditEventKind::EvalExecutionRecorded => (
+            "EVAL",
+            if is_light {
+                Color::from_rgb(0.42, 0.42, 0.46)
+            } else {
+                Color::from_rgb(0.6, 0.6, 0.6)
+            },
+        ),
     }
 }
 
@@ -2088,6 +2426,8 @@ fn spawn_next_step(state: &mut FerriteBrowser, run_id: u64, live: LiveAgentLoop)
 // ---------------------------------------------------------------------------
 
 pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
+    let palette = state.palette();
+    let is_light_theme = state.theme_mode == AppTheme::Light;
     let active_tab_idx = state.active_tab;
     let is_loading_active = state.is_loading;
 
@@ -2105,21 +2445,53 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             let is_hovered = state.hovered_tab == Some(i);
             let spinning = is_loading_active && i == active_tab_idx;
 
-            // Loading state keeps the "..." text pulse (a pure, cheap
-            // animation via the same `progress_offset`-driven dots pattern
-            // the agent sidebar's "Working..." indicator already uses); an
-            // idle tab gets a small dot instead of the old ">"/"-" ASCII
-            // markers — the accent underline below already carries most of
-            // the active/inactive signal, so this is a quiet accent, not a
-            // second competing indicator.
-            let favicon = text(if spinning { "..." } else { "•" })
-                .size(11)
-                .color(if is_active { C_ACCENT } else { C_TEXT_DIM });
+            // Loading state shows a smoothly breathing dot (`pulse_alpha`,
+            // C3c) rather than a static "..." string — the pre-C3c version
+            // of this comment claimed it already reused the
+            // `progress_offset`-driven pattern the agent sidebar's
+            // "Working..." indicator uses, but the code above it never
+            // actually did (`text(if spinning {"..."} else {"•"})` is a
+            // fixed string, not animated at all); fixed here rather than
+            // left standing, per this project's own R2 discipline against
+            // an inaccurate comment. Once loaded, a real favicon (C3b —
+            // `HeadlessServoSession::get_favicon()`) replaces the
+            // placeholder dot for any tab that has one; a page that never
+            // sets one (about:blank, some errors) keeps the dot, same as
+            // before this existed — the accent underline below already
+            // carries most of the active/inactive signal, so the dot stays
+            // a quiet fallback, not a second competing indicator.
+            let favicon_dot = |pulsing: bool| {
+                let base_color = if is_active {
+                    palette.accent
+                } else {
+                    palette.text_dim
+                };
+                let color = if pulsing {
+                    Color {
+                        a: pulse_alpha(state.progress_offset, 1.2, 0.35, 0.65),
+                        ..base_color
+                    }
+                } else {
+                    base_color
+                };
+                text("•").size(11).color(color).into()
+            };
+            let favicon: Element<FerriteBrowserMessage> = if spinning {
+                favicon_dot(true)
+            } else {
+                match state.tab_favicons.get(i).and_then(|f| f.as_ref()) {
+                    Some(handle) => ServoImage::new(handle.clone())
+                        .width(Length::Fixed(14.0))
+                        .height(Length::Fixed(14.0))
+                        .into(),
+                    None => favicon_dot(false),
+                }
+            };
 
             let label_elem = text(truncate(label, 22)).size(13).color(if is_active {
-                C_TEXT
+                palette.text
             } else {
-                C_TEXT_DIM
+                palette.text_dim
             });
 
             // Close-button-on-hover: visible for the active tab (always
@@ -2128,7 +2500,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             // so the row's width never jumps when the button appears.
             let show_close = can_close && (is_active || is_hovered);
             let close_btn: Element<FerriteBrowserMessage> = if show_close {
-                button(icon(Icon::Close, 10.0, C_TEXT_DIM))
+                button(icon(Icon::Close, 10.0, palette.text_dim))
                     .padding(4)
                     .width(Length::Fixed(18.0))
                     .height(Length::Fixed(18.0))
@@ -2153,9 +2525,12 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             .align_y(iced::Alignment::Center)
             .style(move |_: &Theme| container::Style {
                 background: Some(Background::Color(if is_active {
-                    C_BASE
+                    palette.base
                 } else if is_hovered {
-                    Color { a: 0.5, ..C_RAISED }
+                    Color {
+                        a: 0.5,
+                        ..palette.raised
+                    }
                 } else {
                     Color::TRANSPARENT
                 })),
@@ -2176,7 +2551,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 .height(Length::Fixed(UNDERLINE_H))
                 .style(move |_: &Theme| container::Style {
                     background: Some(Background::Color(if is_active {
-                        C_ACCENT
+                        palette.accent
                     } else {
                         Color::TRANSPARENT
                     })),
@@ -2200,7 +2575,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // gets the same hover/press feedback every other toolbar control has,
     // via the same `nav_btn_style` used by Back/Forward/Reload.
     tab_elements.push(
-        button(icon(Icon::Add, ICON_SIZE_SM, C_TEXT_DIM))
+        button(icon(Icon::Add, ICON_SIZE_SM, palette.text_dim))
             .width(Length::Fixed(TAB_BAR_HEIGHT))
             .height(Length::Fixed(TAB_BAR_HEIGHT))
             .padding(0)
@@ -2240,11 +2615,11 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // survives the switch from text to a tinted glyph.
     let nav_icon_color = |enabled: bool| {
         if enabled {
-            C_TEXT
+            palette.text
         } else {
             Color {
                 a: 0.25,
-                ..C_TEXT_DIM
+                ..palette.text_dim
             }
         }
     };
@@ -2272,13 +2647,13 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     );
 
     let reload_btn: Element<FerriteBrowserMessage> = if state.is_loading {
-        button(icon(Icon::Close, ICON_SIZE, C_TEXT))
+        button(icon(Icon::Close, ICON_SIZE, palette.text))
             .padding([6, 11])
             .style(nav_btn_style)
             .on_press(FerriteBrowserMessage::StopLoading)
             .into()
     } else {
-        button(icon(Icon::Reload, ICON_SIZE, C_TEXT))
+        button(icon(Icon::Reload, ICON_SIZE, palette.text))
             .padding([6, 11])
             .style(nav_btn_style)
             .on_press(FerriteBrowserMessage::Reload)
@@ -2298,9 +2673,9 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let security_icon: Element<FerriteBrowserMessage> = if is_about {
         text("").size(13).into()
     } else if is_https {
-        text("HTTPS").size(10).color(C_SAFE).into()
+        text("HTTPS").size(10).color(palette.safe).into()
     } else if is_http_insecure {
-        text("HTTP").size(10).color(C_WARN).into()
+        text("HTTP").size(10).color(palette.warn).into()
     } else {
         text("").size(13).into()
     };
@@ -2320,18 +2695,22 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     .style(|_: &Theme, status| {
         let focused = matches!(status, text_input::Status::Focused);
         text_input::Style {
-            background: Background::Color(C_INPUT),
+            background: Background::Color(palette.input),
             border: Border {
                 radius: iced::border::Radius::new(20.0),
                 width: if focused { 1.5 } else { 1.0 },
-                color: if focused { C_ACCENT } else { C_DIVIDER },
+                color: if focused {
+                    palette.accent
+                } else {
+                    palette.divider
+                },
             },
-            icon: C_TEXT_DIM,
-            placeholder: C_TEXT_DIM,
-            value: C_TEXT,
+            icon: palette.text_dim,
+            placeholder: palette.text_dim,
+            value: palette.text,
             selection: Color {
                 a: 0.30,
-                ..C_ACCENT
+                ..palette.accent
             },
         }
     })
@@ -2354,7 +2733,13 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // active/inactive background (`panel_btn_active`/`panel_btn_inactive`,
     // unchanged) already carries that state, and duplicating it as a second
     // text glyph in front of the icon read as dev-tool clutter.
-    let toggle_icon_color = |active: bool| if active { Color::WHITE } else { C_TEXT_DIM };
+    let toggle_icon_color = |active: bool| {
+        if active {
+            Color::WHITE
+        } else {
+            palette.text_dim
+        }
+    };
 
     let audit_btn = button(
         row![
@@ -2416,8 +2801,25 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     })
     .on_press(FerriteBrowserMessage::ToggleAgentSidebar);
 
+    // C3c: theme toggle — shows the icon of the mode a click switches *to*
+    // (sun while dark is active, moon while light is active), the same
+    // convention most browser/OS theme switchers use, rather than an icon
+    // for the mode currently on screen.
+    let theme_btn = button(icon(
+        if is_light_theme {
+            Icon::Moon
+        } else {
+            Icon::Sun
+        },
+        ICON_SIZE,
+        palette.text_dim,
+    ))
+    .padding([6, 11])
+    .style(nav_btn_style)
+    .on_press(FerriteBrowserMessage::ToggleTheme);
+
     let toolbar = container(
-        row![back_btn, fwd_btn, reload_btn, addr_row, audit_btn, js_btn, agent_btn]
+        row![back_btn, fwd_btn, reload_btn, addr_row, audit_btn, js_btn, agent_btn, theme_btn]
             .spacing(4)
             .align_y(iced::Alignment::Center)
             .padding([0, PANEL_PADDING]),
@@ -2427,20 +2829,33 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     .style(toolbar_style);
 
     // ── Progress bar ───────────────────────────────────────────────────────
-    let progress_offset = state.progress_offset;
+    // C3c: a single bright band sweeps left-to-right across
+    // `PROGRESS_SEGMENTS` segments (`progress_segment_brightness`) rather
+    // than the whole bar pulsing in lockstep — a real animated "in
+    // progress" indicator, not a flat breathing strip.
     let maybe_progress: Option<Element<FerriteBrowserMessage>> = if state.is_loading {
-        let pulse = 0.55 + 0.45 * (progress_offset * std::f32::consts::TAU * 1.5).sin().abs();
+        let t = state.progress_offset;
+        let segments: Vec<Element<FerriteBrowserMessage>> = (0..PROGRESS_SEGMENTS)
+            .map(|i| {
+                let brightness = progress_segment_brightness(i, PROGRESS_SEGMENTS, t);
+                container(text(""))
+                    .width(Length::FillPortion(1))
+                    .height(Length::Fixed(2.0))
+                    .style(move |_: &Theme| container::Style {
+                        background: Some(Background::Color(Color {
+                            a: 0.12 + 0.88 * brightness,
+                            ..palette.accent_bright
+                        })),
+                        ..container::Style::default()
+                    })
+                    .into()
+            })
+            .collect();
         Some(
-            container(text(""))
+            row(segments)
+                .spacing(1)
                 .width(Length::Fill)
                 .height(Length::Fixed(2.0))
-                .style(move |_: &Theme| container::Style {
-                    background: Some(Background::Color(Color {
-                        a: pulse,
-                        ..C_ACCENT
-                    })),
-                    ..container::Style::default()
-                })
                 .into(),
         )
     } else {
@@ -2458,7 +2873,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             row![
                 text("  Audit Log")
                     .size(12)
-                    .color(C_TEXT)
+                    .color(palette.text)
                     .width(Length::Fill),
                 button(text("Refresh").size(11))
                     .padding([2, 8])
@@ -2471,25 +2886,34 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         )
         .width(Length::Fill)
         .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(C_RAISED)),
+            background: Some(Background::Color(palette.raised)),
             ..container::Style::default()
         });
 
         let col_hdr = container(
             row![
-                text("SEQ").size(11).color(C_TEXT_DIM).width(36),
-                text("TIME").size(11).color(C_TEXT_DIM).width(76),
-                text("KIND").size(11).color(C_TEXT_DIM).width(72),
-                text("PRINCIPAL").size(11).color(C_TEXT_DIM).width(95),
-                text("CAPABILITY").size(11).color(C_TEXT_DIM).width(95),
-                text("URL").size(11).color(C_TEXT_DIM).width(Length::Fill),
+                text("SEQ").size(11).color(palette.text_dim).width(36),
+                text("TIME").size(11).color(palette.text_dim).width(76),
+                text("KIND").size(11).color(palette.text_dim).width(72),
+                text("PRINCIPAL").size(11).color(palette.text_dim).width(95),
+                text("CAPABILITY")
+                    .size(11)
+                    .color(palette.text_dim)
+                    .width(95),
+                text("URL")
+                    .size(11)
+                    .color(palette.text_dim)
+                    .width(Length::Fill),
             ]
             .spacing(8)
             .padding([3, PANEL_PADDING]),
         )
         .width(Length::Fill)
         .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(Color { a: 0.5, ..C_RAISED })),
+            background: Some(Background::Color(Color {
+                a: 0.5,
+                ..palette.raised
+            })),
             ..container::Style::default()
         });
 
@@ -2497,7 +2921,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             vec![container(
                 text("No audit entries yet - run the sandbox demo and click Refresh")
                     .size(12)
-                    .color(C_TEXT_DIM),
+                    .color(palette.text_dim),
             )
             .width(Length::Fill)
             .padding([12, PANEL_PADDING])
@@ -2507,27 +2931,27 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 .audit_entries
                 .iter()
                 .map(|e| {
-                    let (ks, kc) = kind_label(&e.kind);
+                    let (ks, kc) = kind_label(&e.kind, palette, is_light_theme);
                     let ts = e.timestamp.format("%H:%M:%S%.3f").to_string();
                     container(
                         row![
                             text(e.sequence.to_string())
                                 .size(12)
-                                .color(C_TEXT_DIM)
+                                .color(palette.text_dim)
                                 .width(36),
-                            text(ts).size(12).color(C_TEXT_DIM).width(76),
+                            text(ts).size(12).color(palette.text_dim).width(76),
                             text(ks).size(12).color(kc).width(72),
                             text(truncate(&e.principal_id.to_string(), 8))
                                 .size(12)
-                                .color(C_TEXT)
+                                .color(palette.text)
                                 .width(95),
                             text(e.capability.as_deref().unwrap_or("-"))
                                 .size(12)
-                                .color(C_TEXT)
+                                .color(palette.text)
                                 .width(95),
                             text(truncate(e.url.as_deref().unwrap_or("-"), 60))
                                 .size(12)
-                                .color(C_TEXT_DIM)
+                                .color(palette.text_dim)
                                 .width(Length::Fill),
                         ]
                         .spacing(8)
@@ -2560,11 +2984,11 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             row![
                 text("  JS Console")
                     .size(12)
-                    .color(C_TEXT)
+                    .color(palette.text)
                     .width(Length::Fill),
                 text(format!("({} shortcut)", MOD_LABEL))
                     .size(11)
-                    .color(C_TEXT_DIM),
+                    .color(palette.text_dim),
                 button(text("Clear").size(11))
                     .padding([2, 8])
                     .style(panel_btn_inactive)
@@ -2576,7 +3000,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         )
         .width(Length::Fill)
         .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(C_RAISED)),
+            background: Some(Background::Color(palette.raised)),
             ..container::Style::default()
         });
 
@@ -2584,7 +3008,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             vec![container(
                 text("Type an expression and press Enter")
                     .size(12)
-                    .color(C_TEXT_DIM),
+                    .color(palette.text_dim),
             )
             .padding([10, PANEL_PADDING])
             .into()]
@@ -2597,14 +3021,14 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                         || res.starts_with("BLOCKED")
                         || res.starts_with("ERROR");
                     [
-                        container(text(format!("> {}", snip)).size(12).color(C_ACCENT))
+                        container(text(format!("> {}", snip)).size(12).color(palette.accent))
                             .padding([2, PANEL_PADDING])
                             .width(Length::Fill)
                             .into(),
                         container(text(format!("  {}", res)).size(12).color(if err {
-                            C_DANGER
+                            palette.danger
                         } else {
-                            C_SAFE
+                            palette.safe
                         }))
                         .padding([1, PANEL_PADDING])
                         .width(Length::Fill)
@@ -2627,18 +3051,22 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             .style(|_: &Theme, status| {
                 let focused = matches!(status, text_input::Status::Focused);
                 text_input::Style {
-                    background: Background::Color(C_INPUT),
+                    background: Background::Color(palette.input),
                     border: Border {
                         radius: iced::border::Radius::new(6.0),
                         width: if focused { 1.5 } else { 1.0 },
-                        color: if focused { C_ACCENT } else { C_DIVIDER },
+                        color: if focused {
+                            palette.accent
+                        } else {
+                            palette.divider
+                        },
                     },
-                    icon: C_TEXT_DIM,
-                    placeholder: C_TEXT_DIM,
-                    value: C_TEXT,
+                    icon: palette.text_dim,
+                    placeholder: palette.text_dim,
+                    value: palette.text,
                     selection: Color {
                         a: 0.30,
-                        ..C_ACCENT
+                        ..palette.accent
                     },
                 }
             })
@@ -2646,14 +3074,14 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             .on_submit(FerriteBrowserMessage::JsExecuteRequested);
 
         let input_row = container(
-            row![text(">").size(13).color(C_ACCENT), js_field, run_btn]
+            row![text(">").size(13).color(palette.accent), js_field, run_btn]
                 .spacing(6)
                 .align_y(iced::Alignment::Center)
                 .padding([5, PANEL_PADDING]),
         )
         .width(Length::Fill)
         .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(C_BASE)),
+            background: Some(Background::Color(palette.base)),
             ..container::Style::default()
         });
 
@@ -2690,13 +3118,15 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             let failed_url = state.tab_urls.get(active).map(String::as_str).unwrap_or("");
             container(
                 column![
-                    text("ERR").size(42).color(C_DANGER),
+                    text("ERR").size(42).color(palette.danger),
                     container(text("")).height(10),
-                    text("Page could not be loaded").size(22).color(C_TEXT),
+                    text("Page could not be loaded")
+                        .size(22)
+                        .color(palette.text),
                     container(text("")).height(6),
-                    text(failed_url).size(13).color(C_TEXT_DIM),
+                    text(failed_url).size(13).color(palette.text_dim),
                     container(text("")).height(4),
-                    text(err_msg.as_str()).size(12).color(C_TEXT_DIM),
+                    text(err_msg.as_str()).size(12).color(palette.text_dim),
                     container(text("")).height(28),
                     row![
                         button(text("Try Again").size(13))
@@ -2719,7 +3149,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             .height(Length::Fill)
             .center(Length::Fill)
             .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(C_BASE)),
+                background: Some(Background::Color(palette.base)),
                 ..container::Style::default()
             })
             .into()
@@ -2761,15 +3191,15 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 .into()
         } else {
             // Loading placeholder (no frame yet for a non-blank URL)
-            let pulse = 0.25 + 0.20 * (state.progress_offset * std::f32::consts::TAU).sin().abs();
+            let pulse = pulse_alpha(state.progress_offset, 1.0, 0.25, 0.20);
             container(
                 column![
                     text("Fe").size(40).color(Color {
                         a: pulse,
-                        ..C_ACCENT
+                        ..palette.accent
                     }),
                     container(text("")).height(10),
-                    text("Loading...").size(14).color(C_TEXT_DIM),
+                    text("Loading...").size(14).color(palette.text_dim),
                 ]
                 .spacing(4)
                 .align_x(iced::Alignment::Center),
@@ -2778,7 +3208,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             .height(Length::Fill)
             .center(Length::Fill)
             .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(C_BASE)),
+                background: Some(Background::Color(palette.base)),
                 ..container::Style::default()
             })
             .into()
@@ -2823,7 +3253,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(C_BASE)),
+            background: Some(Background::Color(palette.base)),
             ..container::Style::default()
         })
         .into()
@@ -2834,6 +3264,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 // ---------------------------------------------------------------------------
 
 fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
+    let palette = state.palette();
     let search_bar = text_input("Search or type an address", &state.new_tab_search_input)
         .width(560)
         .padding([14, 22])
@@ -2841,18 +3272,22 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         .style(|_: &Theme, status| {
             let focused = matches!(status, text_input::Status::Focused);
             text_input::Style {
-                background: Background::Color(C_INPUT),
+                background: Background::Color(palette.input),
                 border: Border {
                     radius: iced::border::Radius::new(30.0),
                     width: if focused { 1.5 } else { 1.0 },
-                    color: if focused { C_ACCENT } else { C_DIVIDER },
+                    color: if focused {
+                        palette.accent
+                    } else {
+                        palette.divider
+                    },
                 },
-                icon: C_TEXT_DIM,
-                placeholder: C_TEXT_DIM,
-                value: C_TEXT,
+                icon: palette.text_dim,
+                placeholder: palette.text_dim,
+                value: palette.text,
                 selection: Color {
                     a: 0.30,
-                    ..C_ACCENT
+                    ..palette.accent
                 },
             }
         })
@@ -2877,8 +3312,8 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             let url = url.to_string();
             button(
                 column![
-                    text(*icon).size(26).color(C_ACCENT),
-                    text(*label).size(12).color(C_TEXT_DIM),
+                    text(*icon).size(26).color(palette.accent),
+                    text(*label).size(12).color(palette.text_dim),
                 ]
                 .spacing(8)
                 .align_x(iced::Alignment::Center),
@@ -2887,17 +3322,21 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             .style(|_: &Theme, s| {
                 let hov = matches!(s, button::Status::Hovered | button::Status::Pressed);
                 button::Style {
-                    background: Some(Background::Color(if hov { C_RAISED } else { C_SURFACE })),
-                    text_color: C_TEXT,
+                    background: Some(Background::Color(if hov {
+                        palette.raised
+                    } else {
+                        palette.surface
+                    })),
+                    text_color: palette.text,
                     border: Border {
                         radius: iced::border::Radius::new(12.0),
                         width: 1.0,
                         color: if hov {
-                            C_DIVIDER
+                            palette.divider
                         } else {
                             Color {
                                 a: 0.35,
-                                ..C_DIVIDER
+                                ..palette.divider
                             }
                         },
                     },
@@ -2932,11 +3371,11 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         column![
             // Logo
             column![
-                text("Fe").size(64).color(C_ACCENT),
-                text("ferrite").size(40).color(C_TEXT),
+                text("Fe").size(64).color(palette.accent),
+                text("ferrite").size(40).color(palette.text),
                 text("capability-governed browser")
                     .size(13)
-                    .color(C_TEXT_DIM),
+                    .color(palette.text_dim),
             ]
             .spacing(6)
             .align_x(iced::Alignment::Center),
@@ -2948,14 +3387,14 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             row(tile_row).spacing(12).wrap(),
             container(text("")).height(40),
             // Keyboard shortcut hints
-            container(text(shortcuts_text).size(11).color(C_TEXT_DIM),)
+            container(text(shortcuts_text).size(11).color(palette.text_dim),)
                 .padding([8, 16])
                 .style(|_: &Theme| container::Style {
-                    background: Some(Background::Color(C_SURFACE)),
+                    background: Some(Background::Color(palette.surface)),
                     border: Border {
                         radius: iced::border::Radius::new(8.0),
                         width: 1.0,
-                        color: C_DIVIDER,
+                        color: palette.divider,
                     },
                     ..container::Style::default()
                 }),
@@ -2967,7 +3406,7 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     .height(Length::Fill)
     .center(Length::Fill)
     .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(C_BASE)),
+        background: Some(Background::Color(palette.base)),
         ..container::Style::default()
     })
     .into()
@@ -3064,12 +3503,13 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
 // ---------------------------------------------------------------------------
 
 fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
+    let palette = state.palette();
     // Header: "Agent" label + optional step-progress indicator + Stop
     // button. `live_loop` is only `Some` for the message-driven live run
     // (not the dry-run phase, which has no per-step budget to show yet).
     let mut header_items: Vec<Element<FerriteBrowserMessage>> = vec![text("Agent")
         .size(16)
-        .color(C_TEXT)
+        .color(palette.text)
         .width(Length::Fill)
         .into()];
     if let Some(live) = &state.live_loop {
@@ -3080,7 +3520,7 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
                 live.budget.max_steps
             ))
             .size(11)
-            .color(C_TEXT_DIM)
+            .color(palette.text_dim)
             .into(),
         );
     }
@@ -3096,7 +3536,7 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             )
             .padding([3, 8])
             .style(|_: &Theme, _| button::Style {
-                background: Some(Background::Color(C_DANGER)),
+                background: Some(Background::Color(palette.danger)),
                 text_color: Color::WHITE,
                 border: Border {
                     radius: iced::border::Radius::new(BORDER_RADIUS),
@@ -3116,7 +3556,7 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
     )
     .width(Length::Fill)
     .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(C_RAISED)),
+        background: Some(Background::Color(palette.raised)),
         ..container::Style::default()
     });
 
@@ -3132,16 +3572,19 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
         container(
             text(state.agent_task_input.as_str())
                 .size(13)
-                .color(C_TEXT_DIM),
+                .color(palette.text_dim),
         )
         .width(Length::Fill)
         .padding([7, 10])
         .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(Color { a: 0.6, ..C_INPUT })),
+            background: Some(Background::Color(Color {
+                a: 0.6,
+                ..palette.input
+            })),
             border: Border {
                 radius: iced::border::Radius::new(6.0),
                 width: 1.0,
-                color: C_DIVIDER,
+                color: palette.divider,
             },
             ..container::Style::default()
         })
@@ -3154,18 +3597,22 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             .style(|_: &Theme, status| {
                 let focused = matches!(status, text_input::Status::Focused);
                 text_input::Style {
-                    background: Background::Color(C_INPUT),
+                    background: Background::Color(palette.input),
                     border: Border {
                         radius: iced::border::Radius::new(6.0),
                         width: if focused { 1.5 } else { 1.0 },
-                        color: if focused { C_ACCENT } else { C_DIVIDER },
+                        color: if focused {
+                            palette.accent
+                        } else {
+                            palette.divider
+                        },
                     },
-                    icon: C_TEXT_DIM,
-                    placeholder: C_TEXT_DIM,
-                    value: C_TEXT,
+                    icon: palette.text_dim,
+                    placeholder: palette.text_dim,
+                    value: palette.text,
                     selection: Color {
                         a: 0.30,
-                        ..C_ACCENT
+                        ..palette.accent
                     },
                 }
             })
@@ -3181,7 +3628,7 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
                 Icon::Play,
                 ICON_SIZE_SM,
                 if run_disabled {
-                    C_TEXT_DIM
+                    palette.text_dim
                 } else {
                     Color::WHITE
                 }
@@ -3222,9 +3669,12 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
 
                 let approve_style = move |_: &Theme, _| button::Style {
                     background: Some(Background::Color(if approved {
-                        C_SAFE
+                        palette.safe
                     } else {
-                        Color { a: 0.25, ..C_SAFE }
+                        Color {
+                            a: 0.25,
+                            ..palette.safe
+                        }
                     })),
                     text_color: Color::WHITE,
                     border: Border {
@@ -3235,11 +3685,11 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
                 };
                 let reject_style = move |_: &Theme, _| button::Style {
                     background: Some(Background::Color(if rejected {
-                        C_DANGER
+                        palette.danger
                     } else {
                         Color {
                             a: 0.25,
-                            ..C_DANGER
+                            ..palette.danger
                         }
                     })),
                     text_color: Color::WHITE,
@@ -3272,10 +3722,10 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
                 let summary_row: Element<FerriteBrowserMessage> =
                     if origin_item_origin(&item.id).is_some() {
                         row![
-                            icon(Icon::Origin, ICON_SIZE_SM, C_TEXT_DIM),
+                            icon(Icon::Origin, ICON_SIZE_SM, palette.text_dim),
                             text(item.summary.clone())
                                 .size(12)
-                                .color(C_TEXT)
+                                .color(palette.text)
                                 .width(Length::Fill),
                         ]
                         .spacing(6)
@@ -3284,7 +3734,7 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
                     } else {
                         text(item.summary.clone())
                             .size(12)
-                            .color(C_TEXT)
+                            .color(palette.text)
                             .width(Length::Fill)
                             .into()
                     };
@@ -3339,12 +3789,12 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             .padding([7, 10])
             .width(Length::Fill)
             .style(|_: &Theme, _| button::Style {
-                background: Some(Background::Color(C_RAISED)),
-                text_color: C_TEXT_DIM,
+                background: Some(Background::Color(palette.raised)),
+                text_color: palette.text_dim,
                 border: Border {
                     radius: iced::border::Radius::new(BORDER_RADIUS),
                     width: 1.0,
-                    color: C_DIVIDER,
+                    color: palette.divider,
                 },
                 ..button::Style::default()
             })
@@ -3352,18 +3802,21 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
 
         let mut panel_items: Vec<Element<FerriteBrowserMessage>> = vec![
             row![
-                icon(Icon::Warning, ICON_SIZE, C_DANGER),
+                icon(Icon::Warning, ICON_SIZE, palette.danger),
                 text("Unexpected Activity Detected")
                     .size(14)
-                    .color(C_DANGER)
+                    .color(palette.danger)
                     .width(Length::Fill),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center)
             .into(),
-            text(diff.summary()).size(12).color(C_TEXT_DIM).into(),
+            text(diff.summary()).size(12).color(palette.text_dim).into(),
             sep().into(),
-            text("Review each item:").size(12).color(C_TEXT).into(),
+            text("Review each item:")
+                .size(12)
+                .color(palette.text)
+                .into(),
         ];
         panel_items.append(&mut item_rows);
         panel_items.push(sep().into());
@@ -3385,18 +3838,18 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             if let Some(evidence) = &state.pending_evidence {
                 let lines: Vec<Element<FerriteBrowserMessage>> = dry_run_evidence_lines(evidence)
                     .into_iter()
-                    .map(|line| text(line).size(11).color(C_TEXT_DIM).into())
+                    .map(|line| text(line).size(11).color(palette.text_dim).into())
                     .collect();
                 panel_items.push(
                     container(column(lines).spacing(2))
                         .padding([6, 8])
                         .width(Length::Fill)
                         .style(|_: &Theme| container::Style {
-                            background: Some(Background::Color(C_INPUT)),
+                            background: Some(Background::Color(palette.input)),
                             border: Border {
                                 radius: iced::border::Radius::new(6.0),
                                 width: 1.0,
-                                color: C_DIVIDER,
+                                color: palette.divider,
                             },
                             ..container::Style::default()
                         })
@@ -3431,9 +3884,9 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             .width(Length::Fill)
             .style(move |_: &Theme| container::Style {
                 background: Some(Background::Color(Color {
-                    r: C_WARN.r,
-                    g: C_WARN.g,
-                    b: C_WARN.b,
+                    r: palette.warn.r,
+                    g: palette.warn.g,
+                    b: palette.warn.b,
                     a: 0.08 * anim_t,
                 })),
                 ..container::Style::default()
@@ -3456,67 +3909,81 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             2 => "..",
             _ => "...",
         };
-        let log_items: Vec<Element<FerriteBrowserMessage>> = if state.agent_log.is_empty()
-            && !state.agent_is_running
-        {
-            vec![text("No active session.").size(12).color(C_TEXT_DIM).into()]
-        } else {
-            let mut items: Vec<Element<_>> = state
-                .agent_log
-                .iter()
-                .map(|entry| match entry {
-                    AgentLogEntry::Note(s) => container(
-                        row![
-                            text("->").size(12).color(C_ACCENT),
-                            text(s.as_str()).size(12).color(C_TEXT_DIM),
-                        ]
-                        .spacing(4),
-                    )
-                    .padding([2, 0])
-                    .width(Length::Fill)
-                    .into(),
-                    AgentLogEntry::Step {
-                        icon: step_icon,
-                        label,
-                        detail,
-                        result,
-                        blocked,
-                    } => {
-                        let accent = if *blocked { C_DANGER } else { C_ACCENT };
-                        let mut lines: Vec<Element<FerriteBrowserMessage>> = vec![row![
-                            icon(*step_icon, ICON_SIZE_SM, accent),
-                            text(*label).size(12).color(C_TEXT),
-                        ]
-                        .spacing(6)
-                        .align_y(iced::Alignment::Center)
-                        .into()];
-                        if !detail.is_empty() {
-                            lines
-                                .push(text(truncate(detail, 70)).size(11).color(C_TEXT_DIM).into());
-                        }
-                        lines.push(
-                            text(truncate(result, 90))
-                                .size(11)
-                                .color(if *blocked { C_DANGER } else { C_TEXT_DIM })
-                                .into(),
-                        );
-                        container(column(lines).spacing(2))
-                            .padding([5, 0])
-                            .width(Length::Fill)
-                            .into()
-                    }
-                })
-                .collect();
-            if state.agent_is_running {
-                items.push(
-                    text(format!("Working{}", dots))
-                        .size(12)
-                        .color(C_TEXT_DIM)
+        let log_items: Vec<Element<FerriteBrowserMessage>> =
+            if state.agent_log.is_empty() && !state.agent_is_running {
+                vec![text("No active session.")
+                    .size(12)
+                    .color(palette.text_dim)
+                    .into()]
+            } else {
+                let mut items: Vec<Element<_>> = state
+                    .agent_log
+                    .iter()
+                    .map(|entry| match entry {
+                        AgentLogEntry::Note(s) => container(
+                            row![
+                                text("->").size(12).color(palette.accent),
+                                text(s.as_str()).size(12).color(palette.text_dim),
+                            ]
+                            .spacing(4),
+                        )
+                        .padding([2, 0])
+                        .width(Length::Fill)
                         .into(),
-                );
-            }
-            items
-        };
+                        AgentLogEntry::Step {
+                            icon: step_icon,
+                            label,
+                            detail,
+                            result,
+                            blocked,
+                        } => {
+                            let accent = if *blocked {
+                                palette.danger
+                            } else {
+                                palette.accent
+                            };
+                            let mut lines: Vec<Element<FerriteBrowserMessage>> = vec![row![
+                                icon(*step_icon, ICON_SIZE_SM, accent),
+                                text(*label).size(12).color(palette.text),
+                            ]
+                            .spacing(6)
+                            .align_y(iced::Alignment::Center)
+                            .into()];
+                            if !detail.is_empty() {
+                                lines.push(
+                                    text(truncate(detail, 70))
+                                        .size(11)
+                                        .color(palette.text_dim)
+                                        .into(),
+                                );
+                            }
+                            lines.push(
+                                text(truncate(result, 90))
+                                    .size(11)
+                                    .color(if *blocked {
+                                        palette.danger
+                                    } else {
+                                        palette.text_dim
+                                    })
+                                    .into(),
+                            );
+                            container(column(lines).spacing(2))
+                                .padding([5, 0])
+                                .width(Length::Fill)
+                                .into()
+                        }
+                    })
+                    .collect();
+                if state.agent_is_running {
+                    items.push(
+                        text(format!("Working{}", dots))
+                            .size(12)
+                            .color(palette.text_dim)
+                            .into(),
+                    );
+                }
+                items
+            };
 
         let mut log_col_items = log_items;
         if let Some(response) = &state.agent_response {
@@ -3524,8 +3991,8 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             log_col_items.push(
                 container(
                     column![
-                        text("Answer").size(13).color(C_TEXT_DIM),
-                        text(response.as_str()).size(13).color(C_TEXT),
+                        text("Answer").size(13).color(palette.text_dim),
+                        text(response.as_str()).size(13).color(palette.text),
                     ]
                     .spacing(4)
                     .padding([8, 12]),
@@ -3560,9 +4027,9 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
         .width(Length::Fixed(320.0))
         .height(Length::Fill)
         .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(C_SURFACE)),
+            background: Some(Background::Color(palette.surface)),
             border: Border {
-                color: C_DIVIDER,
+                color: palette.divider,
                 width: 1.0,
                 radius: iced::border::Radius::new(0.0),
             },
@@ -3579,7 +4046,7 @@ pub fn launch() -> iced::Result {
     iced::application("Ferrite", update, view)
         .window_size(Size::new(1280.0, 800.0))
         .centered()
-        .theme(|_state| Theme::Dark)
+        .theme(|state: &FerriteBrowser| state.theme_mode.to_iced_theme())
         .subscription(subscription)
         .run_with(|| {
             // C3a: `.window_size(...).centered()` above is only the frame
@@ -4735,6 +5202,137 @@ mod tests {
         // at the midpoint it's already past halfway (unlike a linear or
         // ease-in curve).
         assert!(ease_out_cubic(0.5) > 0.5);
+    }
+
+    // ── C3c loading-indicator helpers ─────────────────────────────────────
+
+    #[test]
+    fn pulse_alpha_stays_within_base_and_base_plus_amplitude() {
+        let mut t = 0.0_f32;
+        while t <= 1.0 {
+            let a = pulse_alpha(t, 1.7, 0.3, 0.5);
+            assert!((0.3..=0.8 + f32::EPSILON).contains(&a), "t={t}: alpha={a}");
+            t += 0.03;
+        }
+    }
+
+    #[test]
+    fn pulse_alpha_at_zero_is_exactly_base() {
+        // sin(0) == 0, so the breath starts at its dimmest — matches the
+        // "no light yet" reading at the very start of a loading state.
+        assert_eq!(pulse_alpha(0.0, 1.0, 0.25, 0.20), 0.25);
+    }
+
+    #[test]
+    fn progress_segment_brightness_peaks_at_the_segment_under_the_sweep() {
+        // t=0.0 -> peak = 0 -> segment 0 is the brightest of the ten.
+        let brightness_at: Vec<f32> = (0..10)
+            .map(|i| progress_segment_brightness(i, 10, 0.0))
+            .collect();
+        let (brightest_i, _) = brightness_at
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap();
+        assert_eq!(brightest_i, 0);
+    }
+
+    #[test]
+    fn progress_segment_brightness_wraps_around_the_segment_ring() {
+        // t just before wrapping back to 0.0: the sweep's peak (~9.99 of
+        // 10) sits between the last segment and the first. Without
+        // wraparound, segment 0 would read as maximally *far* from the
+        // peak (a hard drop at the seam, `raw = 9.99`); with it, segment 0
+        // is close to the peak on the short way around (`wrapped ≈ 0.01`)
+        // and reads brighter than a segment on the far side of the ring.
+        let t = 0.999;
+        let brightness_first = progress_segment_brightness(0, 10, t);
+        let brightness_far_side = progress_segment_brightness(5, 10, t);
+        assert!(
+            brightness_first > brightness_far_side,
+            "expected wraparound to keep segment 0 bright near the seam: \
+             first={brightness_first} far_side={brightness_far_side}"
+        );
+    }
+
+    #[test]
+    fn progress_segment_brightness_is_bounded_zero_to_one() {
+        for i in 0..PROGRESS_SEGMENTS {
+            let mut t = 0.0_f32;
+            while t <= 1.0 {
+                let b = progress_segment_brightness(i, PROGRESS_SEGMENTS, t);
+                assert!((0.0..=1.0).contains(&b), "i={i} t={t}: brightness={b}");
+                t += 0.1;
+            }
+        }
+    }
+
+    // ── C3c theme toggle ───────────────────────────────────────────────────
+
+    #[test]
+    fn default_theme_is_dark_matching_pre_c3c_behavior() {
+        let state = FerriteBrowser::default();
+        assert_eq!(state.theme_mode, AppTheme::Dark);
+    }
+
+    #[test]
+    fn toggle_theme_flips_dark_to_light_and_back() {
+        let mut state = FerriteBrowser::default();
+        let _ = update(&mut state, FerriteBrowserMessage::ToggleTheme);
+        assert_eq!(state.theme_mode, AppTheme::Light);
+        let _ = update(&mut state, FerriteBrowserMessage::ToggleTheme);
+        assert_eq!(state.theme_mode, AppTheme::Dark);
+    }
+
+    #[test]
+    fn each_theme_resolves_to_its_own_distinct_palette() {
+        let mut state = FerriteBrowser::default();
+        let dark_accent = state.palette().accent;
+        let _ = update(&mut state, FerriteBrowserMessage::ToggleTheme);
+        let light_accent = state.palette().accent;
+        assert_ne!(
+            (dark_accent.r, dark_accent.g, dark_accent.b),
+            (light_accent.r, light_accent.g, light_accent.b),
+            "toggling theme did not change the resolved accent colour"
+        );
+    }
+
+    #[test]
+    fn light_and_dark_palettes_each_keep_text_readable_on_base() {
+        // Not a full contrast-ratio check (see `LIGHT_PALETTE`'s doc
+        // comment for the hand-computed figures) — just the structural
+        // property a palette must have to be usable at all: primary text
+        // is not the same colour as the background it sits on, in either
+        // theme.
+        for palette in [&DARK_PALETTE, &LIGHT_PALETTE] {
+            assert_ne!(
+                (palette.text.r, palette.text.g, palette.text.b),
+                (palette.base.r, palette.base.g, palette.base.b)
+            );
+        }
+    }
+
+    #[test]
+    fn to_iced_theme_matches_app_theme() {
+        assert_eq!(AppTheme::Dark.to_iced_theme(), Theme::Dark);
+        assert_eq!(AppTheme::Light.to_iced_theme(), Theme::Light);
+    }
+
+    #[test]
+    fn palette_for_theme_falls_back_to_dark_for_a_non_light_iced_theme() {
+        // `palette_for_theme` is what the nine `.style(...)`-callback
+        // functions use; it must resolve every `Theme` variant to
+        // *something*; anything other than `Theme::Light` should be the
+        // dark palette (see that function's own doc comment).
+        let p = palette_for_theme(&Theme::Dark);
+        assert_eq!(
+            (p.base.r, p.base.g, p.base.b),
+            (
+                DARK_PALETTE.base.r,
+                DARK_PALETTE.base.g,
+                DARK_PALETTE.base.b
+            )
+        );
     }
 
     // ── Page-content decoupling: structural argument, not merely asserted ─
