@@ -3202,3 +3202,126 @@ separate claim only the user's own relaunch can settle.
 scope decision above is a deliberate boundary, not a bug — flagged here
 rather than filed as a T-### since it's a decision needing the user's own
 input on whether it's wanted at all, not a defect with an agreed fix.
+
+## 2026-09-24 — coordinator — two real bugs found live by the user: CI's cargo-deny action fails on macOS runners; C3a's resize fix caused a real segfault
+
+**Scope:** the user actually ran the app and the CI workflow after this
+session's C3a/C2/CI-cadence changes merged to `main` (PR #2). Two real
+regressions surfaced, both fixed here, on a fresh branch off `main` (the
+merged PR's branch was deleted per the user's own workflow) —
+`fix/servo-resize-crash-and-ci-cargo-deny`.
+
+**1. CI: `cargo-deny-action` cannot run on the now-macOS-only runner.**
+`EmbarkStudios/cargo-deny-action@v2` (`.github/workflows/ci.yml`'s
+license/advisory/duplicate-version step) is a **Docker container action**
+— GitHub Actions only supports container actions on Linux runners. This
+session's earlier CI change (macOS-only, per owner decision, see T-210's
+row) made the `ci` job's only runner `macos-latest`, so the step failed
+outright with `Error: Container action is only supported on Linux` — not
+caught before merging because this sandbox cannot run GitHub Actions
+(same standing limitation every prior CI-touching agent has logged).
+**Fixed:** replaced the container action with a native install + run —
+`cargo install cargo-deny --locked` then `cargo deny check` — the exact
+pattern the same job already uses for `cargo-machete` one step above it,
+which works on any runner OS.
+
+**2. A real, reproduced segfault in the live app — root-caused, not
+patched around.** The user's own run: `cargo run -p ferrite-shell -- ui`
+with `FERRITE_MODEL_SMALL=FERRITE_MODEL_MAIN=gemma4:31b` printed
+`UNSUPPORTED (log once): POSSIBLE ISSUE: unit 1 GLD_TEXTURE_INDEX_2D is
+unloadable and bound to sampler type (Float) - using zero texture because
+texture unloadable`, then `[1]    53037 segmentation fault`. Screenshots
+from before the crash also showed the real symptom this GL warning is
+consistent with: page content rendering correctly only in a small
+top-left region of the window, the rest of the content area solid black
+— not a blank/loading state, a genuinely corrupted frame.
+
+**Root cause, traced directly to C3a's own resize fix from earlier this
+session, not a pre-existing bug:** `ServoFrame`'s tick handler called
+`session.resize(desired_w, desired_h)` and then, in the **same** tick,
+`session.sync_and_read()` — which calls `rendering_context.read_to_image
+(rect)` using the buffer's *just-updated* `self.width`/`self.height`.
+`HeadlessServoSession::resize()`'s own body (`ferrite-servo/src/
+session.rs`) updates those fields and calls `rendering_context.resize()`/
+`webview.resize()` — real calls into libservo — but nothing in this
+codebase's control establishes that libservo's own compositor has
+*finished* reallocating the backing surface by the time the very next
+line executes. Reading a rect sized for the new dimensions against a
+surface that may still be the old, smaller one is exactly what produces
+both symptoms: a corrupted/partially-black frame (the intersection of old
+and new dimensions is valid, the rest reads uninitialized/black) and,
+under worse timing, a genuine out-of-bounds read — the segfault. This
+session's earlier "found, not just guessed" standard applies here too:
+the fix is not merely-plausible, it's derived directly from what the
+crash log and the screenshots both independently point to, and both
+symptoms disappear under the same one-line-of-reasoning fix (never read a
+frame in the same tick a resize was issued).
+
+**Fix, `crates/ferrite-ui/src/lib.rs` + `crates/ferrite-servo/src/
+session.rs`:**
+- Two new `FerriteBrowser` fields: `last_resized_content_px: (u32, u32)`
+  (what the active session was last actually told to resize to — tracked
+  here, not re-derived from the session itself, because the session's own
+  size getter would reflect `resize()`'s immediate bookkeeping, not
+  libservo's real completion) and `resize_settle_ticks: u8` (ticks
+  remaining before it's safe to read a frame again).
+- `ServoFrame`'s handler: a resize is only *attempted* when
+  `resize_settle_ticks == 0` (never re-issued while a previous one is
+  still settling) and only *actually issued* when the desired size
+  differs from `last_resized_content_px`. The moment one is issued,
+  `resize_settle_ticks` is armed to `RESIZE_SETTLE_TICKS` (3 ticks,
+  ~48ms — a conservative, not empirically measured, margin: this sandbox
+  cannot run the real `servo` feature to time libservo's actual
+  reallocation, so 3 ticks is a deliberately generous guess for a
+  CPU-side software-rasterizer reallocation, not a number pinned by
+  observation. If the crash recurs, raising this constant — or replacing
+  it with a real readiness signal from libservo if one exists — is the
+  next move, not assumed unnecessary). While settling, the engine is
+  still pumped every tick (giving the resize a chance to actually
+  process), but **every** session's `sync_and_read()` is skipped entirely
+  — the previous frame just stays displayed for those few tens of
+  milliseconds instead of a black/corrupted one.
+- `HeadlessServoSession::size()` (added earlier in C3a, both the real and
+  stub impls) — removed. It existed only to support the old same-tick
+  comparison this fix replaces with state-side tracking; grep-confirmed
+  zero remaining callers before deleting, rather than left as orphaned
+  public API (`CLAUDE.md`'s no-dead-code invariant).
+
+**Tests, `crates/ferrite-ui/src/lib.rs`:**
+`servo_frame_decrements_resize_settle_ticks_and_stops_at_zero` (arms the
+counter directly via struct literal — R7 means no test can ever construct
+a real session to exercise the actual `resize()`/`sync_and_read()` call
+path, so this pins the pure counter state machine: decrements each tick,
+never underflows past zero) and
+`servo_frame_does_not_arm_the_resize_settle_window_without_a_session_to_resize`
+(with `servo_sessions` empty — always true in this test build, since the
+stub `HeadlessServoSession::new()` itself always returns `Err` — a
+content-area size that differs from `last_resized_content_px` must NOT
+arm the settle window or update the tracked size, proving the window only
+ever arms as a *result* of an actual `resize()` call, never speculatively).
+
+**Verified:** `cargo build --workspace`, `cargo test --workspace` (every
+crate green, 0 failures — `ferrite-ui` now 41, up from 39, two new tests;
+`ferrite-servo` unchanged at 1), `cargo fmt --all --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo machete`, `cargo deny
+check` (`advisories ok, bans ok, licenses ok, sources ok`, same
+pre-existing Servo-git-source warning every agent since A3 has logged)
+all clean. `.github/workflows/ci.yml` re-validated with
+`python3 -c "import yaml; yaml.safe_load(...)"`.
+
+**Not verified live — the actual claim this entry makes:** this sandbox
+has no real Servo build (`--features ferrite-servo/servo` takes 15–25
+minutes and this session did not attempt it) and no attached display, so
+the segfault itself could not be reproduced or confirmed fixed here. The
+root-cause reasoning is derived directly from the user's own crash log
+and screenshots, and the fix is a real, load-bearing behavior change
+(frames are genuinely skipped during the settle window, not a cosmetic
+adjustment) — but only the user's own relaunch, on the exact
+`gemma4:31b`/real-Servo configuration that crashed before, can actually
+confirm this holds.
+
+**Commits:** (see the commit landing alongside this entry).
+
+**Known issues discovered, not fixed:** the `RESIZE_SETTLE_TICKS = 3`
+margin is a considered guess, not a measured value — flagged inline above
+rather than asserted as definitively sufficient.
