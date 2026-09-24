@@ -4175,3 +4175,68 @@ rel="icon">`; a cache file that fails to decode is never retried within
 the same run) — both stated as accepted scope cuts in this pass's own
 brief, not silently dropped. Everything else already tracked in
 `docs/TO-DO.md` untouched, as before.
+
+## 2026-09-24 — coordinator — embedded Inter as the app's real default font
+
+**Scope:** direct user feedback on the app's own look, after the new-tab
+hero pass above: "this is the worst UI i have ever seen... use better
+font ig." `crates/ferrite-ui/` only. Same branch,
+`feat/new-tab-hero-and-site-icons`.
+
+**Root cause, confirmed by grepping the whole file before assuming
+anything:** `crates/ferrite-ui/src/lib.rs`'s `launch()` never called
+`.font(...)` or `.default_font(...)` on the `iced::application(...)`
+builder — not once, in any of this session's prior UI passes (C1's design
+system through the new-tab hero redesign). Every one of those passes
+styled colour, spacing, radius, and animation deliberately, but the
+actual typeface every widget was rendering in was always whatever generic
+sans-serif iced falls back to when `Settings::default_font` is never set
+— never a considered choice. Text is the majority of every screen in a
+browser's chrome, so this was a real, structural gap behind the "cheap"
+read, not a cosmetic afterthought.
+
+**Fix:** embedded Inter (SIL Open Font License 1.1) at four static
+weights — Regular/Medium/SemiBold/Bold — fetched directly from Google
+Fonts' own CDN this session (`fonts.googleapis.com`/`fonts.gstatic.com`
+were genuinely reachable from this sandbox, unlike the six arbitrary
+sites the new-tab favicon work tried and got blocked on above — a
+different, narrower allow-list gap, not a contradiction) and verified as
+real TrueType font data (`file(1)`, correct byte sizes, not truncated/
+error-page downloads) before being committed to `crates/ferrite-ui/
+assets/fonts/`, alongside the license text (`OFL.txt`) fetched from the
+same Google Fonts repository on GitHub. Static weights, not Inter's
+variable-font file: iced's text shaper (cosmic-text/fontdb) selects the
+closest already-registered *face* for a requested `Font::weight` rather
+than interpolating a variable font's weight axis, so four static faces is
+the mechanically correct way to get more than one real weight out of one
+family here, not an arbitrary packaging choice.
+
+`launch()` now registers all four via `.font(...)` and sets
+`.default_font(Font::with_name("Inter"))`, so every `text`/`text_input`/
+`button` widget in this file that never sets its own font renders in
+Inter Regular instead of iced's fallback — the single highest-leverage
+change available, since it touches every screen at once. A new
+`font_weight(Weight) -> Font` helper is the one call site anything
+wanting a heavier embedded face goes through; applied to the handful of
+places in this file that are genuinely display/heading text rather than
+body copy: the new-tab hero's "Fe" badge and "ferrite" wordmark, the
+content area's own "Fe" loading placeholder, and the error page's "ERR"/
+"Page could not be loaded" heading.
+
+**Verified:** `cargo build`/`fmt --check`/`clippy --workspace
+--all-targets -D warnings`/`test` all clean (every crate, 0 failures —
+`ferrite-ui` stays at 117 tests, unchanged; this is a rendering-only
+change with no new testable logic), `cargo machete` clean, `cargo deny
+check` clean (the one pre-existing, unrelated Servo-source warning),
+`check_purge.sh`/`check_no_archive_links.sh` clean.
+
+**Not verified — stated plainly, same as every visual pass on this
+file:** no attached display in this sandbox, so the font has never
+actually been seen rendered — not the weight hierarchy, not whether Inter
+reads as intended at this app's actual UI sizes. What *is* independently
+verified, more than a typical "trust the code" claim: the embedded font
+files themselves are real, valid, complete TrueType data, not a guess at
+bytes that merely compile via `include_bytes!`. The user's own relaunch
+is the only way to confirm this actually reads better.
+
+**Commits:** `762c7b2`.
