@@ -376,10 +376,17 @@ const PANEL_PADDING: u16 = 12;
 
 /// Ticks (`ServoFrame`, ~16ms each) to wait after calling
 /// `HeadlessServoSession::resize()` before trusting a frame read from that
-/// session again — see `FerriteBrowser::resize_settle_ticks`'s doc comment
-/// for the real crash this avoids. ~48ms of headroom for libservo's own
-/// compositor to finish reallocating the resized surface.
-const RESIZE_SETTLE_TICKS: u8 = 3;
+/// session again — see `FerriteBrowser::resize_settle_ticks`'s doc comment.
+/// The actual crash/corruption this workaround was first written for
+/// turned out to have a real, different root cause, fixed directly in
+/// `HeadlessServoSession::resize()` itself (a redundant, unguarded
+/// `rendering_context.resize()` call that both suppressed Servo's own
+/// resize-triggered repaint and skipped `make_current()` before touching
+/// the surface — see that method's doc comment for the full trace against
+/// the pinned `libservo` source). This constant is now a small residual
+/// safety margin, not the primary fix, and is kept low (one tick) so it
+/// doesn't itself make resizing feel less smooth.
+const RESIZE_SETTLE_TICKS: u8 = 1;
 
 /// Icon sizes — the two sizes every `icon()` call site in this crate picks
 /// from, so the icon set reads as one consistent scale rather than a grab
@@ -607,21 +614,24 @@ pub struct FerriteBrowser {
     /// Ticks remaining before it's safe to read a frame from the session
     /// most recently `resize()`d — see `ServoFrame`'s handler.
     ///
-    /// **Real bug this exists to fix, not a defensive guess:** calling
-    /// `session.resize()` and then `session.sync_and_read()` (which calls
-    /// `read_to_image` using the buffer's just-updated, post-resize
-    /// dimensions) in the *same* tick produced a directly observed crash
-    /// (segfault, preceded by a `GLD_TEXTURE_INDEX_2D is unloadable`
-    /// warning) and, short of a crash, visibly corrupted frames (page
-    /// content rendered only in a small region with the rest of the
-    /// window black) — because libservo's own resize is not necessarily
-    /// synchronous with the very next `read_to_image` call, so reading
-    /// immediately risks a size-mismatched read against a surface it
-    /// hasn't finished reallocating. While this is nonzero, `ServoFrame`
-    /// still pumps the engine (to give the resize a chance to actually
-    /// process) but skips every session's `sync_and_read()` entirely,
-    /// rather than reading a frame that might not match the buffer's new
-    /// declared size.
+    /// **Corrected history:** this field was first written on the theory
+    /// that the segfault/black-screen/stuck-rendering bug was a same-tick
+    /// race — `session.resize()` immediately followed by
+    /// `session.sync_and_read()` reading a frame before libservo finished
+    /// reallocating the surface. That fix alone did **not** resolve the
+    /// bug when tested on real hardware; the actual root cause was in
+    /// `HeadlessServoSession::resize()` itself (a redundant, unguarded
+    /// `rendering_context.resize()` call that made Servo's own
+    /// `Painter::resize_rendering_context` change-detection see "no
+    /// change" and skip the repaint-at-new-size step entirely, and that
+    /// also skipped `make_current()` before touching the surface — see
+    /// that method's doc comment for the full trace against the pinned
+    /// `libservo` source). That is now fixed directly in `session.rs`.
+    /// This field and `RESIZE_SETTLE_TICKS` are kept as a small residual
+    /// safety margin (one tick) rather than removed outright, since a
+    /// same-tick read immediately after `resize()` is still a real,
+    /// separate race in principle even with the primary bug fixed — not
+    /// because it was ever the actual cause of what the user observed.
     pub resize_settle_ticks: u8,
     // ── Agent bridge ──────────────────────────────────────────────────────────
     /// The real `ferrite_model::ModelProvider` constructed at startup
