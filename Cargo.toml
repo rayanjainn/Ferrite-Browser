@@ -32,8 +32,18 @@ async-trait = "0.1"
 # sync::{mpsc,oneshot}, task::spawn, time::{sleep,timeout}, and the
 # `#[tokio::test]` macro — none of `fs`/`net`/`io-util`/`process`/`signal`
 # are used anywhere. "full" was pulling in all of them unused.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# C3d (downloads): "fs"/"io-util" added for real — `ferrite-ui`'s download
+# manager streams a `reqwest` response body to disk via `tokio::fs::File` +
+# `tokio::io::AsyncWriteExt::write_all`, the same "only what's actually used"
+# discipline T-207 trimmed this list down to in the first place.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "io-util"] }
+# C3d (downloads): "stream" added for real — `ferrite-ui`'s download manager
+# reads the response body via `Response::bytes_stream()` (iterated with
+# `iced::futures::StreamExt`, the same real `futures` crate iced already
+# re-exports and this crate already imports elsewhere, so no new dependency
+# is needed just to drive it) rather than buffering the whole body in memory
+# first, so progress can be reported chunk by chunk.
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 # Trimmed to what's actually used: DateTime::<Utc>::now() (needs "clock")
 # and #[derive(Serialize/Deserialize)] on structs holding chrono types
 # (needs "serde"). Default features pull in more (e.g. "wasmbind") that

@@ -74,19 +74,30 @@ pub enum Icon {
     /// C3c: shown while `AppTheme::Light` is active (click switches to
     /// dark).
     Moon,
+    /// C3d: the current page is not bookmarked — a hollow ribbon (`fill:
+    /// none`, the same distinction `Sun`/`Moon` draw between the two theme
+    /// states).
+    BookmarkOutline,
+    /// C3d: the current page is bookmarked — a solid ribbon (`fill:
+    /// #000000`, tinted at render time like every other icon here).
+    BookmarkFilled,
+    /// C3d: the toolbar's Library toggle (bookmarks/history/downloads/
+    /// settings, consolidated behind one entry point rather than a
+    /// dedicated toolbar button per feature — see `lib.rs`'s toolbar
+    /// composition comment for why).
+    Menu,
 }
 
-// A bookmark/star icon and a settings/gear icon were drawn for this charter
-// (C3 will want both — a bookmark feature and a settings surface — and
-// they're cheap to add) but deliberately left out of this enum: rustc's
-// `dead_code` lint flags an enum variant as unused per the crate's actual
-// *lib*-target compilation, which never includes `#[cfg(test)]` code no
-// matter how thoroughly a test module constructs it — so an icon with no
-// real (non-test) call site cannot be pre-added here without either
-// violating `just check`'s `-D warnings` gate or reaching for
-// `#[allow(dead_code)]`, which `CLAUDE.md`'s "no dead code" invariant rules
-// out. Add the variant (and its `.svg`, and a real call site) together when
-// C2/C3 actually needs one, rather than pre-declaring it here unused.
+// C3c left a note here that a bookmark/star icon was drawn but deliberately
+// withheld from this enum until it had a real (non-test) call site — rustc's
+// `dead_code` lint flags an unused enum variant regardless of how thoroughly
+// a `#[cfg(test)]` module constructs it, and `CLAUDE.md`'s "no dead code"
+// invariant rules out `#[allow(dead_code)]` as the way around that. C3d is
+// that real call site (`lib.rs`'s bookmark-star toggle in the address bar):
+// `BookmarkOutline`/`BookmarkFilled` are added above, used, and tested. A
+// dedicated settings/gear glyph is still withheld for the same reason —
+// C3d's settings surface (the Library panel's Settings tab) uses a plain
+// text tab label instead, so a gear icon would have no real call site yet.
 
 /// The embedded SVG bytes for `kind` — a pure mapping, kept separate from
 /// [`icon`] so it's testable without spinning up Iced at all (mirrors this
@@ -117,6 +128,9 @@ pub fn icon_bytes(kind: Icon) -> &'static [u8] {
         Icon::Clipboard => include_bytes!("../assets/icons/clipboard.svg"),
         Icon::Sun => include_bytes!("../assets/icons/sun.svg"),
         Icon::Moon => include_bytes!("../assets/icons/moon.svg"),
+        Icon::BookmarkOutline => include_bytes!("../assets/icons/bookmark-outline.svg"),
+        Icon::BookmarkFilled => include_bytes!("../assets/icons/bookmark-filled.svg"),
+        Icon::Menu => include_bytes!("../assets/icons/menu.svg"),
     }
 }
 
@@ -141,7 +155,7 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, color: Color) -> Element<'a,
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 23] = [
+    const ALL: [Icon; 26] = [
         Icon::Back,
         Icon::Forward,
         Icon::Reload,
@@ -165,6 +179,9 @@ mod tests {
         Icon::Clipboard,
         Icon::Sun,
         Icon::Moon,
+        Icon::BookmarkOutline,
+        Icon::BookmarkFilled,
+        Icon::Menu,
     ];
 
     /// Every icon variant embeds real, well-formed SVG data — catches a
