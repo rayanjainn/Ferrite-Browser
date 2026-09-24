@@ -128,6 +128,60 @@
 // point — the Library panel (`show_library_panel`/`library_tab`) — rather
 // than four more permanent toolbar buttons; see `view()`'s toolbar
 // composition comment for why.
+//
+// ## New-tab hero: real quick-access-tile favicons
+//
+// `new_tab_page`'s six quick-access tiles (DuckDuckGo/Rust Docs/GitHub/
+// Servo/Hacker News/Wikipedia) used to render a literal `"[D]"`/`"[R]"`/...
+// bracketed-letter string as a placeholder "icon". They now show each
+// site's real favicon, fetched directly from that site's own
+// `https://<host>/favicon.ico` (never a third-party favicon-aggregator
+// service — this project's whole identity is a privacy-conscious,
+// capability-governed browser, and silently routing every new-tab-page load
+// through a third party that then knows which sites this user's quick-
+// access tiles name would contradict that directly).
+//
+// Mechanism, deliberately reusing three already-established patterns rather
+// than inventing new ones:
+// - **Fetch + cache + decode** (`fetch_tile_favicon`, spawned once per tile
+//   by the new `FetchTileFavicons` message, itself sent once at real startup
+//   — `launch()`'s startup `Task::batch`, mirroring `ServoReady`) is the
+//   same "spawn the I/O in the background, report back over
+//   `agent_event_tx`" shape `run_download` (C3d) already established: a
+//   `reqwest::Client::get` of the site's own `/favicon.ico`, decoded via the
+//   new `image` crate dependency (see `Cargo.toml`'s own comment on why this
+//   adds no new dependency *version* to the graph — `libservo` already pulls
+//   it in transitively) into raw RGBA8 (`decode_favicon_rgba`), reported back
+//   as a `TileFaviconReady { index, width, height, rgba }` message that
+//   constructs the actual `iced_widget::image::Handle` in `update()` — the
+//   same "raw bytes over the channel, `ImageHandle::from_rgba` only inside
+//   `update()`" shape the tab-bar favicon sync (C3b) already uses.
+// - **On-disk cache** (`favicon_cache_dir`/`favicon_cache_path`,
+//   `~/.cache/ferrite-ui/favicons/<host>.ico`) follows the same `.cache`-vs-
+//   `.local/share` distinction `default_bookmarks_path`/
+//   `ferrite_model::config::default_cache_dir()` already establish — a
+//   favicon is re-fetchable, unlike a bookmark, so it belongs under
+//   `.cache`, not the data directory. Checked before every fetch; written
+//   only once decoding the fetched bytes has actually succeeded, so a
+//   transient bad response (an HTML error page, a truncated body) is never
+//   cached as if it were a real icon and can be retried on the next launch.
+// - **Fallback** (`tile_accent`/monogram tile): a tile with no resolved
+//   favicon yet — no network, first launch before the fetch completes, the
+//   site's `/favicon.ico` doesn't resolve at all, or a decode failure —
+//   shows a deliberately-designed monogram (the site's first letter over a
+//   palette-derived, per-tile hue-rotated accent colour, see `tile_accent`)
+//   rather than a broken-image glyph or empty space, the same fallback real
+//   browsers' own "top sites" tiles use before a favicon is cached. This is
+//   the *default* rendering path, not an error state the UI has to detect
+//   and react to — `tile_favicons[i]` simply stays `None` until/unless a
+//   fetch succeeds, and `new_tab_page` always has a finished-looking tile to
+//   show either way.
+//
+// **Never verified against a real network fetch in this sandbox** — see
+// `docs/PROGRESS.md`'s entry for this change for exactly what was and
+// wasn't proven (this sandbox's own outbound proxy blocks every one of the
+// six real sites' domains outright, confirmed via `curl`, before any Rust
+// code here was ever reached).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -224,6 +278,50 @@ pub enum DownloadState {
     Completed,
     Failed(String),
 }
+
+/// One entry in the new-tab hero's quick-access tile row — see this module's
+/// own doc comment ("New-tab hero: real quick-access-tile favicons") for the
+/// fetch/cache/fallback mechanism built around this list. `host` is the
+/// exact host `favicon_url` and `NavigateRequested` both derive from `url`
+/// (kept as a single source of truth rather than a separately-authored
+/// string, so the two can never drift apart) — see `favicon_host`.
+struct QuickAccessTile {
+    label: &'static str,
+    url: &'static str,
+}
+
+/// The new-tab hero's six quick-access tiles — unchanged set/order from the
+/// pre-redesign `tiles: Vec<(&str, &str, &str)>` literal this replaces, only
+/// the bracketed-letter placeholder (`"[D]"`/`"[R]"`/...) is gone, since a
+/// tile's actual glyph is now either its fetched favicon or a monogram
+/// derived from `label` at render time (`new_tab_page`), never authored
+/// per-tile here.
+const QUICK_ACCESS_TILES: [QuickAccessTile; 6] = [
+    QuickAccessTile {
+        label: "DuckDuckGo",
+        url: "https://lite.duckduckgo.com",
+    },
+    QuickAccessTile {
+        label: "Rust Docs",
+        url: "https://doc.rust-lang.org",
+    },
+    QuickAccessTile {
+        label: "GitHub",
+        url: "https://github.com",
+    },
+    QuickAccessTile {
+        label: "Servo",
+        url: "https://servo.org",
+    },
+    QuickAccessTile {
+        label: "Hacker News",
+        url: "https://news.ycombinator.com",
+    },
+    QuickAccessTile {
+        label: "Wikipedia",
+        url: "https://en.m.wikipedia.org",
+    },
+];
 
 // ---------------------------------------------------------------------------
 // Real ModelProvider construction (T-229)
@@ -1211,6 +1309,22 @@ pub struct FerriteBrowser {
     /// (`model_tag_small`/`model_tag_main` stay `"unconfigured"` in that
     /// same case).
     pub model_cache_dir: Option<String>,
+    // ── New-tab hero: quick-access tile favicons ────────────────────────────
+    /// The decoded favicon for each of `QUICK_ACCESS_TILES`, same indexing
+    /// convention as `tab_favicons`/`tab_titles`/... elsewhere in this file
+    /// — `None` until `TileFaviconReady` reports one (no network, first
+    /// launch before the fetch completes, or the site's `/favicon.ico`
+    /// doesn't resolve/decode). `new_tab_page` renders a designed monogram
+    /// fallback for exactly that state — see this module's own doc comment
+    /// ("New-tab hero: real quick-access-tile favicons").
+    pub tile_favicons: Vec<Option<ImageHandle>>,
+    /// Real favicon-cache directory, resolved once by `launch()`
+    /// (`favicon_cache_dir()`) — `None` in every test/`Default` construction,
+    /// the same test-safety discipline `bookmarks_path`/`downloads_dir`
+    /// already establish. `FetchTileFavicons` is a no-op (spawns nothing)
+    /// when this is `None`, rather than guessing a path or fetching without
+    /// ever being able to cache the result.
+    pub favicons_cache_dir: Option<PathBuf>,
 }
 
 impl FerriteBrowser {
@@ -1301,6 +1415,8 @@ impl Default for FerriteBrowser {
             show_library_panel: false,
             library_tab: LibraryTab::default(),
             model_cache_dir: None,
+            tile_favicons: vec![None; QUICK_ACCESS_TILES.len()],
+            favicons_cache_dir: None,
         }
     }
 }
@@ -1476,6 +1592,22 @@ pub enum FerriteBrowserMessage {
     ToggleLibraryPanel,
     /// Switches the Library panel's active sub-view.
     SelectLibraryTab(LibraryTab),
+    // ── New-tab hero: quick-access tile favicons ────────────────────────────
+    /// Sent once, at real startup (`launch()`'s startup `Task::batch`,
+    /// mirroring `ServoReady`) — spawns one background fetch per
+    /// `QUICK_ACCESS_TILES` entry. Never sent from a test/`Default`-
+    /// constructed `FerriteBrowser` path.
+    FetchTileFavicons,
+    /// `fetch_tile_favicon` decoded a real favicon for tile `index` — raw
+    /// RGBA8 pixels, converted into an `ImageHandle` only here in
+    /// `update()` (the same "raw bytes over the channel" shape the tab-bar
+    /// favicon sync already uses).
+    TileFaviconReady {
+        index: usize,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -2357,6 +2489,37 @@ pub fn update(
         }
         FerriteBrowserMessage::SelectLibraryTab(tab) => {
             state.library_tab = tab;
+        }
+        // ── New-tab hero: quick-access tile favicons ─────────────────────────
+        FerriteBrowserMessage::FetchTileFavicons => {
+            if let (Some(cache_dir), Some(tx)) = (
+                state.favicons_cache_dir.clone(),
+                state.agent_event_tx.clone(),
+            ) {
+                for (index, tile) in QUICK_ACCESS_TILES.iter().enumerate() {
+                    let Some(host) = favicon_host(tile.url) else {
+                        continue;
+                    };
+                    let cache_path = favicon_cache_path(&cache_dir, &host);
+                    let favicon_url = format!("https://{host}/favicon.ico");
+                    tokio::task::spawn(fetch_tile_favicon(
+                        index,
+                        favicon_url,
+                        cache_path,
+                        tx.clone(),
+                    ));
+                }
+            }
+        }
+        FerriteBrowserMessage::TileFaviconReady {
+            index,
+            width,
+            height,
+            rgba,
+        } => {
+            if let Some(slot) = state.tile_favicons.get_mut(index) {
+                *slot = Some(ImageHandle::from_rgba(width, height, rgba));
+            }
         }
     }
     Task::none()
@@ -3400,6 +3563,247 @@ async fn run_download(
         });
     }
     let _ = tx.send(FerriteBrowserMessage::DownloadCompleted { id });
+}
+
+// ---------------------------------------------------------------------------
+// New-tab hero: quick-access tile favicons — fetch + on-disk cache + decode
+// ---------------------------------------------------------------------------
+//
+// See this file's own module docs ("New-tab hero: real quick-access-tile
+// favicons") for the full design story. Every pure step below
+// (`favicon_host`, `favicon_cache_dir`/`favicon_cache_path`,
+// `decode_favicon_rgba`) is unit-tested directly with no filesystem or
+// network I/O, the same dependency-injection discipline `resolve_download_
+// path`/`load_bookmarks_from` already established in this file (R7: no live
+// network call may ever be reachable from `#[test]`). Only `fetch_favicon_
+// bytes`/`fetch_tile_favicon` touch the network or the real filesystem, and
+// neither is ever called from a synchronous, directly-`#[test]`-reachable
+// path — only from inside a `tokio::task::spawn`ed future the same way
+// `run_download` above is, which this crate's own test-module header
+// documents as never actually polled into making a live call by a
+// `#[tokio::test]` that doesn't `.await` past the spawn point.
+
+/// The host `url` would navigate to — `None` if `url` doesn't parse as an
+/// absolute URL with a host. The single source of truth `fetch_tile_favicon`
+/// derives both the cache-file name and the `https://<host>/favicon.ico`
+/// fetch URL from, so the two can never name a different host than the tile
+/// itself actually navigates to.
+fn favicon_host(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()?
+        .host_str()
+        .map(str::to_ascii_lowercase)
+}
+
+/// The real favicon-cache directory — `~/.cache/ferrite-ui/favicons`,
+/// matching `ferrite_model::config::default_cache_dir()`'s own `.cache`
+/// placement for the same reason: a favicon is re-fetchable, unlike a
+/// bookmark (`default_bookmarks_path`, which deliberately lives under
+/// `.local/share` instead). `None` if the home directory cannot be resolved
+/// at all — `launch()` then simply never sends `FetchTileFavicons`'
+/// fetches anywhere to cache, and every tile falls back to its monogram for
+/// the session, the same "degrade, don't panic" shape every other real-path
+/// resolver in this file already follows.
+fn favicon_cache_dir() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(home.join(".cache").join("ferrite-ui").join("favicons"))
+}
+
+/// Where `host`'s favicon is cached under `cache_dir` — pure and fully
+/// testable without touching the real filesystem, the same DI shape
+/// `resolve_download_path` uses `dir: &Path` for. `.ico` regardless of what
+/// the fetched bytes actually decode as (`decode_favicon_rgba` sniffs the
+/// real format from content, not this extension) — named for the one fixed
+/// path this module ever fetches from, `/favicon.ico`.
+fn favicon_cache_path(cache_dir: &Path, host: &str) -> PathBuf {
+    cache_dir.join(format!("{host}.ico"))
+}
+
+/// Decodes arbitrary fetched/cached favicon bytes into `(width, height,
+/// rgba8_pixels)` — `None` for anything that isn't a real, decodable image
+/// (an HTML error page served with a 200 status at `/favicon.ico`, a
+/// truncated download, a cache file from a format this build doesn't decode).
+/// `image::load_from_memory` sniffs the real format from the data's own
+/// magic bytes, so this handles both a genuine multi-frame `.ico` container
+/// and a site that serves a plain PNG at that same path (both real,
+/// observed-in-the-wild cases) through the one call. `DynamicImage::
+/// to_rgba8()` is exactly the pixel format `iced_widget::image::Handle::
+/// from_rgba` needs — no separate conversion step, unlike `ferrite-servo`'s
+/// `favicon_to_rgba8`, which has to handle Servo's five internal
+/// `PixelFormat` variants because it reads an already-decoded in-process
+/// buffer rather than re-decoding compressed bytes itself.
+fn decode_favicon_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some((width, height, rgba.into_raw()))
+}
+
+/// Fetches `url` (a `/favicon.ico` URL) as raw bytes — `None` for any
+/// network error or non-success HTTP status, never a panic. Kept as its own
+/// tiny function, separate from `fetch_tile_favicon`'s cache/decode
+/// bookkeeping, purely so the one real network call in this module has a
+/// single, obvious call site.
+async fn fetch_favicon_bytes(url: &str) -> Option<Vec<u8>> {
+    let response = reqwest::Client::new().get(url).send().await.ok()?;
+    let response = response.error_for_status().ok()?;
+    response.bytes().await.ok().map(|b| b.to_vec())
+}
+
+/// The background task `FetchTileFavicons` spawns once per tile
+/// (`tokio::task::spawn`, the same shape `run_download` already
+/// establishes): a cache read first, a real `reqwest` GET of the site's own
+/// `/favicon.ico` on a cache miss, then `decode_favicon_rgba` either way —
+/// on success, reports `TileFaviconReady` with the raw RGBA8 pixels (the
+/// `ImageHandle` itself is only ever constructed inside `update()`, the same
+/// "raw bytes over the channel" shape the tab-bar favicon sync already
+/// uses). Any failure along the way (no cache hit, network error, non-
+/// success status, undecodable bytes) simply returns without sending
+/// anything — `tile_favicons[index]` stays `None`, and `new_tab_page`
+/// already renders a deliberately-designed monogram fallback for exactly
+/// that state, so no separate "failed" message/variant is needed the way
+/// `DownloadFailed` is for a user-initiated download the UI must visibly
+/// report on.
+///
+/// A cache write only ever happens after a freshly-fetched response has
+/// already decoded successfully — never before — so a transient bad
+/// response (a truncated body, an HTML error page served with a 200 status)
+/// is never cached as if it were a real icon; the next launch simply
+/// retries the fetch instead of permanently failing from a poisoned cache
+/// entry. The converse (a cache file that fails to decode) is not retried
+/// within the same run — an honest, documented scope cut: this can only
+/// happen from a cache file this exact code path never writes (a hand-
+/// edited or foreign file at that path), not from anything this function
+/// itself produces.
+async fn fetch_tile_favicon(
+    index: usize,
+    favicon_url: String,
+    cache_path: PathBuf,
+    tx: tokio::sync::mpsc::UnboundedSender<FerriteBrowserMessage>,
+) {
+    let (bytes, from_cache) = match tokio::fs::read(&cache_path).await {
+        Ok(cached) => (cached, true),
+        Err(_) => match fetch_favicon_bytes(&favicon_url).await {
+            Some(fetched) => (fetched, false),
+            None => return,
+        },
+    };
+
+    let Some((width, height, rgba)) = decode_favicon_rgba(&bytes) else {
+        return;
+    };
+
+    if !from_cache {
+        if let Some(parent) = cache_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(&cache_path, &bytes).await;
+    }
+
+    let _ = tx.send(FerriteBrowserMessage::TileFaviconReady {
+        index,
+        width,
+        height,
+        rgba,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// New-tab hero: monogram fallback colour
+// ---------------------------------------------------------------------------
+//
+// A tile with no resolved favicon (yet, or ever) shows a monogram instead —
+// its label's first letter over a colour derived from `palette.accent`, so
+// every fallback stays inside the C3c palette system rather than
+// introducing a new hardcoded `Color` literal (this file's own established
+// convention — see the `Palette`/C3d doc comments). Each of the six tiles
+// gets a distinct hue so the row doesn't read as six identical grey boxes
+// before any favicon has loaded, without six separately-authored brand
+// colours to keep in sync with `Palette`/`LIGHT_PALETTE`/`DARK_PALETTE`
+// whenever either changes.
+
+/// `color` as `(hue_degrees, saturation, lightness)`, each channel in its
+/// natural range (`0.0..360.0`/`0.0..=1.0`/`0.0..=1.0`) — the standard
+/// colorimetry conversion, alpha passed through unchanged since nothing here
+/// rotates transparency.
+fn rgb_to_hsl(color: Color) -> (f32, f32, f32) {
+    let (r, g, b) = (color.r, color.g, color.b);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let delta = max - min;
+    if delta.abs() < f32::EPSILON {
+        return (0.0, 0.0, l);
+    }
+    let s = if l < 0.5 {
+        delta / (max + min)
+    } else {
+        delta / (2.0 - max - min)
+    };
+    let h = if (max - r).abs() < f32::EPSILON {
+        ((g - b) / delta) % 6.0
+    } else if (max - g).abs() < f32::EPSILON {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    let mut h_deg = h * 60.0;
+    if h_deg < 0.0 {
+        h_deg += 360.0;
+    }
+    (h_deg, s, l)
+}
+
+/// The inverse of [`rgb_to_hsl`] — `hue_degrees` is wrapped into
+/// `0.0..360.0` first, so a caller can pass an out-of-range rotated hue
+/// (e.g. `370.0`) without pre-normalizing it themselves.
+fn hsl_to_rgb(hue_degrees: f32, s: f32, l: f32) -> Color {
+    let h = hue_degrees.rem_euclid(360.0) / 360.0;
+    if s.abs() < f32::EPSILON {
+        return Color::from_rgb(l, l, l);
+    }
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    let hue_to_rgb = |p: f32, q: f32, mut t: f32| -> f32 {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            return p + (q - p) * 6.0 * t;
+        }
+        if t < 1.0 / 2.0 {
+            return q;
+        }
+        if t < 2.0 / 3.0 {
+            return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+        }
+        p
+    };
+    Color::from_rgb(
+        hue_to_rgb(p, q, h + 1.0 / 3.0),
+        hue_to_rgb(p, q, h),
+        hue_to_rgb(p, q, h - 1.0 / 3.0),
+    )
+}
+
+/// A deterministic hue rotation of `base` for tile `index` (0-based),
+/// evenly spaced around the full colour wheel (`360.0 / QUICK_ACCESS_TILES.
+/// len()` degrees apart) — every quick-access tile's monogram fallback gets
+/// a distinct-but-related accent colour, derived from `palette.accent`
+/// itself rather than six new hardcoded literals. Saturation/lightness are
+/// kept from `base` unchanged, only hue rotates, so the result always reads
+/// as "the same accent family, a different tile" rather than an arbitrary
+/// colour.
+fn tile_accent(base: Color, index: usize) -> Color {
+    let (h, s, l) = rgb_to_hsl(base);
+    let rotated = h + (index as f32) * (360.0 / QUICK_ACCESS_TILES.len() as f32);
+    hsl_to_rgb(rotated, s, l)
 }
 
 // ---------------------------------------------------------------------------
@@ -4798,12 +5202,138 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 // New-tab / home page
 // ---------------------------------------------------------------------------
 
+/// The glyph shown for `tile.label` before/without a real favicon — its
+/// first character, uppercased (`"GitHub"` -> `"G"`, `"Hacker News"` ->
+/// `"H"`). Pure and separate from `new_tab_page` so it's directly testable
+/// without constructing any widget.
+fn tile_monogram(label: &str) -> String {
+    label
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default()
+}
+
+/// A rounded, tinted square housing either the tile's real favicon (once
+/// `TileFaviconReady` has landed) or its monogram fallback — one shared
+/// container style for both, so a favicon arriving mid-session never makes
+/// the tile jump to a differently-sized/positioned glyph, only swaps what's
+/// drawn inside the same backdrop. `accent` is this tile's own hue-rotated
+/// colour (`tile_accent`) — the monogram is drawn in it directly; the real-
+/// favicon case uses it only for the backdrop's subtle tint/border, since
+/// the favicon image itself already carries the site's real colours.
+fn tile_glyph<'a>(
+    favicon: Option<&ImageHandle>,
+    monogram: &str,
+    accent: Color,
+) -> Element<'a, FerriteBrowserMessage> {
+    let backdrop_style = move |_: &Theme| container::Style {
+        background: Some(Background::Color(Color { a: 0.14, ..accent })),
+        border: Border {
+            radius: iced::border::Radius::new(11.0),
+            width: 1.0,
+            color: Color { a: 0.30, ..accent },
+        },
+        ..container::Style::default()
+    };
+    let inner: Element<'a, FerriteBrowserMessage> = match favicon {
+        Some(handle) => ServoImage::new(handle.clone())
+            .width(Length::Fixed(22.0))
+            .height(Length::Fixed(22.0))
+            .into(),
+        None => text(monogram.to_string()).size(16).color(accent).into(),
+    };
+    container(inner)
+        .width(38)
+        .height(38)
+        .center(Length::Fill)
+        .style(backdrop_style)
+        .into()
+}
+
+/// The new-tab hero's background: a faint top-to-bottom fade from
+/// `palette.base` to `palette.surface` — real `iced_core::gradient::Linear`
+/// API, not a decorative illusion built from stacked containers (confirmed
+/// present/usable on this pinned `iced` 0.13.1: `Background::Gradient`,
+/// `gradient::Linear::new(impl Into<Radians>).add_stop(offset, color)`, and
+/// `f32: Into<Radians>` all exist on the vendored source). Subtle by design
+/// (two adjacent palette depth levels, not an arbitrary new hue) — a hint of
+/// depth behind the centered content, not a pattern competing with it.
+fn hero_background(palette: &Palette) -> Background {
+    Background::Gradient(
+        iced::gradient::Linear::new(std::f32::consts::FRAC_PI_2)
+            .add_stop(0.0, palette.base)
+            .add_stop(1.0, palette.surface)
+            .into(),
+    )
+}
+
 fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let palette = state.palette();
+
+    // ── Brand mark ───────────────────────────────────────────────────────
+    // A raised, bordered badge housing "Fe" (not bare oversized text, the
+    // pre-redesign look) with a soft breathing glow — `pulse_alpha`, the
+    // same tick-driven helper the tab bar's loading dot and the content
+    // area's own "Fe" loading placeholder already use (C3c), reused here
+    // rather than a fourth, independently-authored animation. Only this
+    // badge's own text alpha animates; nothing below it ever dims or waits
+    // on this tick, per this redesign's own brief (the search bar stays the
+    // clear, immediately-usable primary action from the very first frame).
+    let logo_pulse = pulse_alpha(state.progress_offset, 0.6, 0.80, 0.20);
+    let logo_badge = container(text("Fe").size(30).color(Color {
+        a: logo_pulse,
+        ..palette.accent
+    }))
+    .width(76)
+    .height(76)
+    .center(Length::Fill)
+    .style(|_: &Theme| container::Style {
+        background: Some(Background::Color(palette.raised)),
+        border: Border {
+            radius: iced::border::Radius::new(22.0),
+            width: 1.0,
+            color: Color {
+                a: 0.40,
+                ..palette.accent
+            },
+        },
+        shadow: iced::Shadow {
+            color: Color {
+                a: 0.20,
+                ..palette.accent
+            },
+            offset: iced::Vector::new(0.0, 6.0),
+            blur_radius: 26.0,
+        },
+        ..container::Style::default()
+    });
+
+    let brand = column![
+        logo_badge,
+        container(text("")).height(18),
+        text("ferrite").size(30).color(palette.text),
+        text("capability-governed browser")
+            .size(13)
+            .color(palette.text_dim),
+    ]
+    .spacing(6)
+    .align_x(iced::Alignment::Center);
+
+    // ── Search bar — the primary action, not a link list's afterthought ──
+    // A leading glyph (`Icon::Search`) sits outside the pill itself rather
+    // than fused into `text_input`'s own background (iced 0.13's
+    // `text_input` has no `on_focus`/`on_unfocus` to drive an outer
+    // container's border the way the input's own `.style` closure already
+    // reacts to `text_input::Status` — see this crate's own `handle_key_
+    // press` doc comment for a similar iced-0.13-API-shape constraint found
+    // elsewhere in this file), so the pill keeps its existing focus-
+    // reactive border/background exactly as before, just wider and paired
+    // with a clearer "type to search or navigate" affordance next to it.
     let search_bar = text_input("Search or type an address", &state.new_tab_search_input)
-        .width(560)
-        .padding([14, 22])
-        .size(15)
+        .width(600)
+        .padding([16, 24])
+        .size(16)
         .style(|_: &Theme, status| {
             let focused = matches!(status, text_input::Status::Focused);
             text_input::Style {
@@ -4831,29 +5361,31 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             &state.new_tab_search_input,
         )));
 
-    // Quick-access tiles
-    let tiles: Vec<(&str, &str, &str)> = vec![
-        ("[D]", "DuckDuckGo", "https://lite.duckduckgo.com"),
-        ("[R]", "Rust Docs", "https://doc.rust-lang.org"),
-        ("[G]", "GitHub", "https://github.com"),
-        ("[S]", "Servo", "https://servo.org"),
-        ("[N]", "Hacker News", "https://news.ycombinator.com"),
-        ("[W]", "Wikipedia", "https://en.m.wikipedia.org"),
-    ];
+    let search_row = row![icon(Icon::Search, 18.0, palette.text_dim), search_bar,]
+        .spacing(14)
+        .align_y(iced::Alignment::Center);
 
-    let tile_row: Vec<Element<FerriteBrowserMessage>> = tiles
+    // ── Quick-access tiles ───────────────────────────────────────────────
+    // A small "Quick access" eyebrow label gives the row a real section
+    // identity instead of just trailing the search bar unlabeled — the
+    // secondary-hierarchy signal the pre-redesign page had none of.
+    let tiles_heading = text("QUICK ACCESS").size(11).color(palette.text_dim);
+
+    let tile_row: Vec<Element<FerriteBrowserMessage>> = QUICK_ACCESS_TILES
         .iter()
-        .map(|(icon, label, url)| {
-            let url = url.to_string();
+        .enumerate()
+        .map(|(index, tile)| {
+            let accent = tile_accent(palette.accent, index);
+            let favicon = state.tile_favicons.get(index).and_then(|f| f.as_ref());
+            let glyph = tile_glyph(favicon, &tile_monogram(tile.label), accent);
+            let url = tile.url.to_string();
             button(
-                column![
-                    text(*icon).size(26).color(palette.accent),
-                    text(*label).size(12).color(palette.text_dim),
-                ]
-                .spacing(8)
-                .align_x(iced::Alignment::Center),
+                column![glyph, text(tile.label).size(12).color(palette.text)]
+                    .spacing(10)
+                    .align_x(iced::Alignment::Center),
             )
-            .padding([16, 18])
+            .width(108)
+            .padding([16, 10])
             .style(|_: &Theme, s| {
                 let hov = matches!(s, button::Status::Hovered | button::Status::Pressed);
                 button::Style {
@@ -4864,7 +5396,7 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     })),
                     text_color: palette.text,
                     border: Border {
-                        radius: iced::border::Radius::new(12.0),
+                        radius: iced::border::Radius::new(14.0),
                         width: 1.0,
                         color: if hov {
                             palette.divider
@@ -4879,12 +5411,10 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                         iced::Shadow {
                             color: Color {
                                 a: 0.15,
-                                r: 0.44,
-                                g: 0.38,
-                                b: 1.0,
+                                ..palette.accent
                             },
-                            offset: iced::Vector::new(0.0, 2.0),
-                            blur_radius: 8.0,
+                            offset: iced::Vector::new(0.0, 3.0),
+                            blur_radius: 10.0,
                         }
                     } else {
                         iced::Shadow::default()
@@ -4896,7 +5426,7 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         })
         .collect();
 
-    // Keyboard shortcut reference (platform-aware)
+    // ── Keyboard shortcut reference (platform-aware), unchanged content ──
     let shortcuts_text = format!(
         "{M}+T  New tab   {M}+W  Close   {M}+L  Address   {M}+R  Reload   {M}+J  JS Console   F12  Audit",
         M = MOD_LABEL,
@@ -4904,30 +5434,23 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
     container(
         column![
-            // Logo
+            brand,
+            container(text("")).height(48),
+            search_row,
+            container(text("")).height(44),
             column![
-                text("Fe").size(64).color(palette.accent),
-                text("ferrite").size(40).color(palette.text),
-                text("capability-governed browser")
-                    .size(13)
-                    .color(palette.text_dim),
+                tiles_heading,
+                container(text("")).height(14),
+                row(tile_row).spacing(14).wrap(),
             ]
-            .spacing(6)
             .align_x(iced::Alignment::Center),
             container(text("")).height(44),
-            // Search bar
-            search_bar,
-            container(text("")).height(36),
-            // Quick-access tiles
-            row(tile_row).spacing(12).wrap(),
-            container(text("")).height(40),
-            // Keyboard shortcut hints
-            container(text(shortcuts_text).size(11).color(palette.text_dim),)
-                .padding([8, 16])
+            container(text(shortcuts_text).size(11).color(palette.text_dim))
+                .padding([9, 18])
                 .style(|_: &Theme| container::Style {
                     background: Some(Background::Color(palette.surface)),
                     border: Border {
-                        radius: iced::border::Radius::new(8.0),
+                        radius: iced::border::Radius::new(20.0),
                         width: 1.0,
                         color: palette.divider,
                     },
@@ -4941,7 +5464,7 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     .height(Length::Fill)
     .center(Length::Fill)
     .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(palette.base)),
+        background: Some(hero_background(palette)),
         ..container::Style::default()
     })
     .into()
@@ -5660,6 +6183,22 @@ pub fn launch() -> iced::Result {
                      the download-current-page action will be a no-op"
                 );
             }
+            // New-tab hero: real quick-access-tile favicons — resolved here
+            // alongside bookmarks/downloads (same test-safety discipline: a
+            // real home-directory lookup, never reachable from `Default`),
+            // fetched via the startup `FetchTileFavicons` message below
+            // rather than a direct `tokio::task::spawn` in this closure, so
+            // the one place this crate ever spawns a background task is
+            // `update()` — matching every other background task in this
+            // file (`run_download`, the agent loop's model-call steps).
+            state.favicons_cache_dir = favicon_cache_dir();
+            if state.favicons_cache_dir.is_none() {
+                eprintln!(
+                    "[ferrite-ui] cannot resolve the home directory for the favicon cache — \
+                     quick-access tiles will show their monogram fallback for this session"
+                );
+            }
+            let favicon_task = Task::done(FerriteBrowserMessage::FetchTileFavicons);
             match HeadlessServoSession::new(1280, 700) {
                 Ok(session) => {
                     state.servo_sessions.insert(0, session);
@@ -5668,12 +6207,13 @@ pub fn launch() -> iced::Result {
                         Task::batch([
                             Task::done(FerriteBrowserMessage::ServoReady),
                             startup_window_task,
+                            favicon_task,
                         ]),
                     )
                 }
                 Err(e) => {
                     eprintln!("[ferrite-ui] Servo unavailable: {}", e);
-                    (state, startup_window_task)
+                    (state, Task::batch([startup_window_task, favicon_task]))
                 }
             }
         })
@@ -7552,6 +8092,212 @@ mod tests {
             state.downloads[0].state,
             DownloadState::Failed("boom".to_string())
         );
+    }
+
+    // ── New-tab hero: quick-access tile favicons ────────────────────────────
+
+    #[test]
+    fn favicon_host_extracts_the_lowercased_host_from_a_tile_url() {
+        assert_eq!(
+            favicon_host("https://GitHub.com"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            favicon_host("https://lite.duckduckgo.com/lite"),
+            Some("lite.duckduckgo.com".to_string())
+        );
+    }
+
+    #[test]
+    fn favicon_host_is_none_for_an_unparseable_url() {
+        assert_eq!(favicon_host("not a url"), None);
+    }
+
+    /// Every `QUICK_ACCESS_TILES` entry's `url` resolves to a real host —
+    /// the exact `favicon_host` call `FetchTileFavicons`'s handler and
+    /// `fetch_tile_favicon` both make, kept passing so a future edit to the
+    /// tile list can't silently add an entry `favicon_host` can't parse.
+    #[test]
+    fn every_quick_access_tile_url_has_a_resolvable_host() {
+        for tile in QUICK_ACCESS_TILES {
+            assert!(
+                favicon_host(tile.url).is_some(),
+                "{}'s url {:?} has no resolvable host",
+                tile.label,
+                tile.url
+            );
+        }
+    }
+
+    #[test]
+    fn favicon_cache_path_names_the_host_under_the_given_cache_dir() {
+        let dir = PathBuf::from("/tmp/ferrite-ui-test-favicons");
+        assert_eq!(
+            favicon_cache_path(&dir, "github.com"),
+            dir.join("github.com.ico")
+        );
+    }
+
+    /// A tiny, real, freshly-encoded PNG (via the same `image` crate this
+    /// module decodes with) — proves `decode_favicon_rgba`'s actual decode
+    /// call works end to end against real image bytes, not just that the
+    /// code type-checks. This is the one piece of the fetch/cache/decode
+    /// pipeline this sandbox could exercise for real (see `docs/PROGRESS.md`
+    /// for why the network half could not be — this sandbox's own outbound
+    /// proxy blocks every one of the six real sites' domains outright).
+    fn sample_png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(width, height, image::Rgba([10, 20, 30, 255]));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn decode_favicon_rgba_decodes_a_real_png_round_trip() {
+        let bytes = sample_png_bytes(16, 16);
+        let (width, height, rgba) = decode_favicon_rgba(&bytes).expect("should decode");
+        assert_eq!((width, height), (16, 16));
+        assert_eq!(rgba.len(), 16 * 16 * 4);
+        // Every pixel is the exact colour `sample_png_bytes` encoded —
+        // proves the bytes that come back are the real decoded pixels, not
+        // some placeholder/zeroed buffer.
+        assert_eq!(&rgba[0..4], &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn decode_favicon_rgba_is_none_for_non_image_bytes() {
+        assert_eq!(decode_favicon_rgba(b"not an image at all"), None);
+    }
+
+    #[test]
+    fn decode_favicon_rgba_is_none_for_empty_bytes() {
+        assert_eq!(decode_favicon_rgba(&[]), None);
+    }
+
+    #[test]
+    fn rgb_to_hsl_then_hsl_to_rgb_round_trips_a_real_colour() {
+        let original = Color::from_rgb(0.44, 0.38, 1.0); // DARK_PALETTE.accent
+        let (h, s, l) = rgb_to_hsl(original);
+        let round_tripped = hsl_to_rgb(h, s, l);
+        assert!((round_tripped.r - original.r).abs() < 0.01);
+        assert!((round_tripped.g - original.g).abs() < 0.01);
+        assert!((round_tripped.b - original.b).abs() < 0.01);
+    }
+
+    #[test]
+    fn rgb_to_hsl_handles_a_grey_with_no_saturation() {
+        let (h, s, l) = rgb_to_hsl(Color::from_rgb(0.5, 0.5, 0.5));
+        assert_eq!(h, 0.0);
+        assert_eq!(s, 0.0);
+        assert!((l - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn tile_accent_rotates_hue_deterministically_and_evenly() {
+        let base = DARK_PALETTE.accent;
+        let a0 = tile_accent(base, 0);
+        let a1 = tile_accent(base, 1);
+        // index 0 is the base colour itself, unrotated (up to the HSL/RGB
+        // round trip's own floating-point error, not exact equality).
+        assert!((a0.r - base.r).abs() < 0.01);
+        assert!((a0.g - base.g).abs() < 0.01);
+        assert!((a0.b - base.b).abs() < 0.01);
+        // A different index produces a different colour...
+        assert!(a0.r != a1.r || a0.g != a1.g || a0.b != a1.b);
+        // ...and calling it again with the same inputs is deterministic.
+        assert_eq!(tile_accent(base, 1), a1);
+        // Rotating all the way around the tile count returns to the start.
+        let full_circle = tile_accent(base, QUICK_ACCESS_TILES.len());
+        assert!((full_circle.r - a0.r).abs() < 0.01);
+        assert!((full_circle.g - a0.g).abs() < 0.01);
+        assert!((full_circle.b - a0.b).abs() < 0.01);
+    }
+
+    #[test]
+    fn tile_monogram_is_the_uppercased_first_character() {
+        assert_eq!(tile_monogram("GitHub"), "G");
+        assert_eq!(tile_monogram("Hacker News"), "H");
+        assert_eq!(tile_monogram(""), "");
+    }
+
+    #[tokio::test]
+    async fn fetch_tile_favicons_is_a_no_op_without_a_resolved_cache_dir() {
+        // R7: `FetchTileFavicons` spawns real background `reqwest` tasks,
+        // but — per this test module's own header comment — a
+        // `#[tokio::test]` that never `.await`s past the spawn point never
+        // actually polls one into making a live call. This case doesn't
+        // even reach a spawn: no cache dir resolved means no fetch is ever
+        // started.
+        let mut state = FerriteBrowser {
+            favicons_cache_dir: None,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::FetchTileFavicons);
+        assert!(state.tile_favicons.iter().all(Option::is_none));
+    }
+
+    #[tokio::test]
+    async fn fetch_tile_favicons_spawns_one_task_per_tile_with_a_cache_dir_set() {
+        let mut state = FerriteBrowser {
+            favicons_cache_dir: Some(PathBuf::from("/tmp/ferrite-ui-test-favicons-spawn")),
+            ..FerriteBrowser::default()
+        };
+        // Only the synchronous bookkeeping is observable here (no message
+        // is sent back before this test ends — see the no-op case above for
+        // the full R7 reasoning); this asserts the handler at least ran to
+        // completion without panicking and left every tile favicon
+        // unresolved, which is the correct pre-fetch-completing state.
+        let _ = update(&mut state, FerriteBrowserMessage::FetchTileFavicons);
+        assert_eq!(state.tile_favicons.len(), QUICK_ACCESS_TILES.len());
+        assert!(state.tile_favicons.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn tile_favicon_ready_sets_the_matching_slot() {
+        let mut state = FerriteBrowser::default();
+        assert!(state.tile_favicons[0].is_none());
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::TileFaviconReady {
+                index: 0,
+                width: 4,
+                height: 4,
+                rgba: vec![0u8; 4 * 4 * 4],
+            },
+        );
+        assert!(state.tile_favicons[0].is_some());
+        // Every other slot is untouched.
+        assert!(state.tile_favicons[1..].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn tile_favicon_ready_with_an_out_of_range_index_is_ignored_not_a_panic() {
+        let mut state = FerriteBrowser::default();
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::TileFaviconReady {
+                index: 999,
+                width: 1,
+                height: 1,
+                rgba: vec![0, 0, 0, 255],
+            },
+        );
+        assert!(state.tile_favicons.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn default_ferrite_browser_starts_with_no_resolved_tile_favicons_or_cache_dir() {
+        // R7/test-safety: exactly the same discipline `bookmarks_path`/
+        // `downloads_dir` already establish — never resolved from a real
+        // home directory inside `Default`, only from `launch()`.
+        let state = FerriteBrowser::default();
+        assert_eq!(state.tile_favicons.len(), QUICK_ACCESS_TILES.len());
+        assert!(state.tile_favicons.iter().all(Option::is_none));
+        assert!(state.favicons_cache_dir.is_none());
     }
 
     // ── C3d: Library panel ───────────────────────────────────────────────

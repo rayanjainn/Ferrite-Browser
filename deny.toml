@@ -159,6 +159,24 @@ skip = [
   # flag, not Servo or the OS-keyring crates) is different from either.
   { name = "fontdb" },
   { name = "kurbo" },
+
+  # A fourth batch (new-tab hero: real quick-access-tile favicons):
+  # `ferrite-ui` gained a direct dependency on the `image` crate (decoding a
+  # fetched `/favicon.ico` into RGBA8 — see `Cargo.toml`'s own comment on
+  # this dependency) at 0.25, the same version already present in this
+  # lockfile as a transitive dependency of `libservo` (confirmed via
+  # `cargo tree -p ferrite-ui -i image@0.25.10` — no new *version* enters the
+  # graph). `iced_graphics` (part of the same always-on iced/winit stack the
+  # three batches above already trace duplicates to) independently depends
+  # on `image` 0.24, one major version older, for its own unrelated internal
+  # use — the two were never going to unify without `iced_renderer` bumping
+  # its own pin. `image` 0.25's `png` decoder (`0.18`) is one version newer
+  # than the `png` 0.17 `tiny-skia`/`resvg`/`sctk-adwaita` already carry
+  # elsewhere in the same iced/winit stack — the same "two versions of the
+  # same crate meeting inside one dependency tree, not a real security
+  # concern" shape as every batch above, not re-litigated per crate.
+  { name = "image" },
+  { name = "png" },
 ]
 
 [sources]

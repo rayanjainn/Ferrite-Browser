@@ -2703,6 +2703,7 @@ dependencies = [
  "ferrite-servo",
  "iced",
  "iced_widget",
+ "image 0.25.10",
  "reqwest",
  "serde",
  "serde_json",
