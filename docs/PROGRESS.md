@@ -3205,6 +3205,16 @@ input on whether it's wanted at all, not a defect with an agreed fix.
 
 ## 2026-09-24 — coordinator — two real bugs found live by the user: CI's cargo-deny action fails on macOS runners; C3a's resize fix caused a real segfault
 
+**CORRECTION (see the later 2026-09-24 entry "segfault root cause was
+misdiagnosed here — real fix in `HeadlessServoSession::resize()`"):**
+bug #2's root-cause claim below — a same-tick `resize()`/`sync_and_read()`
+race — is **wrong**. The user tested this fix on real hardware and
+reported the identical crash and identical black-screen/stuck-rendering
+symptoms afterward, disproving it. The CI fix (bug #1) is unaffected and
+still correct. Left standing below rather than rewritten, per this
+project's own R2 rule against silently erasing a disproven status claim —
+read the correction entry alongside this one, not in place of it.
+
 **Scope:** the user actually ran the app and the CI workflow after this
 session's C3a/C2/CI-cadence changes merged to `main` (PR #2). Two real
 regressions surfaced, both fixed here, on a fresh branch off `main` (the
@@ -3325,3 +3335,96 @@ confirm this holds.
 **Known issues discovered, not fixed:** the `RESIZE_SETTLE_TICKS = 3`
 margin is a considered guess, not a measured value — flagged inline above
 rather than asserted as definitively sufficient.
+
+## 2026-09-24 — coordinator — segfault root cause was misdiagnosed here — real fix in `HeadlessServoSession::resize()`
+
+**Scope:** the previous entry's fix (the `resize_settle_ticks` settle
+window) was built and pushed on the theory that the crash was a same-tick
+`resize()`/`sync_and_read()` race. The user relaunched the app on the
+exact configuration that crashed before and reported the **identical**
+symptoms, unchanged: segfault on refresh, page content stuck rendering
+only in the top-left region, black screen on resize or opening the agent
+panel. That is a direct disproof of the previous entry's root-cause claim,
+not a partial fix needing more margin — same branch,
+`fix/servo-resize-crash-and-ci-cargo-deny`.
+
+**Real root cause, this time verified directly against the pinned
+`libservo` source rather than inferred from a crash log** (source read at
+`/root/.cargo/git/checkouts/servo-e53a6e7b994a25fe/301f7da`, the exact
+commit this workspace's `Cargo.toml` pins at tag `v0.0.5`):
+`HeadlessServoSession::resize()` (`crates/ferrite-servo/src/session.rs`)
+called **both** `self.rendering_context.resize(size)` directly **and**
+`self.webview.resize(size)`. Both operate on the same underlying
+`RenderingContext` — `WebViewBuilder::new` is constructed with
+`rendering_context.clone()`, so it's one shared object, not two.
+`WebView::resize()` (`components/servo/webview.rs`) delegates to
+`Painter::resize_rendering_context()` (`components/paint/painter.rs`),
+whose very first line is `if self.rendering_context.size() == new_size {
+return; }` — before it does the `set_document_view` transaction,
+`send_root_pipeline_display_list`, and `set_needs_repaint(RepaintReason::
+Resize)` calls that are what actually make libservo re-layout and repaint
+the page at the new size. Calling `rendering_context.resize()` ourselves
+*first* set that size ahead of `webview.resize()`'s own call, so by the
+time `Painter::resize_rendering_context` ran its guard, it always saw "no
+change" and returned immediately — the entire repaint-at-new-size path
+never ran, on every resize, permanently. That is exactly the observed
+symptom: page content frozen at whatever size it last legitimately
+rendered at (the small top-left region), the rest of the now-larger
+buffer never painted (black). Separately, the direct
+`rendering_context.resize()` call never calls `make_current()` first
+(unlike `sync_and_read()`'s own `make_current()` call, and unlike what
+`resize_rendering_context` does internally before touching the surface)
+— a real risk of touching the surface while a different tab's GL/surfman
+context was current, consistent with the `GLD_TEXTURE_INDEX_2D is
+unloadable` warning and the segfault both preceding and following it in
+the user's log. Cross-confirmed against Servo's own reference headless
+embedder, `ports/servoshell/desktop/headless_window.rs`'s
+`request_resize()`/`maximize()`, which calls **only** `webview.resize()`
+— with a comment explaining that call alone is sufficient because it is
+what notifies `Paint`.
+
+**Fix, `crates/ferrite-servo/src/session.rs`:** removed the direct
+`self.rendering_context.resize(size)` call from
+`HeadlessServoSession::resize()` entirely. It now does exactly what
+`servoshell`'s reference embedder does: sets `self.width`/`self.height`
+for this struct's own bookkeeping, then calls only
+`self.webview.resize(PhysicalSize { width, height })`. Doc comment on the
+method traces this full chain of evidence (files and functions read,
+guard clause quoted, `servoshell` cross-check) so the reasoning doesn't
+have to be re-derived the next time this code is touched.
+
+**`crates/ferrite-ui/src/lib.rs`:** `RESIZE_SETTLE_TICKS` lowered from `3`
+to `1` and its doc comment, and `FerriteBrowser::resize_settle_ticks`'s
+own doc comment, both corrected — the previous entry's same-tick-race
+theory is no longer presented as "the real bug this exists to fix" (a
+disproven claim CLAUDE.md and this file's own R2 rule don't allow left
+standing); the settle window is now documented as a small residual safety
+margin kept out of caution, not the fix. The mechanism itself
+(`last_resized_content_px`, `resize_settle_ticks`, the `ServoFrame`
+handler logic) is unchanged — kept because a same-tick read immediately
+after `resize()` is still a real, separate potential race in principle
+even with the primary bug fixed, not because it was ever what the user
+actually hit.
+
+**Verified:** `cargo build -p ferrite-ui -p ferrite-servo`, `cargo clippy
+-p ferrite-ui -p ferrite-servo --all-targets -- -D warnings`, `cargo fmt
+-p ferrite-ui -p ferrite-servo --check`, `cargo test -p ferrite-ui -p
+ferrite-servo` (41 + 1 passed, 0 failed — same counts as before, no test
+behavior changed, only the resize call sequence), then full workspace:
+`cargo build --workspace`, `cargo fmt --all --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo test --workspace` (every
+crate green, 0 failures), `cargo machete` (no unused deps), `cargo deny
+check` (`advisories ok, bans ok, licenses ok, sources ok`, same
+pre-existing Servo-git-source warning every agent since A3 has logged) —
+all clean.
+
+**Not verified live, same honest limitation as the previous (disproven)
+entry:** this sandbox has no real Servo build and no display, so this fix
+rests on reading the actual pinned `libservo` source and matching Servo's
+own reference embedder, not on reproducing the crash and watching it stop
+happening. That is a stronger form of evidence than the previous entry's
+crash-log inference, but it is still not a live confirmation — only the
+user's own relaunch, on the same `gemma4:31b`/real-Servo configuration
+that crashed twice already, can confirm this holds.
+
+**Commits:** `cf41cd5`.
