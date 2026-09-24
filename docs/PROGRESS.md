@@ -3777,3 +3777,202 @@ sandbox's `cargo test --workspace`, which never compiles them (the module
 they're in is `#[cfg(feature = "servo")]`-gated end to end).
 
 **Commits:** `a75d17e`.
+
+## 2026-09-24 — coordinator — C3d: bookmarks, history, zoom, find-in-page, settings, downloads
+
+**Scope:** the last feature-completeness item in the C1–C4 UI plan (C1
+design system/icons, C2 agent panel, C3a rendering/coordinate/resize
+correctness, C3b favicons, C3c theme toggle/polish/loaders all landed
+earlier on this same branch, `feat/favicons-and-theme-polish`). Six
+features: bookmarks, history, zoom, find-in-page, settings, downloads —
+all in `crates/ferrite-ui/`, plus one `crates/ferrite-servo/` change
+(history), per this charter's stated boundary. `ferrite-ipi`/
+`ferrite-agent`/the consent-dry-run architecture were not touched, per
+`CLAUDE.md`'s "never reference, import, or revive" list and this
+charter's own explicit instruction to keep the download manager separate
+from `ferrite_engine::BrowserEngine::download()` (the agent's dry-run/
+consent-gated tool vocabulary — a different concern, `docs/DECISIONS.md`'s
+IPI/consent boundary ADRs).
+
+**Mechanism, by feature:**
+
+1. **Bookmarks** — `Bookmark { title, url }`, JSON-persisted via an
+   injected `&Path` (`load_bookmarks_from`/`save_bookmarks_to`, matching
+   `ferrite-model::config::default_cache_dir()`'s own dependency-injection
+   shape for testability), `default_bookmarks_path()` resolving the real
+   `~/.local/share/ferrite/bookmarks.json` (a data directory, not a cache
+   one — bookmarks are a real loss to the user, unlike `ferrite-model`'s
+   response cache). Loaded once in `launch()`, never in `Default` (R7).
+   Star toggle (`Icon::BookmarkOutline`/`BookmarkFilled`) lives in the
+   address bar itself, the common Chrome/Firefox placement, rather than a
+   toolbar button.
+2. **History** — two independent halves. `crates/ferrite-servo/src/
+   session.rs`'s `HeadlessDelegate` gained `notify_history_changed`
+   (Servo's own native per-tab session-history hook — the same
+   `Rc<RefCell<...>>` shared-cell pattern `notify_favicon_changed`
+   already established, the most recent addition before this one), which
+   let `can_go_back`/`can_go_forward` become real (`can_go_forward` used
+   to hardcode `false` unconditionally; `can_go_back` used to approximate
+   from a bare `Complete`-event counter, now deleted as genuinely dead
+   code once nothing read it). The History **panel**'s browser-wide,
+   recency-ordered list (`FerriteBrowser::history`) is populated
+   separately, from `LoadStatusChanged`'s own already-existing "did this
+   tab's URL really change" signal (`record_history_visit`, deduped
+   against only the immediately preceding entry) rather than by reading
+   the new `HeadlessServoSession::history()` accessor every tick — a
+   deliberate choice, documented inline: simpler than reconciling N
+   per-tab Servo history lists into one recency-ordered view, and built on
+   this crate's own already-verified-working signal rather than on
+   `notify_history_changed`'s data shape, which (like the rest of
+   `ferrite-servo`'s `servo`-feature code) this session could only verify
+   by reading the pinned source, not by compiling it. Session-only, not
+   persisted across restarts — a real, documented scope cut over
+   bookmarks' much simpler "load once, save on every change" persistence.
+3. **Zoom** — per-tab `tab_zoom: Vec<f32>` (indexed like `tab_titles`/
+   `tab_urls`/`tab_favicons`, synced on `AddTab`/`CloseTab`), applied via
+   a CSS `transform: scale(...)` + compensating `width` injected through
+   `execute_js` (`zoom_script`) — Servo has no native zoom API at the
+   pinned `v0.0.5` tag (confirmed by reading `components/servo/
+   webview_delegate.rs`/`components/shared/embedder/lib.rs` directly, per
+   this charter's own research brief), and `transform` was chosen over the
+   nonstandard, legacy WebKit `zoom` CSS property since the latter is not
+   certain to exist in a standards-focused engine like Servo. Cmd/
+   Ctrl+=/-/0 shortcuts (`ZOOM_LEVELS`, the same discrete step table
+   Chrome/Firefox expose). Re-applied on every real navigation
+   (`LoadStatusChanged`'s completion branch), since a fresh document has
+   no memory of a previous page's injected transform. Toolbar surfacing:
+   a zoom indicator/controls row appears **only** when the active tab's
+   zoom isn't 100% — C3c's toolbar had already reached 8 elements (back/
+   forward/reload/address/audit/JS/agent/theme), and this charter's own
+   brief named "don't just bolt on 6 more permanent toolbar buttons" as a
+   hard constraint; a `default_zoom` setting (Settings tab) affects tabs
+   created after it changes, not the current one.
+4. **Find-in-page** — an overlay-styled bar in the normal layout flow
+   (not a true floating widget layer — iced 0.13's `stack` widget is
+   never used elsewhere in this crate, and introducing it just for this
+   bar wasn't worth the new surface), triggered by Cmd/Ctrl+F, closed by
+   Escape (resolved in `update()`'s `EscapePressed` handler rather than in
+   `handle_key_press` itself, since `iced::keyboard::on_key_press`
+   requires a plain `fn` pointer with no state access — verified directly
+   against the pinned `iced_futures` 0.13.2 source after the first attempt
+   at capturing `show_find_bar` in a closure failed to compile). Search is
+   standards-based DOM manipulation (`document.createTreeWalker`/`Range`,
+   never the nonstandard `window.find()`) via `find_script`/
+   `find_navigate_script`, run live on every keystroke and on next/
+   previous. `extract_json_object` parses the script's `JSON.stringify`
+   return value defensively (direct parse, then a Rust-`Debug`-quoted-
+   string unwrap, then brace-finding) — `HeadlessServoSession::
+   execute_js`'s exact return-value shape (a `Debug`-formatted wrapper
+   around whatever Servo's `evaluate_javascript` callback hands back) was
+   not verified against the pinned source the way the favicon/history
+   work was, so this parsing is defensive by design rather than assuming
+   the shape.
+5. **Settings** — read-only display of the resolved `FERRITE_MODEL_SMALL`/
+   `FERRITE_MODEL_MAIN` tags and the response cache dir (`ModelConfig::
+   cache_dir`, captured in `launch()` alongside the tags already were) —
+   no free-text tag entry, per `CLAUDE.md` §10.2's no-hardcoded/no-
+   silently-bypassed-config rule — plus real, working toggles for state
+   this crate already has (theme — reuses `ToggleTheme`; default zoom —
+   four presets). No placeholder rows for anything not yet settable.
+6. **Downloads** — `run_download` (`tokio::task::spawn`, the same
+   spawn-the-I/O-report-back-over-`agent_event_tx` shape `spawn_next_step`
+   already established for the agent loop's own background model calls):
+   a real `reqwest::Client::get(url)`, streamed chunk by chunk via
+   `Response::bytes_stream()` (iterated with `iced::futures::StreamExt` —
+   the real `futures` crate iced already re-exports and this file already
+   imports elsewhere, so no new stream dependency was needed) to
+   `dirs::download_dir()` via `tokio::fs::File`/`AsyncWriteExt`, reporting
+   a `DownloadProgress` message after every chunk. `resolve_download_path`
+   is pure and fully testable (collision-avoidance checked only against
+   the in-memory download list, not live disk state — an honest,
+   documented scope cut). Trigger is a manual "Download current page"
+   action in the Library panel's Downloads tab; in-page `<a download>`
+   click interception is out of scope for this pass — filed as T-232, not
+   silently dropped.
+
+**Information architecture:** all four of bookmarks/history/downloads/
+settings share one new toolbar button — "Library" (`Icon::Menu`,
+`show_library_panel`/`library_tab: LibraryTab`) — rather than four more
+permanent toolbar buttons, and zoom's controls are conditional rather
+than permanent. Net toolbar growth for six features: one button. This was
+a direct response to the charter's own explicit warning against turning
+the toolbar into "a wall of buttons," matching C3c's stated "clean, not
+cheap" aesthetic goal.
+
+**New `Cargo.toml` dependencies:** `ferrite-ui` gained `dirs` (bookmarks-
+file/downloads-dir resolution — already a workspace dependency via
+`ferrite-model`, newly used here), `reqwest` (the download GET — already
+a workspace dependency via `ferrite-model`, a second independent user of
+the same one pinned version), `chrono` (history timestamps — already a
+workspace dependency via `ferrite-audit-log`), and `serde` (bookmark JSON
+persistence). No new crate entered the workspace. The workspace-level
+`reqwest` gained the `"stream"` feature and `tokio` gained `"fs"`/
+`"io-util"`, both newly and actually used by the download manager (the
+exact "only what's used" discipline T-207 trimmed `tokio`'s feature list
+down to in the first place — these are additions back onto that
+discipline, not a regression of it).
+
+**Tests:** 47 new in `crates/ferrite-ui/src/lib.rs`'s `mod tests` (plus 3
+in `icons.rs` for the 3 new icon variants and the updated count) — pure-
+function coverage for every script/path-resolution/parsing helper
+(`zoom_script`, `next_zoom_level`/`prev_zoom_level`, `find_script`/
+`find_navigate_script`, `extract_json_object`, `download_file_name`,
+`resolve_download_path`, `format_bytes`, `record_history_visit`, the
+bookmarks JSON round-trip) plus `update()` handler coverage for every new
+message (`ToggleBookmarkCurrentPage`/`RemoveBookmark`, `ClearHistory`,
+`ZoomIn`/`ZoomOut`/`ZoomReset`/`SetDefaultZoom`, `OpenFindBar`/
+`CloseFindBar`/`FindQueryChanged`, `DownloadCurrentPage`/
+`DownloadProgress`/`DownloadCompleted`/`DownloadFailed`,
+`ToggleLibraryPanel`/`SelectLibraryTab`, and `EscapePressed`'s new find-
+bar-priority branch), all via the same direct `FerriteBrowser`/`update()`
+construction every existing test in this file already uses (many via
+`..FerriteBrowser::default()` struct-literal overrides, per this
+project's own established test style) — no live network, no real `$HOME`,
+matching R7 (the two `#[tokio::test]`s that spawn `run_download` never
+`.await` past the spawn point, so the real `reqwest` call inside it is
+never actually polled, same reasoning this file's own test-module header
+already documents for the agent loop's background-task tests).
+`ferrite-ui` now 101 tests (up from 54); `ferrite-servo`'s default
+(servo-free) build is unaffected in test count (1 test, unchanged) since
+the history-delegate code lives entirely inside the `#[cfg(feature =
+"servo")]`-gated module this sandbox never compiles.
+
+**Verified:** `cargo build`/`clippy --all-targets -D warnings`/`fmt
+--check`/`test` on `ferrite-ui` and `ferrite-servo` individually after
+each meaningful change, then the full workspace: `cargo build
+--workspace`, `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo test --workspace` (every crate
+green, 0 failures), `cargo machete` (no unused dependencies), `cargo deny
+check` (`advisories ok, bans ok, licenses ok, sources ok`, same
+pre-existing Servo-git-source warning every agent since A3 has logged),
+`sh scripts/check_purge.sh`, `sh scripts/check_no_archive_links.sh` — all
+clean.
+
+**Not verified live — stated plainly, same limitation every UI-touching
+session on this branch has stated:** this sandbox has no attached display
+and cannot build the real `servo` feature, so none of this was ever
+rendered or screenshot-checked — not the Library panel's layout, the find
+bar's on-screen placement, the zoom indicator's appearance, the bookmark
+star icon, or any interaction with a real page. `crates/ferrite-servo/src/
+session.rs`'s `notify_history_changed`/`history()` addition was never
+compiler-checked here either, same as the favicon work before it
+(`a75d17e`) — cross-read against the pinned `libservo` source
+(`components/servo/webview_delegate.rs`'s `WebViewDelegate::
+notify_history_changed` signature) rather than compiled; this sandbox's
+own default (servo-free) build and test suite for `ferrite-servo` is
+green, but that build never touches `mod inner`. `HeadlessServoSession::
+execute_js`'s exact return-value shape (relevant to find-in-page's result
+parsing, `extract_json_object`) was likewise never verified against the
+pinned source — the defensive, multi-strategy parsing is this session's
+mitigation for that specific unknown, not a substitute for having
+verified it. The user's own relaunch, on a real machine with a real
+display and the `servo` feature built, is the verification none of the
+above can substitute for.
+
+**Commits:** `55d1cde`, `155a2aa`, `ce1b8a7`.
+
+**Known issues discovered, not fixed:** T-232 (in-page `<a download>`
+click interception is out of scope for this pass — the download
+manager's only trigger is the Library panel's manual "Download current
+page" action). Everything else already tracked in `docs/TO-DO.md`
+untouched, as before.

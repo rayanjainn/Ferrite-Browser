@@ -32,3 +32,23 @@ async-trait = { workspace = true }
 urlencoding = { workspace = true }
 url = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+# C3d (bookmarks): JSON persistence for the bookmark list — round-tripped
+# through `serde`'s derive, matching every other persisted/wire type in this
+# workspace (`AuditEntry`, `CaseDefinition`, ...) rather than a hand-rolled
+# format.
+#
+# C3d (bookmarks/downloads): `dirs::home_dir()`/`dirs::download_dir()`
+# resolve the real bookmarks-file and downloads-directory paths, the same
+# crate `ferrite-model::config::default_cache_dir()` already uses for the
+# same reason (no OS-neutral equivalent in `std`) — already a workspace
+# dependency (`ferrite-model`), newly used here too.
+dirs = { workspace = true }
+# C3d (downloads): the actual GET + streamed file write — `ferrite-model`'s
+# backends already depend on this workspace-pinned `reqwest`; this is a
+# second, independent user of the same one version, not a new HTTP client.
+reqwest = { workspace = true }
+# C3d (history): `HistoryEntry::visited_at` — formatted the same way the
+# audit panel already formats `AuditEntry::timestamp` (`chrono`, already a
+# workspace dependency used by `ferrite-audit-log`).
+chrono = { workspace = true }
