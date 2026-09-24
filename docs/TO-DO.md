@@ -23,10 +23,10 @@ Status enum: `open` / `in-progress` / `done <SHA>` / `dropped <reason>` /
 
 ## Summary for a v0.1.0 reader (added by A13, T-113; counts updated by B3,
 then by C1 for T-231, then for T-210's 2026-09-24 owner decision, then by
-C3d for T-232 — re-tallied directly against every row below, not carried
-forward)
+C3d for T-232, then by the new-tab hero pass for T-233 — re-tallied
+directly against every row below, not carried forward)
 
-**59 rows total: 44 done, 1 in-progress, 11 open, 1 held, 1 dropped, 1
+**60 rows total: 44 done, 1 in-progress, 12 open, 1 held, 1 dropped, 1
 needing owner confirmation.**
 
 - **All 14 D1–D14 defects (T-001–T-014) are done.** All 11 completed agent
@@ -41,7 +41,7 @@ needing owner confirmation.**
   (grep-confirmed before deletion) — see those rows for the full B3 detail
   and `docs/PROGRESS.md`'s B3 entry for exactly what was verified live and
   what wasn't.
-- **The 11 still-open T-2xx rows, in one place:** T-212 (public-suffix
+- **The 12 still-open T-2xx rows, in one place:** T-212 (public-suffix
   scope can fail open), T-217 (per-capability scope authoring is
   provisional), T-218 (audit truncation defense is best-effort, not
   cryptographic), T-219 (two unconstructed `AuditError` variants), T-222
@@ -56,7 +56,10 @@ needing owner confirmation.**
   scope), T-232 (C3d's download manager has no in-page `<a download>`
   click interception — trigger is a manual "Download current page"
   action only, stated as out of scope for that pass rather than silently
-  skipped).
+  skipped), T-233 (the new-tab hero's favicon fetch only ever tries the
+  fixed `/favicon.ico` path, never parses `<link rel="icon">`, plus a
+  small related cache-retry gap — both stated as accepted scope cuts,
+  not silently dropped).
 - **Held, untouched by design:** T-204 (freeze-and-run the full
   experiment matrix) — explicit prior user instruction, not attempted
   this session either.
@@ -158,6 +161,7 @@ One row per charter. Each charter's own exit gate (`docs/REBUILD_DIRECTIVE.md`
 | T-230 | open | found by B1, updated by B2, feeds whoever authors those cases | **`dry_run::engine::content_key_for_call`'s corpus-scripting key mapping does not cover every `ferrite_engine::BrowserEngine` action — only the subset `ferrite_agent::BrowserTool` used to have.** `BrowserEngine`'s action surface is deliberately richer than the pre-rebuild `BrowserTool` (adds `dom.query`, `scroll`, `wait`, `tab.open`, `tab.close`, `cookie.read`, `storage.read`, `screenshot`) — none of those have a `content.by_tool_id` scripting key today, so a dry-run call to one of them always serves the generic synthetic stub, never case-authored content. **B2 update:** the key vocabulary itself is now unified (`content_key_for_call` and `corpus.rs`'s `by_tool` validation both speak `Primitive::as_str()` — see T-221's closure), but the *coverage* gap this row names is still real and still open: no corpus case exercises `scroll`/`wait`/`tab.*`/`cookie.read`/`storage.read` today, so extending the table would be speculative rather than driven by an actual authoring need. Extend it when a case that needs one of these is actually authored, not before. |
 | T-231 | done `49cf6bc` | found by C1, fixed by coordinator | **Enabling `iced_widget`'s `"svg"` feature (`crates/ferrite-ui/Cargo.toml`, added by C1 for its hand-authored icon set, `docs/handoffs/c01.md`) makes `cargo deny check`'s `[bans] multiple-versions = "deny"` fail — `resvg`/`usvg` 0.42.0 (pinned by `iced_renderer` 0.13.0's own `svg` feature, not chosen here) pin their own `fontdb` 0.18.0/`kurbo` 0.11.3, one version newer than the copies `iced_tiny_skia`/`cosmic-text` already carry (`fontdb` 0.16.2/`kurbo` 0.10.4) for unrelated text-rendering reasons — verified via `cargo deny check` (`error[duplicate]: found 2 duplicate entries for crate 'fontdb'`/`'kurbo'`, full dependency-tree output showing both trace to `iced_renderer`'s `svg` vs. non-`svg` sub-dependents).** Same structural situation `deny.toml`'s existing `[bans] skip` comment already documents for two earlier, unrelated batches (Servo-vs-iced/winit era mismatches; `keyring`/`dirs` each pulling their own `windows-*` copies) — not a version this workspace picked or can unify without forking `iced_renderer`. **Not fixed by C1**, deliberately: `deny.toml` is at the repo root, outside this charter's stated file scope (`crates/ferrite-ui/` plus the one `iced_widget` feature-flag line in root `Cargo.toml`), so the fix (two more `{ name = "fontdb" }`/`{ name = "kurbo" }` entries in `deny.toml`'s `[bans] skip` list, following the file's own established pattern and comment style) is left for whoever owns that file next rather than silently expanding scope. `just check`/`just test`/`cargo build --workspace` are all unaffected and stay green — only `cargo deny check`/`just audit` are affected, and `just check` does not run `cargo deny` (see that recipe's own comment: kept separate, network-dependent). |
 | T-232 | open | found by C3d (this session), stated as scoped out rather than dropped silently | **The C3d download manager (`crates/ferrite-ui/src/lib.rs`'s `run_download`/`DownloadCurrentPage`) has no in-page `<a download>` click interception — the only trigger is a manual "Download current page" action in the Library panel's Downloads tab.** Real browsers also intercept a clicked download link/attribute inside the page itself and route it to the download manager instead of navigating. Doing that for real would need either a Servo hook this session did not find evidence of at this pinned version (mirroring the same "Servo has no X API at this version" finding zoom/find-in-page ran into) or a heuristic layered on top of `execute_js` (e.g. intercepting clicks via injected JS and inspecting `download`/`href` attributes) — genuinely more design work than this pass's stated scope, and the C3d brief explicitly named this cut as acceptable rather than required. Left open rather than silently narrowing the feature's description. |
+| T-233 | open | found by the new-tab hero pass (this session), stated as scoped out rather than dropped silently | **The new-tab hero's quick-access-tile favicon fetch (`crates/ferrite-ui/src/lib.rs`'s `fetch_tile_favicon`) only ever tries a site's fixed `https://<host>/favicon.ico` path — it never parses the page's own HTML for a `<link rel="icon">` at a different path.** Some real sites only serve their icon that way, so a tile whose site does this shows its monogram fallback forever, not just until the fetch completes — an accepted, explicitly-scoped miss per this pass's own brief (parsing `<link rel="icon">` needs a real page fetch/HTML parse, materially more work than one fixed-path request), not a bug. A smaller, related gap found in the same pass: a cache file that fails to decode (`decode_favicon_rgba` returns `None` on a cache hit) is never retried within the same run — only a cache file this exact code path could ever write is expected at that location, so this can only really happen from a hand-edited/foreign file, but it's worth closing alongside the `<link rel="icon">` gap if either is ever picked up for real. |
 
 ## Notes for whoever picks up A1 next
 

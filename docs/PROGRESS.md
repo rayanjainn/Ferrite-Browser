@@ -3976,3 +3976,202 @@ click interception is out of scope for this pass — the download
 manager's only trigger is the Library panel's manual "Download current
 page" action). Everything else already tracked in `docs/TO-DO.md`
 untouched, as before.
+
+## 2026-09-24 — coordinator — new-tab hero: real quick-access-tile favicons + redesigned hero page
+
+**Scope:** the project owner's own two-part request against the live
+screenshots ("can we change the icons here and use the actual website
+icons, also can we have a better hero page, when no site is loaded"),
+against `fn new_tab_page` in `crates/ferrite-ui/src/lib.rs`. Same branch,
+`feat/new-tab-hero-and-site-icons`, created off `main` after C1–C3d had
+already landed there. `crates/ferrite-ui/` plus root `Cargo.toml`/
+`Cargo.lock`/`deny.toml` only, per this pass's own stated boundary —
+`ferrite-ipi`/`ferrite-agent`/`ferrite-servo`/the consent-dry-run
+architecture were not touched.
+
+**Problem, confirmed by reading the file before changing anything:** the
+six quick-access tiles (DuckDuckGo/Rust Docs/GitHub/Servo/Hacker News/
+Wikipedia) rendered a literal `text("[D]")`/`text("[R]")`/... bracketed-
+letter string as their "icon" — never a real favicon. The page around them
+was a flat, single-`palette.base`-background column: bare "Fe"/"ferrite"/
+tagline text, the search bar, the tile row, a shortcuts pill — no
+background treatment, no section hierarchy, no depth.
+
+**1. Real favicons — fetch, on-disk cache, decode.** No image-decoding
+crate existed in this workspace before this pass (confirmed:
+`iced_widget::image::Handle::from_rgba` only displays already-decoded raw
+RGBA bytes). Added `image` (crates.io, `default-features = false, features
+= ["ico"]`, which itself pulls in `bmp`+`png` per the crate's own
+`Cargo.toml`) as a new direct `ferrite-ui` dependency. **Verified before
+adding it, per `CLAUDE.md`'s hard verification rule:** `cargo tree -p
+ferrite-ui -i image@0.25.10` shows it already resolves to that exact
+version as a transitive dependency of `libservo` (gated behind the
+`servo` feature nothing here enables by default) — pinning `image = "0.25"`
+here adds a new direct *edge*, not a new *version*, to the dependency
+graph; `Cargo.lock`'s diff is exactly one line (`+ "image 0.25.10"` under
+`ferrite-ui`'s own `dependencies`), confirming this.
+- `favicon_host`/`favicon_cache_dir`/`favicon_cache_path`/
+  `decode_favicon_rgba` (`crates/ferrite-ui/src/lib.rs`) are pure and
+  directly unit-tested — the same dependency-injection discipline
+  `resolve_download_path`/`load_bookmarks_from` already established.
+  `decode_favicon_rgba` is tested against a **real PNG**, encoded in the
+  test itself via the same `image` crate (`RgbaImage::write_to`) and then
+  decoded back through the function under test, round-tripping the exact
+  pixel bytes — proof the decode call itself works against real image
+  bytes, not just that the code type-checks.
+- `fetch_favicon_bytes`/`fetch_tile_favicon` do the one real network
+  call + cache read/write, following the exact "spawn the I/O in the
+  background, report raw bytes back over `agent_event_tx`" shape the C3d
+  download manager's `run_download` already established — sent once at
+  real startup (`launch()`'s startup `Task::batch`, a new
+  `FetchTileFavicons` message, mirroring `ServoReady`), never from
+  `FerriteBrowser::default()`/any test path (R7). A cache write only
+  happens after a freshly-fetched response has already decoded
+  successfully, so a transient bad response (an HTML error page served
+  with 200, a truncated body) is never cached as a false "real icon" —
+  the next launch simply retries.
+- Cache: `~/.cache/ferrite-ui/favicons/<host>.ico` — the same `.cache`
+  (re-fetchable) vs. `.local/share` (irreplaceable) distinction
+  `default_bookmarks_path`/`ferrite_model::config::default_cache_dir()`
+  already establish for the same reason. Resolved once by `launch()`
+  (`favicons_cache_dir`), `None` in every test/`Default` construction —
+  `FetchTileFavicons` is then a no-op, same test-safety shape as
+  `bookmarks_path`/`downloads_dir`.
+- **Fallback:** a tile with no resolved favicon (no network, first launch
+  before the fetch completes, a `/favicon.ico` that doesn't resolve or
+  decode) shows a designed monogram — the site's first letter over a
+  colour that's a deterministic HSL hue-rotation of `palette.accent`
+  (`tile_accent`/`rgb_to_hsl`/`hsl_to_rgb`, all pure, all tested,
+  round-trip-tested against a real palette colour), one hue per tile, so
+  the row reads as six distinct, intentional tiles even before any
+  favicon has loaded — never a broken-image glyph or empty space.
+
+**Which of the six sites' `/favicon.ico` paths actually resolve — not
+established this session, stated honestly rather than guessed:** this
+sandbox's own outbound proxy blocks every one of the six domains outright.
+Tried `curl` against `https://github.com/favicon.ico` first (proxy
+special-cases `github.com` for git/API operations — got a GitHub-API-
+shaped 403, not a real favicon-fetch signal), then against all six real
+domains directly — every one failed at `curl: (56) CONNECT tunnel failed,
+response 403` before a single byte of any site's actual response was ever
+seen. Confirmed via `curl -sS "$HTTPS_PROXY/__agentproxy/status"`: this
+proxy's own reachable-host set does not include general web browsing.
+**This is a materially different, stronger position than every prior
+visual pass on this file has been able to claim, and it's stated precisely
+so it isn't overclaimed:** the fetch+cache+decode *pipeline itself* was
+proven end-to-end against real, freshly-encoded PNG bytes
+(`decode_favicon_rgba_decodes_a_real_png_round_trip`) — real `image`-crate
+decode logic, not a stub — but the *network half* (does `github.com`'s
+real `/favicon.ico` actually return a decodable image at all) was never
+exercised here, only type-checked/compiled. Say so plainly to the project
+owner rather than letting the PNG round-trip test imply more than it
+proves.
+
+**2. Hero page redesign — built on C3c's palette/pulse system, no
+parallel one introduced.**
+- **Background:** `hero_background` — a subtle top-to-bottom
+  `iced_core::gradient::Linear` fade between `palette.base` and
+  `palette.surface` (real, verified-present API on the pinned `iced`
+  0.13.1: `Background::Gradient`, `gradient::Linear::new(impl
+  Into<Radians>).add_stop(offset, color)`, `f32: Into<Radians>`), two
+  adjacent palette depth levels, not a new hue — a hint of depth behind
+  the centered content rather than a competing pattern.
+- **Brand mark:** the bare "Fe" text is now a raised, bordered badge
+  (`palette.raised` background, accent-tinted border/shadow) with a soft
+  breathing glow — `pulse_alpha`, the exact same tick-driven helper the
+  tab bar's loading dot and the content area's own "Fe" loading
+  placeholder already use (C3c), reused rather than a fourth
+  independently-authored animation. Only the badge's own text alpha
+  animates; nothing below it ever dims or waits on the tick.
+- **Search bar:** widened (560px → 600px), paired with a new leading
+  `Icon::Search` glyph (a new hand-authored SVG, `assets/icons/
+  search.svg`, matching C1's exact 24x24 stroke-based convention) sitting
+  outside the pill rather than fused into `text_input`'s own background —
+  iced 0.13's `text_input` has no `on_focus`/`on_unfocus` to drive an
+  outer container's border the way the input's own `.style` closure
+  already reacts to `text_input::Status`, so the pill keeps its existing
+  focus-reactive border/background exactly as before rather than losing
+  that to gain a fused icon. Stays the page's one unambiguous primary
+  action, per the brief.
+- **Tiles:** each tile's `"[X]"` placeholder is replaced by `tile_glyph` —
+  a rounded, tinted square housing either the real favicon image or the
+  monogram fallback, same backdrop either way so a favicon arriving
+  mid-session never makes the tile jump size/position. A new "QUICK
+  ACCESS" eyebrow label gives the row a real section identity it had none
+  of before. `QUICK_ACCESS_TILES` (a new `const` array) replaces the old
+  inline `tiles: Vec<(&str, &str, &str)>` literal as the one source of
+  truth both the fetch handler and the view now read from.
+
+**`cargo deny check` found a new duplicate-version pair
+(`image`/`png`)** the moment `image` became a real dependency —
+`iced_graphics` already carries its own, unrelated `image` 0.24 (one major
+version older), and `image` 0.25's `png` decoder is one version newer than
+`tiny-skia`/`resvg`/`sctk-adwaita`'s existing `png` 0.17, both traced and
+confirmed via `cargo deny check`'s own dependency-tree output. **Fixed,
+not filed as a new T-###:** this is the exact same structural class
+`deny.toml`'s own `[bans] skip` comment already documents for three
+earlier, unrelated batches (Servo-vs-iced/winit era mismatches; `keyring`/
+`dirs`; C1's `svg` feature/T-231) — two more `skip` entries, in the file's
+own established style/precedent (T-231's own row named this exact move —
+"left for whoever owns `deny.toml` next" — as the accepted fix), not a new
+open item.
+
+**Tests, `crates/ferrite-ui/src/lib.rs` + `icons.rs`:** 16 new in
+`lib.rs`'s `mod tests` (`favicon_host_extracts_the_lowercased_host_from_a_
+tile_url`, `favicon_host_is_none_for_an_unparseable_url`,
+`every_quick_access_tile_url_has_a_resolvable_host`,
+`favicon_cache_path_names_the_host_under_the_given_cache_dir`,
+`decode_favicon_rgba_decodes_a_real_png_round_trip`,
+`decode_favicon_rgba_is_none_for_non_image_bytes`,
+`decode_favicon_rgba_is_none_for_empty_bytes`,
+`rgb_to_hsl_then_hsl_to_rgb_round_trips_a_real_colour`,
+`rgb_to_hsl_handles_a_grey_with_no_saturation`,
+`tile_accent_rotates_hue_deterministically_and_evenly`,
+`tile_monogram_is_the_uppercased_first_character`,
+`fetch_tile_favicons_is_a_no_op_without_a_resolved_cache_dir`,
+`fetch_tile_favicons_spawns_one_task_per_tile_with_a_cache_dir_set`,
+`tile_favicon_ready_sets_the_matching_slot`,
+`tile_favicon_ready_with_an_out_of_range_index_is_ignored_not_a_panic`,
+`default_ferrite_browser_starts_with_no_resolved_tile_favicons_or_
+cache_dir`) plus 1 in `icons.rs` (the `Icon::Search` variant folded into
+the existing `every_icon_variant_embeds_non_empty_well_formed_svg`/
+`every_icon_shares_the_same_viewbox` table tests). `ferrite-ui` now 117
+tests (up from 101), every pre-existing test passing unmodified. No live
+network reachable from any of them: `FetchTileFavicons`'s two
+`#[tokio::test]`s never `.await` past the point of spawning, the exact
+same R7 reasoning this file's own test-module header already documents
+for the download manager's tests.
+
+**Verified:** `cargo build`/`clippy --all-targets -D warnings`/`fmt
+--check`/`test` on `ferrite-ui` individually after each meaningful change,
+then the full workspace: `cargo build --workspace`, `cargo fmt --all
+--check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo
+test --workspace` (every crate green, 0 failures), `cargo machete` (no
+unused dependencies), `cargo deny check` (`advisories ok, bans ok,
+licenses ok, sources ok`, same pre-existing Servo-git-source warning every
+agent since A3 has logged), `sh scripts/check_purge.sh`, `sh
+scripts/check_no_archive_links.sh` — all clean.
+
+**Not verified live — stated plainly, same limitation every UI-touching
+session on this branch has stated:** this sandbox has no attached display
+and cannot build the real `servo` feature, so neither the gradient
+background, the logo badge's glow, the search bar's new layout, nor a
+single real tile favicon was ever actually rendered or screenshot-checked
+— every claim above is a description of the code change and what its
+pure/state-machine logic does under test, not an assertion about how it
+looks on screen. Beyond that general limitation, this pass's network half
+specifically was never exercised for real either (see the favicon-fetch
+section above) — a strictly narrower, more honestly-scoped claim than "not
+verified" alone would suggest, since the decode half *was* proven for
+real. The user's own relaunch, on a real machine with a real display, a
+real network path to these six sites, and the `servo` feature built, is
+the verification none of the above can substitute for.
+
+**Commits:** `601137e`.
+
+**Known issues discovered, not fixed:** T-233 (favicon fetch only tries
+the fixed `/favicon.ico` path, never parses a page's own `<link
+rel="icon">`; a cache file that fails to decode is never retried within
+the same run) — both stated as accepted scope cuts in this pass's own
+brief, not silently dropped. Everything else already tracked in
+`docs/TO-DO.md` untouched, as before.
