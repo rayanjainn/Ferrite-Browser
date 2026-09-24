@@ -3196,7 +3196,7 @@ tests catch a malformed/empty SVG; they cannot confirm the 7 new glyphs
 are actually recognizable at 12px in the sidebar, which is a real,
 separate claim only the user's own relaunch can settle.
 
-**Commits:** (see the commit landing alongside this entry).
+**Commits:** `8bb627f`.
 
 **Known issues discovered, not fixed:** none new. The "visible reasoning"
 scope decision above is a deliberate boundary, not a bug — flagged here
