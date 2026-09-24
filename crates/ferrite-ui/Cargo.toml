@@ -52,3 +52,8 @@ reqwest = { workspace = true }
 # audit panel already formats `AuditEntry::timestamp` (`chrono`, already a
 # workspace dependency used by `ferrite-audit-log`).
 chrono = { workspace = true }
+# New-tab hero (real quick-access-tile favicons): decodes a fetched
+# `/favicon.ico` response into raw RGBA8 for `iced_widget::image::Handle::
+# from_rgba` — see the workspace `Cargo.toml`'s own comment on this
+# dependency for why this adds no new version to the dependency graph.
+image = { workspace = true }

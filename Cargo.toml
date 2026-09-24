@@ -101,6 +101,22 @@ libservo = { git = "https://github.com/servo/servo", tag = "v0.0.5" }
 iced = { version = "0.13", features = ["tokio"] }
 iced_widget = { version = "0.13", features = ["image", "svg", "lazy"] }
 urlencoding = "2"
+# New-tab hero (real quick-access-tile favicons): `iced_widget::image::Handle::
+# from_rgba` only displays already-decoded raw RGBA bytes — it does not decode
+# a fetched `.ico`/PNG itself, so a real image-decoding crate is needed for
+# the first time in this workspace. `image` is small, extremely standard and
+# widely audited, and already resolves to exactly this version (0.25.10) as a
+# transitive dependency of `libservo` (`arboard`/`embedder_traits`, gated
+# behind the `servo` feature nothing here enables by default — confirmed via
+# `cargo tree -p ferrite-ui -i image@0.25.10`), so pinning it here as a direct
+# dependency does not add a new version to the graph, only a new direct edge
+# to one already present. `default-features = false, features = ["ico"]`
+# (which itself pulls in `bmp`+`png`, per the crate's own `Cargo.toml`) is the
+# minimum needed to decode a real `/favicon.ico` response, which in practice
+# serves either an actual multi-frame ICO container or a plain PNG at that
+# path — `image::load_from_memory` sniffs the real format from its magic
+# bytes, not the URL's extension, so both cases decode through the same call.
+image = { version = "0.25", default-features = false, features = ["ico"] }
 
 # ── path deps (in-workspace crates) ──────────────────────────────────────
 ferrite-agent = { path = "crates/ferrite-agent" }

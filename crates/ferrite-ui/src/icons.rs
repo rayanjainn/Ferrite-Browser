@@ -86,6 +86,11 @@ pub enum Icon {
     /// dedicated toolbar button per feature — see `lib.rs`'s toolbar
     /// composition comment for why).
     Menu,
+    /// New-tab hero redesign: a leading glyph inside the search bar,
+    /// signalling "type here to search or navigate" the way every
+    /// mainstream browser's own new-tab search field does — see
+    /// `lib.rs::new_tab_page`.
+    Search,
 }
 
 // C3c left a note here that a bookmark/star icon was drawn but deliberately
@@ -131,6 +136,7 @@ pub fn icon_bytes(kind: Icon) -> &'static [u8] {
         Icon::BookmarkOutline => include_bytes!("../assets/icons/bookmark-outline.svg"),
         Icon::BookmarkFilled => include_bytes!("../assets/icons/bookmark-filled.svg"),
         Icon::Menu => include_bytes!("../assets/icons/menu.svg"),
+        Icon::Search => include_bytes!("../assets/icons/search.svg"),
     }
 }
 
@@ -155,7 +161,7 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, color: Color) -> Element<'a,
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 26] = [
+    const ALL: [Icon; 27] = [
         Icon::Back,
         Icon::Forward,
         Icon::Reload,
@@ -182,6 +188,7 @@ mod tests {
         Icon::BookmarkOutline,
         Icon::BookmarkFilled,
         Icon::Menu,
+        Icon::Search,
     ];
 
     /// Every icon variant embeds real, well-formed SVG data — catches a
