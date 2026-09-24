@@ -307,20 +307,129 @@ pub fn execute_action(engine: &mut dyn BrowserEngine, action: &AgentAction) -> S
 /// comment) can still ask the model with the exact same prompt this loop
 /// uses, rather than a second, independently-maintained copy of the text.
 pub const SYSTEM_PROMPT: &str = r#"You are Ferrite, an agentic browser assistant.
-Respond with exactly one JSON object describing your next action, matching
-this shape: {"action": "<name>", ...fields}. Valid actions: navigate{url},
-go_back, go_forward, reload, read_dom, query{selector}, read_text{selector},
-click{selector}, type_text{selector,text}, fill_form{fields},
-select_option{selector,value}, scroll{dx,dy}, wait_for_selector{selector},
-wait_idle, screenshot, download{url}, clipboard_read,
-clipboard_write{text}, js_execute{script}, finish{answer}.
-Respond with the JSON object only, no other text."#;
+
+Respond with EXACTLY ONE valid JSON object and nothing else.
+
+The JSON object MUST have an "action" field. The value of "action" must be ONLY the action name. NEVER put parameters inside the "action" value.
+
+Valid JSON formats:
+
+{"action":"navigate","url":"https://example.com"}
+{"action":"go_back"}
+{"action":"go_forward"}
+{"action":"reload"}
+{"action":"read_dom"}
+{"action":"query","selector":"CSS_SELECTOR"}
+{"action":"read_text","selector":"CSS_SELECTOR"}
+{"action":"click","selector":"CSS_SELECTOR"}
+{"action":"type_text","selector":"CSS_SELECTOR","text":"TEXT"}
+{"action":"fill_form","fields":[["CSS_SELECTOR","TEXT"]]}
+{"action":"select_option","selector":"CSS_SELECTOR","value":"VALUE"}
+{"action":"scroll","dx":0,"dy":500}
+{"action":"wait_for_selector","selector":"CSS_SELECTOR"}
+{"action":"wait_idle"}
+{"action":"screenshot"}
+{"action":"download","url":"https://example.com/file"}
+{"action":"clipboard_read"}
+{"action":"clipboard_write","text":"TEXT"}
+{"action":"js_execute","script":"JAVASCRIPT"}
+{"action":"finish","answer":"FINAL ANSWER"}
+
+IMPORTANT:
+- "action" must contain ONLY one of the action names above.
+- For type_text, "selector" and "text" MUST be separate JSON fields.
+- For fill_form, "fields" MUST be an array of [selector, text] pairs.
+- For select_option, "selector" and "value" MUST be separate JSON fields.
+- For scroll, "dx" and "dy" MUST be separate JSON fields.
+- NEVER write type_text{selector,text}.
+- NEVER write {"action":"type_text{...}"}.
+- NEVER put parameters inside the "action" string.
+- NEVER use an object/map for fill_form fields.
+- Do NOT use markdown.
+- Do NOT add explanations.
+- Output JSON only."#;
 
 /// Version tag passed to [`ferrite_model::CompletionRequest::with_system_prompt`]
 /// alongside [`SYSTEM_PROMPT`] — kept as a named constant so both this
 /// module and any external caller reusing the same prompt text pass the
 /// identical version rather than two independently-chosen literals.
 pub const SYSTEM_PROMPT_VERSION: u32 = 1;
+
+/// Maximum approximate character budget for the conversation history sent
+/// to the model on each step.
+///
+/// We deliberately stay well below a real model's context window. Character
+/// count is only an approximation of tokens, so this leaves substantial
+/// headroom for tokenization differences and the system prompt.
+const MAX_HISTORY_CHARS: usize = 120_000;
+
+/// Maximum number of characters retained from a single browser observation
+/// before it is added to the conversation.
+///
+/// Browser text/clipboard/JS results can be unexpectedly large, so one
+/// observation must never be allowed to dominate the context on its own.
+const MAX_OBSERVATION_CHARS: usize = 8_000;
+
+/// Truncates `observation` to [`MAX_OBSERVATION_CHARS`] before it is added
+/// to the model conversation. Keeps both the head (usually the useful
+/// description) and the tail (errors/results often appear there).
+///
+/// `pub` for the same reason [`execute_action`] and [`SYSTEM_PROMPT`] are:
+/// `ferrite-ui`'s live loop builds its own conversation history step by
+/// step (see those items' doc comments for why it cannot call
+/// [`run_agent_loop`] directly) and must apply the identical budget to it,
+/// rather than a second, independently-tuned one.
+#[must_use]
+pub fn compact_observation(observation: &str) -> String {
+    if observation.len() <= MAX_OBSERVATION_CHARS {
+        return observation.to_string();
+    }
+
+    let head_target = MAX_OBSERVATION_CHARS * 3 / 4;
+    let tail_target = MAX_OBSERVATION_CHARS - head_target;
+
+    let head: String = observation.chars().take(head_target).collect();
+    let tail: String = {
+        let mut rev: Vec<char> = observation.chars().rev().take(tail_target).collect();
+        rev.reverse();
+        rev.into_iter().collect()
+    };
+
+    let omitted = observation
+        .chars()
+        .count()
+        .saturating_sub(head.chars().count())
+        .saturating_sub(tail.chars().count());
+
+    format!(
+        "{head}\n\n[... observation truncated: approximately {omitted} characters omitted ...]\n\n{tail}"
+    )
+}
+
+/// Keeps the original task prompt plus the newest action/observation pairs
+/// while `messages`' total content size stays within [`MAX_HISTORY_CHARS`].
+///
+/// Messages are stored as `[task, action, observation, action, observation,
+/// ...]` (see [`run_agent_loop`]), so repeatedly dropping the oldest pair
+/// after `messages[0]` preserves the original task while discarding the
+/// oldest, least-relevant turns first.
+///
+/// `pub` for the same reason as [`compact_observation`].
+pub fn trim_message_history(messages: &mut Vec<Message>) {
+    loop {
+        let size: usize = messages.iter().map(|m| m.content.len()).sum();
+        if size <= MAX_HISTORY_CHARS || messages.len() <= 3 {
+            break;
+        }
+
+        // Drop the oldest action/observation pair, keeping messages[0] (the
+        // original task) untouched.
+        messages.remove(1);
+        if messages.len() > 1 {
+            messages.remove(1);
+        }
+    }
+}
 
 /// Runs the plan → select tool → act → observe → repeat loop until the
 /// model finishes, or a budget/loop-detection stop fires.
@@ -430,7 +539,11 @@ pub async fn run_agent_loop<E: BrowserEngine>(
         messages.push(Message::assistant(
             serde_json::to_string(&action).unwrap_or_default(),
         ));
-        messages.push(Message::user(format!("Observation: {observation}")));
+        let compacted_observation = compact_observation(&observation);
+        messages.push(Message::user(format!(
+            "Observation: {compacted_observation}"
+        )));
+        trim_message_history(&mut messages);
         observations.push(observation);
         actions_taken.push(action);
     }
@@ -699,6 +812,71 @@ mod tests {
             result.observations[0].contains("https://a.example"),
             "observation must surface the real origin the action returned: {}",
             result.observations[0]
+        );
+    }
+
+    // ── compact_observation / trim_message_history: context-budget guards ──
+
+    #[test]
+    fn compact_observation_leaves_a_short_observation_unchanged() {
+        let short = "navigated to https://a.example/ (origin https://a.example)";
+        assert_eq!(compact_observation(short), short);
+    }
+
+    #[test]
+    fn compact_observation_truncates_a_long_observation_keeping_head_and_tail() {
+        let long = "A".repeat(20_000) + "TAIL_MARKER";
+        let compacted = compact_observation(&long);
+
+        assert!(compacted.len() < long.len());
+        assert!(compacted.starts_with('A'));
+        assert!(
+            compacted.ends_with("TAIL_MARKER"),
+            "the tail (often where errors/results appear) must survive truncation: {compacted}"
+        );
+        assert!(compacted.contains("truncated"));
+    }
+
+    #[test]
+    fn trim_message_history_keeps_the_original_task_and_drops_the_oldest_pairs_first() {
+        let mut messages = vec![Message::user("original task")];
+        for i in 0..50 {
+            messages.push(Message::assistant(format!("action {i}")));
+            messages.push(Message::user("O".repeat(5_000)));
+        }
+
+        trim_message_history(&mut messages);
+
+        let size: usize = messages.iter().map(|m| m.content.len()).sum();
+        assert!(
+            size <= MAX_HISTORY_CHARS,
+            "history must be trimmed to the budget: {size}"
+        );
+        assert_eq!(
+            messages[0].content, "original task",
+            "the original task must never be dropped"
+        );
+        assert_eq!(
+            messages.last().unwrap().content,
+            "O".repeat(5_000),
+            "the newest turns must be kept, not the oldest"
+        );
+    }
+
+    #[test]
+    fn trim_message_history_never_drops_below_the_task_plus_one_pair() {
+        let mut messages = vec![
+            Message::user("original task"),
+            Message::assistant("action"),
+            Message::user("O".repeat(1_000_000)),
+        ];
+
+        trim_message_history(&mut messages);
+
+        assert_eq!(
+            messages.len(),
+            3,
+            "must stop trimming once only the task and its newest pair remain, even over budget"
         );
     }
 }
