@@ -152,8 +152,18 @@ mod inner {
         load_status: Rc<std::cell::RefCell<LoadStatus>>,
         /// Shared current URL — written by delegate callbacks, read by session in `spin()`.
         current_url: Rc<std::cell::RefCell<String>>,
-        /// Navigation count — incremented on each `Complete`; used for `can_go_back()`.
-        nav_count: Rc<std::cell::RefCell<u32>>,
+        /// Servo's own native session-history list for this tab
+        /// (`WebViewDelegate::notify_history_changed`) — `(entries, current
+        /// index)`, written whenever the WebView's history changes (a real
+        /// navigation, `go_back`/`go_forward`), read back by
+        /// `HeadlessServoSession::sync_and_read()`. Replaces the old
+        /// `nav_count`-based approximation this field's predecessor used
+        /// for `can_go_back()` (a bare "how many `Complete` events have we
+        /// seen" counter that could never tell forward-history apart at
+        /// all — `can_go_forward()` simply returned `false`
+        /// unconditionally). See `HeadlessServoSession::can_go_back`/
+        /// `can_go_forward`/`history` for what reads this.
+        history: Rc<std::cell::RefCell<(Vec<String>, usize)>>,
         /// Shared page title — written by `notify_page_title_changed`, read in `spin()`.
         page_title: Rc<std::cell::RefCell<Option<String>>>,
         /// Accumulated JS console errors — appended by `notify_console_message`, drained by
@@ -180,7 +190,6 @@ mod inner {
                         .unwrap_or_else(|| "<unknown>".to_string());
                     *self.current_url.borrow_mut() = url;
                     *self.load_status.borrow_mut() = LoadStatus::Complete;
-                    *self.nav_count.borrow_mut() += 1;
                 }
                 _ => {
                     // Treat all non-Complete statuses (Loading, Failed, etc.) as Loading.
@@ -200,6 +209,24 @@ mod inner {
                 let rgba = favicon_to_rgba8(image.width, image.height, image.format, image.data());
                 (image.width, image.height, rgba)
             });
+        }
+
+        /// Servo's own native session-history hook — fires with the whole
+        /// history list and the current index on every change (a real
+        /// navigation, `go_back`/`go_forward`), giving this crate real
+        /// forward/back history per tab for free rather than needing to
+        /// hand-track it from URL-change events. `entries` is stored as
+        /// `String` (via `Url::to_string()`) rather than the `url::Url`
+        /// type itself, matching how `current_url`/`shared_url` already
+        /// store URLs elsewhere in this same struct.
+        fn notify_history_changed(
+            &self,
+            _webview: servo::WebView,
+            entries: Vec<url::Url>,
+            current: usize,
+        ) {
+            let urls: Vec<String> = entries.iter().map(url::Url::to_string).collect();
+            *self.history.borrow_mut() = (urls, current);
         }
 
         fn show_console_message(
@@ -257,8 +284,13 @@ mod inner {
         shared_load_status: Rc<std::cell::RefCell<LoadStatus>>,
         /// Shared URL cell — written by `HeadlessDelegate`, read in `spin()`.
         shared_url: Rc<std::cell::RefCell<String>>,
-        /// Navigation count shared with `HeadlessDelegate`.
-        shared_nav_count: Rc<std::cell::RefCell<u32>>,
+        /// Shared session-history cell (`(entries, current_index)`) —
+        /// written by `HeadlessDelegate::notify_history_changed`, read in
+        /// `sync_and_read()`. See that field's doc comment on
+        /// `HeadlessDelegate` for why this replaced `nav_count`.
+        shared_history: Rc<std::cell::RefCell<(Vec<String>, usize)>>,
+        /// Most recently synced session history (updated in `sync_and_read()`).
+        last_history: (Vec<String>, usize),
         /// Shared page title cell — written by `HeadlessDelegate`, read in `spin()`.
         shared_page_title: Rc<std::cell::RefCell<Option<String>>>,
         /// Most recently synced page title (updated in `spin()`).
@@ -317,7 +349,8 @@ mod inner {
             // ── Shared delegate ↔ session state ────────────────────────────
             let shared_load_status = Rc::new(std::cell::RefCell::new(LoadStatus::Loading));
             let shared_url = Rc::new(std::cell::RefCell::new("about:blank".to_string()));
-            let shared_nav_count = Rc::new(std::cell::RefCell::new(0u32));
+            let shared_history: Rc<std::cell::RefCell<(Vec<String>, usize)>> =
+                Rc::new(std::cell::RefCell::new((Vec::new(), 0)));
             let shared_page_title: Rc<std::cell::RefCell<Option<String>>> =
                 Rc::new(std::cell::RefCell::new(None));
             let shared_console_errors: Rc<std::cell::RefCell<Vec<String>>> =
@@ -345,7 +378,7 @@ mod inner {
                 audit_log,
                 load_status: shared_load_status.clone(),
                 current_url: shared_url.clone(),
-                nav_count: shared_nav_count.clone(),
+                history: shared_history.clone(),
                 page_title: shared_page_title.clone(),
                 console_errors: shared_console_errors.clone(),
                 favicon: shared_favicon.clone(),
@@ -369,7 +402,8 @@ mod inner {
                 current_url: "about:blank".to_string(),
                 shared_load_status,
                 shared_url,
-                shared_nav_count,
+                shared_history,
+                last_history: (Vec::new(), 0),
                 shared_page_title,
                 last_page_title: None,
                 shared_console_errors,
@@ -432,15 +466,32 @@ mod inner {
             &self.current_url
         }
 
-        /// Returns `true` if there is at least one page to go back to.
+        /// Returns `true` if there is at least one page to go back to —
+        /// backed by Servo's own native session history
+        /// (`WebViewDelegate::notify_history_changed`), not an
+        /// approximated `Complete`-event counter.
         pub fn can_go_back(&self) -> bool {
-            *self.shared_nav_count.borrow() > 1
+            self.last_history.1 > 0
         }
 
-        /// Returns `true` if there are forward pages in the navigation history.
+        /// Returns `true` if there are forward pages in the navigation
+        /// history — real, not hardcoded `false`: Servo's own history list
+        /// (`self.last_history`) carries the full entry list and the
+        /// current index, so "is there an entry after the current one" is
+        /// answerable directly.
         pub fn can_go_forward(&self) -> bool {
-            // Forward history is not yet tracked.  Future: count go_back() calls.
-            false
+            self.last_history.1 + 1 < self.last_history.0.len()
+        }
+
+        /// The full session-history list and current index for this tab —
+        /// `(entries, current_index)`, straight from Servo's own
+        /// `WebViewDelegate::notify_history_changed`. Exposed for a
+        /// History panel that wants this tab's real forward/back order,
+        /// distinct from `ferrite-ui`'s own browser-wide, recency-ordered
+        /// visit list (see that crate's `FerriteBrowser::history` doc
+        /// comment for why the two are different, deliberately).
+        pub fn history(&self) -> (&[String], usize) {
+            (&self.last_history.0, self.last_history.1)
         }
 
         /// Pump the shared Servo engine for one turn.
@@ -839,6 +890,10 @@ impl HeadlessServoSession {
 
     pub fn can_go_forward(&self) -> bool {
         false
+    }
+
+    pub fn history(&self) -> (&[String], usize) {
+        (&[], 0)
     }
 
     pub fn page_title(&self) -> Option<&str> {
