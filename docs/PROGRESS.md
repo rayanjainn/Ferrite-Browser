@@ -3101,7 +3101,104 @@ change (the coordinate-space mismatch that existed, and exactly how each
 new line removes it), not an assertion about how it looks or feels — the
 user's own relaunch is the real verification, same as C1's.
 
-**Commits:** (see the commit landing alongside this entry).
+**Commits:** `46f9612`, `6a63754` (cargo-deny verification follow-up).
 
 **Known issues discovered, not fixed:** none new. Existing T-223 (iced
 0.13's `button` has no `Focusable` impl) is unrelated and untouched.
+
+## 2026-09-24 — coordinator — C2: agent panel redesign — real per-step icon/label/detail/result feed
+
+**Scope:** second item of this session's C-series plan, `crates/ferrite-ui`
+only. Rebuilds `view_agent_sidebar`'s activity log per the original C2 goal
+(`docs/handoffs/c01.md`'s "what C2 does next" plus this session's own
+planning turn): "live, step-by-step action view... a scrollable action
+history with per-step results (not just the flat `agent_tool_log: Vec
+<String>` label list it renders today)". `AgentStepReady`/`LiveRunReady`/
+run-id staleness checks and the consent panel itself are untouched, per
+that same plan's own constraint.
+
+**What changed, concretely:**
+
+1. **`agent_tool_log: Vec<String>` → `agent_log: Vec<AgentLogEntry>`.**
+   `AgentLogEntry` is `Note(String)` (dry-run-phase progress text, e.g.
+   "dry run complete — checking for unexpected activity" — unchanged
+   content, just a new variant instead of a bare string) or `Step { icon,
+   label, detail, result, blocked }` — real structure the old flat log
+   never carried: `label`/`detail` come from two new pure functions,
+   `action_label`/`action_detail` (replacing `action_log_label`, which
+   only ever produced one opaque `"[navigate] https://..."`-shaped
+   string), and — the actual gap this closes — `result` is the real
+   string `execute_action` returned (or the fixed "blocked by user
+   consent" text when `is_action_rejected` fires first), not just the
+   fact that some action ran. `blocked: bool` is threaded straight from
+   `is_action_rejected`'s own return value (previously only used to
+   choose *which* string to compute, then discarded) so the sidebar can
+   style a blocked step differently.
+2. **Icons per action type**, reusing C1's `icon()`/`Icon` machinery, not
+   a second rendering path. `icon_for_action` groups `AgentAction`'s 19
+   variants into 8 icons by the same action-class boundaries `ferrite_core
+   ::Primitive`'s own taxonomy already uses (navigate/read/click/write/
+   scroll+wait+screenshot/download/clipboard), rather than one icon per
+   raw variant — deliberately: a JsExecute step reuses `Icon::Console`
+   (already this crate's own "code" glyph, from the JS-console toggle
+   button) and `Finish` reuses `Icon::Approve` (its outcome), both pinned
+   by test as intentional reuse, not placeholders. 7 new icons drawn for
+   the remaining groups (`navigate`, `read`, `click`, `write`, `activity`,
+   `download`, `clipboard` — `crates/ferrite-ui/assets/icons/*.svg`), in
+   the exact style C1 established (`viewBox="0 0 24 24" fill="none"
+   stroke="#000000" stroke-width="2" stroke-linecap="round"
+   stroke-linejoin="round"`, confirmed by reading three existing icons
+   before drawing any new one) — `Icon`'s enum/`icon_bytes` grew from 14
+   to 21 variants, `icons::tests`' well-formedness/shared-viewBox tests
+   updated to the new count and passing.
+3. **A live "Step N/max" indicator** in the sidebar header while
+   `live_loop` is `Some` — reads `live.actions_taken.len()`/
+   `live.budget.max_steps`, both fields that already existed on
+   `LiveAgentLoop` for budget accounting; no new state needed.
+4. **"Visible plan/reasoning" — honestly scoped, not silently dropped.**
+   The original C2 goal names this explicitly. `AgentAction`'s wire
+   format (what the model is asked to return, parsed in
+   `ferrite_agent::browser_loop`) carries no reasoning/thought field at
+   all today — adding one would mean changing that shared type's JSON
+   schema (used by both the live loop and the dry run, in a different
+   crate, `ferrite-agent`, outside this charter's `crates/ferrite-ui`
+   file scope) and touching the `SYSTEM_PROMPT` this same session's
+   earlier fix (`bce1521`) already changed once today for a different
+   reason. Judged real, cross-crate, higher-risk work deserving its own
+   deliberate pass, not a rider on a UI-only charter — not attempted here.
+   What ships instead is the closest achievable thing within scope: each
+   step's action *and* its real result together, which is genuine
+   new visibility (what it did and what happened), just not the model's
+   own free-text reasoning for choosing it.
+
+**Tests:** `cargo test -p ferrite-ui` — 39 passed, 0 failed (up from 35; 4
+new: `action_label_and_detail_are_distinct_per_action_kind`,
+`icon_for_action_groups_by_action_class_not_one_icon_per_variant`,
+`agent_step_ready_records_a_real_step_with_its_actual_result` (asserts
+`state.agent_log`'s pushed `Step` carries the selector as `detail` and the
+real "error: no active browser session" fallback as `result` — R7, no
+Servo session exists in this test fixture — rather than a fabricated
+success string), `agent_step_ready_records_a_blocked_step_as_blocked_not_a
+_silent_success`; every pre-existing test passes unmodified, including
+`icons::tests::every_icon_variant_embeds_non_empty_well_formed_svg`/
+`..._shares_the_same_viewbox` against the 7 new icons).
+
+**Verified:** `cargo build --workspace`, `cargo test --workspace` (every
+crate green, 0 failures), `cargo fmt --all --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo machete` all clean. No
+`Cargo.toml` touched this session (all 7 new icons are `include_bytes!`
+of new files, no new crate dependency), so no `cargo deny` re-run needed
+beyond C3a's already-clean one earlier this session.
+
+**Not verified live:** same standing limitation as every UI-touching
+session — no attached display in this sandbox. The icon well-formedness
+tests catch a malformed/empty SVG; they cannot confirm the 7 new glyphs
+are actually recognizable at 12px in the sidebar, which is a real,
+separate claim only the user's own relaunch can settle.
+
+**Commits:** (see the commit landing alongside this entry).
+
+**Known issues discovered, not fixed:** none new. The "visible reasoning"
+scope decision above is a deliberate boundary, not a bug — flagged here
+rather than filed as a T-### since it's a decision needing the user's own
+input on whether it's wanted at all, not a defect with an agreed fix.
