@@ -205,7 +205,7 @@ use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier, Sampli
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{
-    keyboard, time, window, Background, Border, Color, Element, Length, Padding, Size,
+    keyboard, time, window, Background, Border, Color, Element, Font, Length, Padding, Size,
     Subscription, Task, Theme,
 };
 use iced_widget::image::{Handle as ImageHandle, Image as ServoImage};
@@ -600,6 +600,56 @@ impl<'a> ferrite_ipi::dry_run::DryRunDriver for BrowserLoopDryRunDriver<'a> {
 const MOD_LABEL: &str = "Cmd";
 #[cfg(not(target_os = "macos"))]
 const MOD_LABEL: &str = "Ctrl";
+
+// ---------------------------------------------------------------------------
+// Fonts
+// ---------------------------------------------------------------------------
+//
+// Every prior UI pass on this file (C1's design system through the new-tab
+// hero redesign) styled colour, spacing, radius, and animation deliberately
+// — but never once touched the font, so every one of those passes actually
+// rendered in whatever generic sans-serif iced falls back to when no font is
+// configured, not a considered typeface. Embedding one real, well-regarded
+// UI font and setting it as the app's default is a single, small change
+// with more effect on how "finished" this app looks than most individual
+// widget-styling passes — text is a majority of every screen in a browser
+// chrome.
+//
+// Inter (SIL Open Font License 1.1 — full text at `assets/fonts/OFL.txt`,
+// the standard way to embed and redistribute an OFL font): a widely used,
+// highly legible UI typeface designed specifically for screens at small
+// sizes, already the de facto choice for exactly this kind of clean,
+// modern app chrome (it is not a random pick — it is what most of the
+// professional SaaS/app UIs this project's own "not cheap, aesthetic"
+// goal is implicitly benchmarked against actually use). Four static
+// weights are embedded, not Inter's variable-font file: iced's text
+// shaper (cosmic-text/fontdb) selects the closest already-registered
+// *face* for a requested `Font::weight` — it does not interpolate a
+// variable font's weight axis — so multiple static faces is the
+// mechanically correct way to get more than one real weight out of one
+// family here, not an arbitrary choice to embed four separate files.
+
+const FONT_INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+const FONT_INTER_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Inter-Medium.ttf");
+const FONT_INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
+const FONT_INTER_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
+
+/// The family name all four embedded Inter weights register themselves
+/// under (their own font-file name table, not something assigned here) —
+/// `launch()`'s `default_font` and every [`font_weight`] call go through
+/// this one constant rather than repeating the literal.
+const FONT_FAMILY: &str = "Inter";
+
+/// [`Font::with_name(FONT_FAMILY)`] at a given `Weight` — the one place a
+/// call site that wants a heavier embedded face (a heading, the wordmark,
+/// emphasised label text) goes, so which of the four embedded weights
+/// exist is never spelled out ad hoc at each call site.
+const fn font_weight(weight: iced::font::Weight) -> Font {
+    Font {
+        weight,
+        ..Font::with_name(FONT_FAMILY)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Layout constants
@@ -5051,10 +5101,14 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             let failed_url = state.tab_urls.get(active).map(String::as_str).unwrap_or("");
             container(
                 column![
-                    text("ERR").size(42).color(palette.danger),
+                    text("ERR")
+                        .size(42)
+                        .font(font_weight(iced::font::Weight::Bold))
+                        .color(palette.danger),
                     container(text("")).height(10),
                     text("Page could not be loaded")
                         .size(22)
+                        .font(font_weight(iced::font::Weight::Semibold))
                         .color(palette.text),
                     container(text("")).height(6),
                     text(failed_url).size(13).color(palette.text_dim),
@@ -5127,10 +5181,13 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             let pulse = pulse_alpha(state.progress_offset, 1.0, 0.25, 0.20);
             container(
                 column![
-                    text("Fe").size(40).color(Color {
-                        a: pulse,
-                        ..palette.accent
-                    }),
+                    text("Fe")
+                        .size(40)
+                        .font(font_weight(iced::font::Weight::Bold))
+                        .color(Color {
+                            a: pulse,
+                            ..palette.accent
+                        }),
                     container(text("")).height(10),
                     text("Loading...").size(14).color(palette.text_dim),
                 ]
@@ -5281,10 +5338,15 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // on this tick, per this redesign's own brief (the search bar stays the
     // clear, immediately-usable primary action from the very first frame).
     let logo_pulse = pulse_alpha(state.progress_offset, 0.6, 0.80, 0.20);
-    let logo_badge = container(text("Fe").size(30).color(Color {
-        a: logo_pulse,
-        ..palette.accent
-    }))
+    let logo_badge = container(
+        text("Fe")
+            .size(30)
+            .font(font_weight(iced::font::Weight::Bold))
+            .color(Color {
+                a: logo_pulse,
+                ..palette.accent
+            }),
+    )
     .width(76)
     .height(76)
     .center(Length::Fill)
@@ -5312,7 +5374,10 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let brand = column![
         logo_badge,
         container(text("")).height(18),
-        text("ferrite").size(30).color(palette.text),
+        text("ferrite")
+            .size(30)
+            .font(font_weight(iced::font::Weight::Semibold))
+            .color(palette.text),
         text("capability-governed browser")
             .size(13)
             .color(palette.text_dim),
@@ -6122,6 +6187,16 @@ pub fn launch() -> iced::Result {
         .centered()
         .theme(|state: &FerriteBrowser| state.theme_mode.to_iced_theme())
         .subscription(subscription)
+        // Embedded Inter (see the "Fonts" section above for why) — all
+        // four weights are registered, and `default_font` is what makes
+        // every `text`/`text_input`/`button` widget in this file that
+        // never sets its own `.font(...)` use Inter Regular instead of
+        // iced's built-in fallback sans-serif.
+        .font(FONT_INTER_REGULAR)
+        .font(FONT_INTER_MEDIUM)
+        .font(FONT_INTER_SEMIBOLD)
+        .font(FONT_INTER_BOLD)
+        .default_font(Font::with_name(FONT_FAMILY))
         .run_with(|| {
             // C3a: `.window_size(...).centered()` above is only the frame
             // before the window manager has a chance to place it — the
