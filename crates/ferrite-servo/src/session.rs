@@ -89,6 +89,52 @@ mod inner {
 
     use super::LoadStatus;
 
+    /// Converts a Servo-decoded favicon [`servo::Image`] to raw, straight
+    /// (non-premultiplied) RGBA8 bytes — the format
+    /// `iced_widget::image::Handle::from_rgba` expects, matching the
+    /// conversion `get_frame()` already relies on `read_to_image` to do for
+    /// the main page surface.
+    ///
+    /// Favicons can arrive in any of Servo's decoded [`servo::PixelFormat`]
+    /// variants depending on the source image (a `.ico` with a paletted or
+    /// grayscale frame, a plain PNG, ...), not just RGBA8 — this is the one
+    /// place in `ferrite-servo` that has to handle the full set rather than
+    /// assuming a single decoder output format.
+    fn favicon_to_rgba8(
+        width: u32,
+        height: u32,
+        format: servo::PixelFormat,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let pixel_count = (width as usize) * (height as usize);
+        let mut rgba = Vec::with_capacity(pixel_count * 4);
+        match format {
+            servo::PixelFormat::RGBA8 => rgba.extend_from_slice(data),
+            servo::PixelFormat::BGRA8 => {
+                for px in data.chunks_exact(4) {
+                    rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                }
+            }
+            servo::PixelFormat::RGB8 => {
+                for px in data.chunks_exact(3) {
+                    rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                }
+            }
+            servo::PixelFormat::KA8 => {
+                for px in data.chunks_exact(2) {
+                    let luminance = px[0];
+                    rgba.extend_from_slice(&[luminance, luminance, luminance, px[1]]);
+                }
+            }
+            servo::PixelFormat::K8 => {
+                for &luminance in data {
+                    rgba.extend_from_slice(&[luminance, luminance, luminance, 255]);
+                }
+            }
+        }
+        rgba
+    }
+
     // -------------------------------------------------------------------------
     // Servo delegate (global browser-level callbacks — all no-ops)
     // -------------------------------------------------------------------------
@@ -113,6 +159,11 @@ mod inner {
         /// Accumulated JS console errors — appended by `notify_console_message`, drained by
         /// `HeadlessServoSession::take_console_errors()`.
         console_errors: Rc<std::cell::RefCell<Vec<String>>>,
+        /// Shared favicon cell — written by `notify_favicon_changed`, read in
+        /// `sync_and_read()`. `(width, height, rgba_bytes)`, already
+        /// converted from whatever `servo::PixelFormat` the page's icon
+        /// decoded to.
+        favicon: Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>,
     }
 
     impl WebViewDelegate for HeadlessDelegate {
@@ -140,6 +191,15 @@ mod inner {
 
         fn notify_page_title_changed(&self, _webview: servo::WebView, title: Option<String>) {
             *self.page_title.borrow_mut() = title;
+        }
+
+        fn notify_favicon_changed(&self, webview: servo::WebView) {
+            // The new image isn't passed as a parameter — WebViewDelegate's
+            // own docs point at `WebView::favicon()` for it.
+            *self.favicon.borrow_mut() = webview.favicon().map(|image| {
+                let rgba = favicon_to_rgba8(image.width, image.height, image.format, image.data());
+                (image.width, image.height, rgba)
+            });
         }
 
         fn show_console_message(
@@ -205,6 +265,10 @@ mod inner {
         last_page_title: Option<String>,
         /// JS console errors shared with `HeadlessDelegate` — accumulated until drained.
         shared_console_errors: Rc<std::cell::RefCell<Vec<String>>>,
+        /// Shared favicon cell — written by `HeadlessDelegate`, read in `sync_and_read()`.
+        shared_favicon: Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>,
+        /// Most recently synced favicon (updated in `sync_and_read()`).
+        last_favicon: Option<(u32, u32, Vec<u8>)>,
     }
 
     impl HeadlessServoSession {
@@ -258,6 +322,8 @@ mod inner {
                 Rc::new(std::cell::RefCell::new(None));
             let shared_console_errors: Rc<std::cell::RefCell<Vec<String>>> =
                 Rc::new(std::cell::RefCell::new(Vec::new()));
+            let shared_favicon: Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>> =
+                Rc::new(std::cell::RefCell::new(None));
 
             // ── Rendering context ──────────────────────────────────────────
             let rendering_context = Rc::new(
@@ -282,6 +348,7 @@ mod inner {
                 nav_count: shared_nav_count.clone(),
                 page_title: shared_page_title.clone(),
                 console_errors: shared_console_errors.clone(),
+                favicon: shared_favicon.clone(),
             });
             let webview = WebViewBuilder::new(&servo, rendering_context.clone())
                 .delegate(delegate)
@@ -306,6 +373,8 @@ mod inner {
                 shared_page_title,
                 last_page_title: None,
                 shared_console_errors,
+                shared_favicon,
+                last_favicon: None,
             })
         }
 
@@ -393,6 +462,7 @@ mod inner {
             self.last_load_status = self.shared_load_status.borrow().clone();
             self.current_url = self.shared_url.borrow().clone();
             self.last_page_title = self.shared_page_title.borrow().clone();
+            self.last_favicon = self.shared_favicon.borrow().clone();
 
             // Read back the current frame after paint.
             //
@@ -422,6 +492,12 @@ mod inner {
             self.last_frame
                 .as_ref()
                 .map(|b| (self.width, self.height, b.clone()))
+        }
+
+        /// Returns `(width, height, rgba_bytes)` of the page's current favicon, or
+        /// `None` if the page has not set one (yet, or at all).
+        pub fn get_favicon(&self) -> Option<(u32, u32, Vec<u8>)> {
+            self.last_favicon.clone()
         }
 
         /// Returns the most recently received page title, or `None` if the page has
@@ -653,6 +729,67 @@ mod inner {
                 )));
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // `favicon_to_rgba8` is a pure function of its inputs — testable
+        // without a real `Servo`/`WebView` (which R7 rules out building in
+        // an automated test anyway). Only compiled and run under
+        // `--features servo` (this whole module is `#[cfg(feature =
+        // "servo")]`-gated), so `just test`/`cargo test --workspace`
+        // (default, Servo-free features) never exercises it — but it is the
+        // one real correctness check on this conversion logic for anyone
+        // who does build with the feature, since neither CI job (`ci`:
+        // Servo-free; `build-servo-release`: `cargo build`, not `test` or
+        // `clippy`) currently type-checks `mod inner` at all otherwise.
+
+        #[test]
+        fn rgba8_passes_through_unchanged() {
+            let data = [10u8, 20, 30, 40, 50, 60, 70, 80];
+            assert_eq!(
+                favicon_to_rgba8(2, 1, servo::PixelFormat::RGBA8, &data),
+                data
+            );
+        }
+
+        #[test]
+        fn bgra8_swaps_red_and_blue_leaving_green_and_alpha_in_place() {
+            let bgra = [1u8, 2, 3, 4];
+            assert_eq!(
+                favicon_to_rgba8(1, 1, servo::PixelFormat::BGRA8, &bgra),
+                vec![3, 2, 1, 4]
+            );
+        }
+
+        #[test]
+        fn rgb8_expands_to_rgba_with_opaque_alpha() {
+            let rgb = [10u8, 20, 30, 40, 50, 60];
+            assert_eq!(
+                favicon_to_rgba8(2, 1, servo::PixelFormat::RGB8, &rgb),
+                vec![10, 20, 30, 255, 40, 50, 60, 255]
+            );
+        }
+
+        #[test]
+        fn ka8_replicates_luminance_into_rgb_and_keeps_the_real_alpha() {
+            let ka = [200u8, 128];
+            assert_eq!(
+                favicon_to_rgba8(1, 1, servo::PixelFormat::KA8, &ka),
+                vec![200, 200, 200, 128]
+            );
+        }
+
+        #[test]
+        fn k8_replicates_luminance_into_rgb_with_opaque_alpha() {
+            let k = [42u8, 99];
+            assert_eq!(
+                favicon_to_rgba8(2, 1, servo::PixelFormat::K8, &k),
+                vec![42, 42, 42, 255, 99, 99, 99, 255]
+            );
+        }
+    }
 }
 
 // Stub for non-servo builds so the type name is always resolvable.
@@ -705,6 +842,10 @@ impl HeadlessServoSession {
     }
 
     pub fn page_title(&self) -> Option<&str> {
+        None
+    }
+
+    pub fn get_favicon(&self) -> Option<(u32, u32, Vec<u8>)> {
         None
     }
 

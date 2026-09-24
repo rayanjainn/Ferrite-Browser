@@ -586,6 +586,12 @@ pub struct FerriteBrowser {
     pub address_bar_focused: bool,
     pub tab_error: Vec<Option<String>>,
     pub tab_titles: Vec<String>,
+    /// The active page's favicon for each tab, same indexing as
+    /// `tab_titles`/`tab_urls` — `None` until `HeadlessServoSession::
+    /// get_favicon()` reports one (or forever, for a page that never sets
+    /// one, e.g. `about:blank`). Synced every `ServoFrame` tick alongside
+    /// the page title (see that handler).
+    pub tab_favicons: Vec<Option<ImageHandle>>,
     pub new_tab_search_input: String,
     pub js_input: String,
     pub js_output: Vec<(String, String)>,
@@ -782,6 +788,7 @@ impl Default for FerriteBrowser {
             address_bar_focused: false,
             tab_error: vec![None],
             tab_titles: vec!["New Tab".to_string()],
+            tab_favicons: vec![None],
             new_tab_search_input: String::new(),
             js_input: String::new(),
             js_output: Vec::new(),
@@ -936,6 +943,7 @@ pub fn update(
             state.tab_urls.push("about:blank".to_string());
             state.tab_error.push(None);
             state.tab_titles.push("New Tab".to_string());
+            state.tab_favicons.push(None);
             let new_idx = state.tabs.len() - 1;
             state.active_tab = new_idx;
             state.address_bar_input = String::new();
@@ -962,6 +970,9 @@ pub fn update(
                 }
                 if i < state.tab_titles.len() {
                     state.tab_titles.remove(i);
+                }
+                if i < state.tab_favicons.len() {
+                    state.tab_favicons.remove(i);
                 }
                 state.servo_sessions.remove(&i);
                 let keys_to_shift: Vec<usize> = state
@@ -1556,6 +1567,11 @@ pub fn update(
                         state.tab_titles[active] = title.to_string();
                     }
                 }
+                if let Some((w, h, bytes)) = session.get_favicon() {
+                    if active < state.tab_favicons.len() {
+                        state.tab_favicons[active] = Some(ImageHandle::from_rgba(w, h, bytes));
+                    }
+                }
                 let is_now_loading = matches!(session.load_status(), LoadStatus::Loading);
                 let new_url = session.current_url().to_string();
                 let prev_url = state.tab_urls.get(active).cloned().unwrap_or_default();
@@ -2107,14 +2123,31 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
             // Loading state keeps the "..." text pulse (a pure, cheap
             // animation via the same `progress_offset`-driven dots pattern
-            // the agent sidebar's "Working..." indicator already uses); an
-            // idle tab gets a small dot instead of the old ">"/"-" ASCII
-            // markers — the accent underline below already carries most of
-            // the active/inactive signal, so this is a quiet accent, not a
-            // second competing indicator.
-            let favicon = text(if spinning { "..." } else { "•" })
-                .size(11)
-                .color(if is_active { C_ACCENT } else { C_TEXT_DIM });
+            // the agent sidebar's "Working..." indicator already uses).
+            // Once loaded, a real favicon (C3b — `HeadlessServoSession::
+            // get_favicon()`) replaces the placeholder dot for any tab that
+            // has one; a page that never sets one (about:blank, some
+            // errors) keeps the dot, same as before this existed — the
+            // accent underline below already carries most of the
+            // active/inactive signal, so the dot stays a quiet fallback,
+            // not a second competing indicator.
+            let favicon_dot = || {
+                text(if spinning { "..." } else { "•" })
+                    .size(11)
+                    .color(if is_active { C_ACCENT } else { C_TEXT_DIM })
+                    .into()
+            };
+            let favicon: Element<FerriteBrowserMessage> = if spinning {
+                favicon_dot()
+            } else {
+                match state.tab_favicons.get(i).and_then(|f| f.as_ref()) {
+                    Some(handle) => ServoImage::new(handle.clone())
+                        .width(Length::Fixed(14.0))
+                        .height(Length::Fixed(14.0))
+                        .into(),
+                    None => favicon_dot(),
+                }
+            };
 
             let label_elem = text(truncate(label, 22)).size(13).color(if is_active {
                 C_TEXT
