@@ -47,8 +47,8 @@ mod icons;
 use icons::{icon, Icon};
 
 use ferrite_agent::browser_loop::{
-    execute_action, run_agent_loop, AgentAction, LoopBudget, LoopStopReason, SYSTEM_PROMPT,
-    SYSTEM_PROMPT_VERSION,
+    compact_observation, execute_action, run_agent_loop, trim_message_history, AgentAction,
+    LoopBudget, LoopStopReason, SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION,
 };
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
 use ferrite_engine_servo::BorrowedServoEngine;
@@ -1210,8 +1210,11 @@ pub fn update(
             live.messages.push(Message::assistant(
                 serde_json::to_string(&action).unwrap_or_default(),
             ));
-            live.messages
-                .push(Message::user(format!("Observation: {observation}")));
+            let compacted_observation = compact_observation(&observation);
+            live.messages.push(Message::user(format!(
+                "Observation: {compacted_observation}"
+            )));
+            trim_message_history(&mut live.messages);
             live.actions_taken.push(action);
 
             spawn_next_step(state, run_id, live);

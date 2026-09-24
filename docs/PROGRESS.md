@@ -2869,3 +2869,74 @@ set + visual polish).
 **Known issues discovered, not fixed:** T-231 (above). Everything else
 already tracked (T-212/T-217/T-218/T-219/T-222/T-223/T-227/T-228/T-230)
 untouched, as before.
+
+## 2026-09-24 — coordinator — live agent loop: unbounded context growth and ambiguous action JSON fixed
+
+**Scope:** ad hoc bug fix, not a lettered charter — two observed failures
+in the live agent loop (`ferrite-agent::browser_loop::run_agent_loop` and
+`ferrite-ui`'s message-driven mirror of it, `AgentStepReady`/
+`spawn_next_step`, wired by B3): longer tasks eventually hit the model's
+context-length limit, and the model would sometimes emit a malformed
+action — most visibly for `type_text`/`fill_form` — instead of valid JSON.
+File scope: `crates/ferrite-agent/src/browser_loop.rs`,
+`crates/ferrite-ui/src/lib.rs`.
+
+**1. Root cause, context growth.** `run_agent_loop` pushed every action/
+observation pair onto `messages` with no bound, and `messages.clone()` is
+sent to the model on every step — a long-running task's conversation grows
+without limit. `ferrite-ui`'s live loop has its own copy of this same
+per-step message-building code (see B3's entry above, `docs/handoffs/b03.md`,
+for why it can't just call `run_agent_loop` directly: `BorrowedServoEngine`
+wraps a `!Send` `HeadlessServoSession`), so it had the identical bug,
+independently.
+
+**2. Root cause, malformed actions.** `SYSTEM_PROMPT`'s action vocabulary
+was described in a terse shorthand (`type_text{selector,text}`) rather than
+literal JSON. Models sometimes reproduced that shorthand verbatim — e.g.
+putting the parameters inside the `"action"` string itself
+(`{"action":"type_text{selector,text}"}`) — which fails
+`serde_json::from_str::<AgentAction>` and stops the loop with
+`LoopStopReason::MalformedAction`, most reliably on the two actions
+(`type_text`, `fill_form`) whose fields don't fit the shorthand cleanly.
+
+**3. Fix, once, not per-crate.** Added `pub fn compact_observation` (caps
+one observation at 8,000 chars, keeping head and tail) and `pub fn
+trim_message_history` (caps total history at 120,000 chars, always keeping
+`messages[0]` — the original task — and dropping the oldest action/
+observation pair first) to `browser_loop.rs`, wired into `run_agent_loop`
+itself. `ferrite-ui` now imports and calls those same two functions from
+`AgentStepReady` instead of carrying its own copies — the same reuse
+pattern already established there for `execute_action`/`SYSTEM_PROMPT`
+(see B3's entry). `SYSTEM_PROMPT` itself only ever existed in
+`browser_loop.rs`, so fixing the JSON-format issue needed no deduplication
+— rewritten to one literal JSON example per action plus explicit
+"never put parameters inside the `action` string" rules.
+
+**4. Not changed:** `AgentAction`'s shape, `execute_action`'s dispatch,
+`LoopBudget`/`LoopStopReason`, the IPI fingerprint/dry-run/consent gate, or
+any pre-existing `FerriteBrowserMessage` handler's behavior — `messages`
+sent to the model differ (compacted/trimmed) but `AgentLoopResult::observations`
+(returned to the caller) is still the full, untruncated text, matching prior
+behavior and `executed_actions_carry_real_origin_tracking_through_observations`.
+
+**Commits:** `bce1521`.
+
+**Tests:** `cargo test -p ferrite-agent` — 11 passed, 0 failed (up from 7;
+new: `compact_observation_leaves_a_short_observation_unchanged`,
+`compact_observation_truncates_a_long_observation_keeping_head_and_tail`,
+`trim_message_history_keeps_the_original_task_and_drops_the_oldest_pairs_first`,
+`trim_message_history_never_drops_below_the_task_plus_one_pair`; every
+pre-existing test passes unmodified). `cargo test -p ferrite-ui` — 35
+passed, 0 failed, unchanged from C1. `cargo fmt --all --check`, `cargo
+clippy -p ferrite-agent -p ferrite-ui --all-targets -- -D warnings`,
+`cargo build --workspace --no-default-features -p ferrite-agent -p
+ferrite-ui` — all clean. `cargo machete` not run (not installed in this
+container) — no `Cargo.toml` touched by this fix, so not a gap this change
+could hide.
+
+**Known issues discovered, not fixed:** `core.hooksPath` is unset in this
+checkout, so `scripts/hooks/commit-msg` (the AI-attribution rejector
+CLAUDE.md's own invariant names) was never actually enforced on this
+branch's first commit — caught by inspection, fixed by amending that
+commit, not filed as a T-### (it's a per-checkout git config step, not a
+code defect; see `scripts/hooks/install.sh`).
