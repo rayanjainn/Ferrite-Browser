@@ -3688,3 +3688,92 @@ own honest verification statement, written by whoever actually did that
 work) is outside this entry's scope. Everything else already tracked
 (T-212/T-217/T-218/T-219/T-222/T-223/T-227/T-228/T-230/T-231) untouched, as
 before.
+
+## 2026-09-24 — coordinator — C3b: real page favicons in the tab bar (backfilled entry for `a75d17e`)
+
+**Scope:** second item of the C3 UI-polish sequence (C3a: rendering/
+coordinate/resize correctness, already landed to `main`; C3c: theme
+toggle + visual polish + loaders, the entry directly above this one,
+which correctly flagged that this commit had shipped without its own
+entry — filing it now, written by the same session that did the work).
+Same branch, `feat/favicons-and-theme-polish`. The tab bar previously
+showed only a placeholder glyph (`"..."` while loading, `"•"` once idle)
+for every tab — never a real site icon, one of the concrete gaps the
+project owner named explicitly ("i also dont see the page icons, like
+github icon, or etc").
+
+**Design: no new message plumbing needed, only an accessor.** Read
+directly against the pinned `libservo` source
+(`/root/.cargo/git/checkouts/servo-e53a6e7b994a25fe/301f7da`, the same
+tag this workspace pins): `Servo`'s internal `spin_event_loop()` — the
+same function `HeadlessServoSession::pump_engine()` already calls every
+tick — already drains `EmbedderMsg::NewFavicon` and calls
+`WebView::set_favicon()` internally (`components/servo/servo.rs`), which
+in turn calls the `WebViewDelegate::notify_favicon_changed` hook
+(`components/servo/webview.rs`). None of that required new code here —
+the favicon was already being captured on every tab's `WebView` the whole
+time; it just wasn't being read.
+
+**Fix, `crates/ferrite-servo/src/session.rs`:**
+- `HeadlessDelegate` (the existing `WebViewDelegate` impl already used for
+  `notify_page_title_changed`/`notify_load_status_changed`) gained
+  `notify_favicon_changed(&self, webview: servo::WebView)` — the callback
+  takes no image parameter (per `WebViewDelegate`'s own doc comment, the
+  new icon is read via `webview.favicon()` inside the hook), converted via
+  a new pure function and stored in a shared `Rc<RefCell<Option<(u32, u32,
+  Vec<u8>)>>>` cell, mirroring the existing `shared_page_title` pattern
+  exactly.
+- **`favicon_to_rgba8(width, height, format: servo::PixelFormat, data:
+  &[u8]) -> Vec<u8>`** — favicons can decode to any of Servo's five
+  `PixelFormat` variants (`K8`/`KA8`/`RGB8`/`RGBA8`/`BGRA8`) depending on
+  the source image (a `.ico`'s frame, a plain PNG, ...), not just the RGBA8
+  `iced_widget::image::Handle::from_rgba` expects — this is the one place
+  in the crate that has to handle the full set rather than assuming a
+  single decoder output, unlike `get_frame()`'s main-surface readback
+  (`rendering_context.read_to_image`), which always comes back
+  pre-converted. Covered by 5 unit tests, one per format, gated the same
+  way the rest of this module is (`#[cfg(feature = "servo")]` — see the
+  verification note below for what that means for this sandbox).
+- `HeadlessServoSession` gained `shared_favicon`/`last_favicon` fields
+  (synced in `sync_and_read()`, same tick as the title sync) and a public
+  `get_favicon() -> Option<(u32, u32, Vec<u8>)>` accessor. The
+  non-`servo`-feature stub gained a matching `get_favicon() -> None`.
+
+**Fix, `crates/ferrite-ui/src/lib.rs`:**
+- `FerriteBrowser::tab_favicons: Vec<Option<ImageHandle>>` — same indexing
+  as `tab_titles`/`tab_urls`, pushed/removed alongside them in
+  `AddTab`/`CloseTab`, synced every `ServoFrame` tick alongside the
+  existing title sync.
+- The tab bar's favicon slot now renders the real `ImageHandle` (via
+  `ServoImage::new(...)`, the same construction `ServoImage`/`ImageHandle`
+  the main content frame already uses) once a tab has one; the loading
+  pulse and the idle dot are kept as the fallback for a tab that hasn't
+  set a favicon yet or never will (`about:blank`, some error pages).
+
+**Verified:** default (Servo-free) build only — `cargo build`/`clippy
+--all-targets -D warnings`/`fmt --check`/`test` on `ferrite-servo` and
+`ferrite-ui` individually, then the same four plus `cargo machete` and
+`cargo deny check` across the full workspace, plus the doc-drift scripts —
+all clean.
+
+**Not verified — stated honestly, not glossed over:** this sandbox cannot
+build the real `servo` feature (disk/time cost, same limitation every
+prior entry this session has logged) and has no display, so `session.rs`'s
+`mod inner` — everything in this fix except the `ferrite-ui` side and the
+default stub — has never been compiler-checked here, only cross-read
+against the pinned `libservo` source function-by-function (`WebView::
+favicon`'s return type and signature, `PixelFormat`'s exact variant names,
+`WebViewDelegate::notify_favicon_changed`'s exact signature, and that
+`servo::lib.rs`'s `pub use embedder_traits::*;` makes `servo::Image`/
+`servo::PixelFormat` resolve the same way `servo::LoadStatus`/`servo::
+ConsoleLogLevel` already do elsewhere in this same file). Neither CI job
+type-checks this path either (`ci` is Servo-free by design;
+`build-servo-release` runs `cargo build`, not `clippy` or `test`) — a
+pre-existing gap in this project's own CI, not introduced here, but worth
+naming since it means this specific code's first real compiler check will
+happen on `just build-servo`/a real macOS run, not before. The 5
+`favicon_to_rgba8` unit tests exist for exactly that moment, not for this
+sandbox's `cargo test --workspace`, which never compiles them (the module
+they're in is `#[cfg(feature = "servo")]`-gated end to end).
+
+**Commits:** `a75d17e`.
