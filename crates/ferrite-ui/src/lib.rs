@@ -13,6 +13,23 @@
 // wheel events and forwards them to `HeadlessServoSession` as native Servo
 // input events (`InputEvent::MouseMove`, `MouseButton`, `Wheel`).
 //
+// ## Coordinate spaces (C3a)
+//
+// `mouse_area`/`responsive` report positions and sizes in iced's logical
+// points; `HeadlessServoSession`'s render buffer and `send_mouse_*`/
+// `send_scroll`'s `DevicePoint` coordinates are physical pixels. Two
+// fields bridge that gap: `scale_factor` (physical px per logical point,
+// fetched once via `iced::window::get_scale_factor` in `launch()`) scales
+// every pointer-event coordinate before it reaches the session, and
+// `content_area_size` (the content container's true logical size, measured
+// by wrapping it in `iced_widget::responsive` in `view()`) drives
+// `ServoFrame`'s tick handler to keep the active tab's session buffer
+// resized to match. Before this, the buffer stayed at its hardcoded
+// startup size forever regardless of window size or panel visibility,
+// which is what made the displayed frame blurry (stretched to fill a
+// differently-sized area) and put the cursor Servo actually saw somewhere
+// other than where it visually was.
+//
 // ## Live agent execution (B3, docs/TO-DO.md T-224/T-220/T-229)
 //
 // The agent loop drives `ferrite_agent::browser_loop::{AgentAction,
@@ -60,10 +77,12 @@ use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{
-    keyboard, time, Background, Border, Color, Element, Length, Padding, Size, Subscription, Task,
-    Theme,
+    keyboard, time, window, Background, Border, Color, Element, Length, Padding, Size,
+    Subscription, Task, Theme,
 };
 use iced_widget::image::{Handle as ImageHandle, Image as ServoImage};
+use iced_widget::responsive;
+use std::cell::Cell;
 
 // ---------------------------------------------------------------------------
 // Real ModelProvider construction (T-229)
@@ -436,10 +455,42 @@ pub struct FerriteBrowser {
     pub new_tab_search_input: String,
     pub js_input: String,
     pub js_output: Vec<(String, String)>,
-    /// Most recent cursor position over the Servo content area (in content pixels).
+    /// Most recent cursor position over the Servo content area, in logical
+    /// points (the same space `mouse_area::on_move` reports and `view()`
+    /// lays widgets out in) — never physical/device pixels. Scaled by
+    /// `scale_factor` at the point each is forwarded to
+    /// `HeadlessServoSession::send_mouse_*`, which operates in the render
+    /// buffer's physical-pixel space (see `scale_factor`'s doc comment).
     pub cursor_pos: (f32, f32),
-    /// Y offset of the Servo content area inside the window (toolbar + tab bar heights).
-    pub content_y_offset: f32,
+    /// Physical pixels per logical point for the app's window, fetched once
+    /// via `iced::window::get_scale_factor` shortly after launch
+    /// (`ScaleFactorReady`) — defaults to `1.0` until that resolves. Needed
+    /// because `HeadlessServoSession`'s render buffer and
+    /// `send_mouse_*`/`send_scroll`'s coordinates are in physical pixels,
+    /// while every iced-reported position (`mouse_area::on_move`,
+    /// `content_area_size`) is in logical points; on a HiDPI/Retina display
+    /// those differ, and conflating them is exactly what caused the
+    /// blurry-frame and hover/click-offset bugs this field's introduction
+    /// fixes (C3a).
+    pub scale_factor: f32,
+    /// Most recently measured logical size of the Servo content area —
+    /// written from `view()`'s `responsive` wrapper around the content
+    /// element (interior mutability: `view()` takes `&self`, so a `Cell`
+    /// is how a read-only render pass can still record what it measured)
+    /// and read back by `ServoFrame`'s tick handler to decide whether the
+    /// active tab's session buffer needs `resize()`ing to match.
+    ///
+    /// Replaces the older `content_y_offset`/`ContentAreaResized`
+    /// message, which tracked only a hardcoded vertical chrome-height
+    /// offset and — verified by grep before this fix — was never actually
+    /// wired to a real producer anywhere in `update()`'s message handling,
+    /// so it always held its initial constant. `responsive` reports the
+    /// container's true available size on every layout pass instead of
+    /// requiring this file to hand-replicate the chrome layout's
+    /// heights/widths (tab bar + toolbar + progress bar + optional
+    /// audit/JS panel + optional agent sidebar) — correct by construction
+    /// as that layout changes, not by keeping two copies of it in sync.
+    pub content_area_size: Cell<Size>,
     // ── Agent bridge ──────────────────────────────────────────────────────────
     /// The real `ferrite_model::ModelProvider` constructed at startup
     /// (`try_real_model_provider`), or `ferrite_model::MockProvider::new()`
@@ -565,7 +616,8 @@ impl Default for FerriteBrowser {
             js_input: String::new(),
             js_output: Vec::new(),
             cursor_pos: (0.0, 0.0),
-            content_y_offset: TAB_BAR_HEIGHT + TOOLBAR_HEIGHT + 4.0,
+            scale_factor: 1.0,
+            content_area_size: Cell::new(Size::new(1280.0, 700.0)),
             model_provider,
             model_tag_small,
             model_tag_main,
@@ -639,9 +691,10 @@ pub enum FerriteBrowserMessage {
         delta_x: f32,
         delta_y: f32,
     },
-    ContentAreaResized {
-        height: f32,
-    },
+    /// The window's real scale factor (physical px per logical point),
+    /// fetched once shortly after launch — see `scale_factor`'s doc
+    /// comment on `FerriteBrowser`.
+    ScaleFactorReady(f32),
     // ── Live agent loop (T-224) ──────────────────────────────────────────────
     /// The dry run found nothing unexpected (or the defense mode bypassed
     /// it entirely) — begin the live loop from scratch with `prompt`. Not
@@ -896,32 +949,47 @@ pub fn update(
         // ── Servo mouse/scroll events ──────────────────────────────────────
         FerriteBrowserMessage::ServoMouseMove { x, y } => {
             state.cursor_pos = (x, y);
+            let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
-                session.send_mouse_move(x, y);
+                // mouse_area reports logical points; HeadlessServoSession's
+                // DevicePoint space is physical pixels — see scale_factor's
+                // doc comment. Without this, a HiDPI display (or any window
+                // size other than the session's hardcoded original buffer)
+                // put the cursor Servo actually sees somewhere other than
+                // where it visually is, which is exactly the "have to hover
+                // above the link" bug this scaling fixes (C3a).
+                session.send_mouse_move(x * scale, y * scale);
             }
         }
         FerriteBrowserMessage::ServoMousePress => {
             let (x, y) = state.cursor_pos;
+            let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
-                session.send_mouse_down(x, y);
+                session.send_mouse_down(x * scale, y * scale);
             }
         }
         FerriteBrowserMessage::ServoMouseRelease => {
             let (x, y) = state.cursor_pos;
+            let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
                 // Up event first, then a synthesised click for hit-testing.
-                session.send_mouse_up(x, y);
-                session.send_mouse_click(x, y);
+                session.send_mouse_up(x * scale, y * scale);
+                session.send_mouse_click(x * scale, y * scale);
             }
         }
         FerriteBrowserMessage::ServoScroll { delta_x, delta_y } => {
             let (x, y) = state.cursor_pos;
+            let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
-                session.send_scroll(x, y, delta_x as f64, delta_y as f64);
+                // Only the position is scaled to physical pixels, matching
+                // every other pointer event above — delta_x/delta_y are
+                // already OS-level wheel/trackpad units, independent of
+                // display scale, and left as iced reports them.
+                session.send_scroll(x * scale, y * scale, delta_x as f64, delta_y as f64);
             }
         }
-        FerriteBrowserMessage::ContentAreaResized { height } => {
-            state.content_y_offset = height;
+        FerriteBrowserMessage::ScaleFactorReady(factor) => {
+            state.scale_factor = factor;
         }
         // ── Agent sidebar ─────────────────────────────────────────────────────
         FerriteBrowserMessage::ToggleAgentSidebar => {
@@ -1223,6 +1291,26 @@ pub fn update(
         FerriteBrowserMessage::ServoReady => {}
         FerriteBrowserMessage::ServoFrame => {
             state.progress_offset = (state.progress_offset + 0.02) % 1.0;
+
+            // Keep the active tab's Servo render buffer matched to the real
+            // content-area size (see `content_area_size`'s doc comment).
+            // Runs every tick (16ms) rather than off a dedicated resize
+            // event, so it also picks up a size change caused by toggling
+            // the agent sidebar or the audit/JS panel, not only a window
+            // resize — those never fire a window-level resize event at
+            // all. `HeadlessServoSession::size()` is cheap (no frame
+            // readback), so comparing before calling `resize()` costs
+            // nothing on the common case where nothing changed.
+            let logical = state.content_area_size.get();
+            let scale = state.scale_factor;
+            let desired_w = (logical.width * scale).round().max(1.0) as u32;
+            let desired_h = (logical.height * scale).round().max(1.0) as u32;
+            if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
+                if session.size() != (desired_w, desired_h) {
+                    session.resize(desired_w, desired_h);
+                }
+            }
+
             // Pump engine once, then sync every tab's state and read pixels.
             if let Some(first) = state.servo_sessions.values().next() {
                 first.pump_engine();
@@ -2352,7 +2440,16 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // ── Content area ───────────────────────────────────────────────────────
     let active = state.active_tab;
 
-    let content: Element<FerriteBrowserMessage> =
+    // Wrapped in `responsive` so `state.content_area_size` always reflects
+    // this container's true logical size — whatever else in the layout
+    // (window size, the agent sidebar, the audit/JS panel) is currently
+    // taking space — rather than a value this function would otherwise
+    // have to compute by hand-replicating that layout's arithmetic. See
+    // `content_area_size`'s doc comment and `ServoFrame`'s tick handler,
+    // which reads this back to keep the Servo render buffer's physical
+    // pixel size matched to it.
+    let content: Element<FerriteBrowserMessage> = responsive(move |size: Size| {
+        state.content_area_size.set(size);
         if let Some(err_msg) = state.tab_error.get(active).and_then(|e| e.as_ref()) {
             // Error page
             let failed_url = state.tab_urls.get(active).map(String::as_str).unwrap_or("");
@@ -2450,7 +2547,9 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 ..container::Style::default()
             })
             .into()
-        };
+        }
+    })
+    .into();
 
     // ── Compose layout ──────────────────────────────────────────────────────
     let mut layout: Vec<Element<FerriteBrowserMessage>> =
@@ -3196,6 +3295,25 @@ pub fn launch() -> iced::Result {
         .theme(|_state| Theme::Dark)
         .subscription(subscription)
         .run_with(|| {
+            // C3a: `.window_size(...).centered()` above is only the frame
+            // before the window manager has a chance to place it — the
+            // startup task below immediately requests maximized, so the
+            // app opens filling the display rather than the small
+            // fixed-size centered window it used to. `get_scale_factor`
+            // in the same chain is what makes the Servo render buffer and
+            // every pointer-event coordinate correct on a HiDPI/Retina
+            // display — see `scale_factor`'s doc comment on
+            // `FerriteBrowser` for why both bugs (blurry frame, hover/
+            // click landing in the wrong place) traced back to this
+            // never being queried at all.
+            let startup_window_task = window::get_latest().then(|id| match id {
+                Some(id) => Task::batch([
+                    window::maximize(id, true),
+                    window::get_scale_factor(id).map(FerriteBrowserMessage::ScaleFactorReady),
+                ]),
+                None => Task::none(),
+            });
+
             let mut state = FerriteBrowser::default();
             // T-224/T-229: construct the real ModelProvider here, at actual
             // app startup — never inside `FerriteBrowser::default()` itself
@@ -3217,11 +3335,17 @@ pub fn launch() -> iced::Result {
             match HeadlessServoSession::new(1280, 700) {
                 Ok(session) => {
                     state.servo_sessions.insert(0, session);
-                    (state, Task::done(FerriteBrowserMessage::ServoReady))
+                    (
+                        state,
+                        Task::batch([
+                            Task::done(FerriteBrowserMessage::ServoReady),
+                            startup_window_task,
+                        ]),
+                    )
                 }
                 Err(e) => {
                     eprintln!("[ferrite-ui] Servo unavailable: {}", e);
-                    (state, Task::none())
+                    (state, startup_window_task)
                 }
             }
         })

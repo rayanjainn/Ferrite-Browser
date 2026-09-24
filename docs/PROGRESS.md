@@ -2988,8 +2988,117 @@ identical to what the pre-existing Linux-gated steps already ran, just no
 longer conditional — so this is a trigger/matrix change, not a new,
 unverified command.
 
-**Commits:** (this session's branch — see the commit that lands this
-entry alongside `ci.yml`).
+**Commits:** `3fd5f9c`.
 
 **Known issues discovered:** none. T-209 (license choice) remains the
 one open owner-decision item.
+
+## 2026-09-24 — coordinator — C3a: Servo render-buffer/coordinate correctness fix (window resize, HiDPI blur, hover/click offset)
+
+**Scope:** first item of the C-series post-C1 plan (`docs/handoffs/c01.md`'s
+"what C2 reuses and does next" plus this session's own C2/C3 planning turn,
+recorded in chat, not yet a written handoff file). Reported by the user
+directly running the app: window opens medium-sized and centered rather
+than filling the display; hovering/clicking a link lands on the wrong spot
+("have to move my cursor above the link"); rendered pages look soft/blurry;
+no favicons anywhere. Root-caused before writing any fix, not guessed —
+see below.
+
+**Root cause, confirmed by reading source, not assumed:**
+`HeadlessServoSession::new(1280, 700)` creates a render buffer at a fixed
+size once at startup. `crates/ferrite-ui/src/lib.rs` never called
+`session.resize()` (that method existed in `ferrite-servo/src/session.rs`
+with zero callers, grep-confirmed) — the buffer stayed 1280×700 forever.
+The frame is displayed via `iced_widget::image` at `Length::Fill`, i.e.
+stretched to whatever the real content area is, and raw `mouse_area`
+logical-point positions were passed straight through to
+`session.send_mouse_move`/etc. with no scale correction at all. The moment
+the real window wasn't exactly 1280×700 physical pixels — any resize, the
+agent sidebar's 320px, or a HiDPI/Retina display's own scale factor — the
+visually-displayed frame and Servo's internal coordinate space diverged.
+That mismatch is the hover/click offset bug and, separately (upscaling a
+fixed low-res buffer to a bigger/differently-shaped area, with no
+HiDPI-aware oversampling at all), the blur. `ContentAreaResized`/
+`content_y_offset` (a pre-existing message/field pair that looked like it
+should have been the fix) turned out to be dead code — defined and handled,
+but never actually dispatched from anywhere, grep-confirmed
+(`grep -n "ContentAreaResized {" crates/ferrite-ui/src/lib.rs` matched only
+the enum definition and its match arm) — removed rather than wired up,
+since the real fix (below) makes it unnecessary.
+
+**Fix — three real changes, `crates/ferrite-servo`/`ferrite-ui`/root
+`Cargo.toml`:**
+
+1. **`HeadlessServoSession::size()`** (`ferrite-servo/src/session.rs`,
+   both the real and stub impls) — a cheap `(width, height)` accessor (no
+   frame readback) so a caller can check whether `resize()` is actually
+   needed before calling it.
+2. **The Servo buffer now tracks the real content-area size, every tick.**
+   `FerriteBrowser` gained `content_area_size: Cell<Size>` (logical,
+   written from `view()`'s `responsive`-wrapped content element — see
+   below) and `scale_factor: f32` (physical px per logical point, fetched
+   once via `iced::window::get_scale_factor` right after launch). Chose
+   `iced_widget::responsive` over hand-replicating the chrome layout's
+   heights/widths (tab bar + toolbar + progress bar + optional audit/JS
+   panel + optional 320px agent sidebar) deliberately: `responsive`
+   reports the container's true available size on every layout pass,
+   correct by construction as that layout changes — including whatever
+   C2's agent-panel redesign does to it next — rather than two copies of
+   the same arithmetic that could silently drift out of sync. Needed
+   adding the `iced_widget` `"lazy"` feature (`lazy = ["ouroboros"]` on
+   the pinned 0.13.4) to the one root `Cargo.toml` line, same pattern C1
+   used for `"svg"`. `ServoFrame`'s existing 16ms tick handler now compares
+   `content_area_size × scale_factor` (rounded to physical pixels) against
+   the active tab's `session.size()` and calls `session.resize()` only when
+   they actually differ — reacting to a window resize, an agent-sidebar
+   toggle, or an audit/JS-panel toggle alike, with no extra per-cause
+   plumbing, since a tick already runs continuously regardless of cause.
+3. **Every pointer-event coordinate now scales logical → physical before
+   reaching Servo.** `ServoMouseMove`/`ServoMousePress`/`ServoMouseRelease`/
+   `ServoScroll` all multiply `(x, y)` by `state.scale_factor` at the point
+   they call `send_mouse_move`/`send_mouse_down`/`send_mouse_up`/
+   `send_mouse_click`/`send_scroll` — `cursor_pos` itself stays logical
+   (unchanged meaning, doc comment corrected). Scroll wheel *delta* is left
+   unscaled deliberately (already OS-level units, independent of display
+   scale) — only the event's *position* needed the fix.
+4. **Launch now starts maximized, not a fixed 1280×800 centered window.**
+   `launch()`'s startup `Task` chains `window::get_latest()` →
+   `window::maximize(id, true)` + `window::get_scale_factor(id)` (mapped to
+   the new `ScaleFactorReady` message) — the `.window_size(...).centered()`
+   builder call is now only the frame shown for the instant before that
+   task resolves, not the app's actual working size.
+
+**Favicons and the visual-design pass (C3b/C3c) are not part of this
+entry** — deliberately sequenced after this correctness fix, per this
+session's own plan (restyling hover states on top of broken coordinates
+would have been building on top of the bug, not fixing it).
+
+**Verified:** `cargo build --workspace`, `cargo test --workspace` (every
+crate green, 0 failures — full per-crate counts unchanged from before this
+session's `ferrite-ui`/`ferrite-servo` edits: `ferrite-ui` still 35,
+`ferrite-servo` still 1), `cargo fmt --all --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo machete` (installed this
+session, clean — no unused dependency from the new `lazy` feature) all
+clean. **New-dependency duplicate-version risk checked directly against
+`Cargo.lock`** (the exact class of problem T-231 found from C1's `"svg"`
+feature): `git diff Cargo.lock` shows the `"lazy"` feature added exactly
+five new packages (`ouroboros`, `ouroboros_macro`, `aliasable`, `yansi`,
+`proc-macro2-diagnostics`), each with exactly one version in the lockfile —
+none is a second copy of an already-duplicated crate the way C1's `svg`
+pull of a newer `fontdb`/`kurbo` was. `cargo-deny` itself was not
+installed in this sandbox at the time of writing (being installed
+alongside this entry; if that run surfaces anything, it'll be a follow-up
+note, not a silent gap).
+
+**Not verified live — same limitation every prior UI-touching session has
+stated plainly:** this sandbox has no attached display, so none of window
+maximizing, HiDPI sharpness, or the hover/click coordinate fix could be
+visually confirmed here. Every claim above is a description of the code
+change (the coordinate-space mismatch that existed, and exactly how each
+new line removes it), not an assertion about how it looks or feels — the
+user's own relaunch is the real verification, same as C1's.
+
+**Commits:** (see the commit landing alongside this entry).
+
+**Known issues discovered, not fixed:** none new. Existing T-223 (iced
+0.13's `button` has no `Focusable` impl) is unrelated and untouched.
