@@ -374,6 +374,13 @@ const TAB_BAR_HEIGHT: f32 = 36.0;
 const BORDER_RADIUS: f32 = 8.0;
 const PANEL_PADDING: u16 = 12;
 
+/// Ticks (`ServoFrame`, ~16ms each) to wait after calling
+/// `HeadlessServoSession::resize()` before trusting a frame read from that
+/// session again — see `FerriteBrowser::resize_settle_ticks`'s doc comment
+/// for the real crash this avoids. ~48ms of headroom for libservo's own
+/// compositor to finish reallocating the resized surface.
+const RESIZE_SETTLE_TICKS: u8 = 3;
+
 /// Icon sizes — the two sizes every `icon()` call site in this crate picks
 /// from, so the icon set reads as one consistent scale rather than a grab
 /// bag of ad hoc pixel sizes. `ICON_SIZE` is the default (toolbar/tab-bar/
@@ -584,6 +591,38 @@ pub struct FerriteBrowser {
     /// audit/JS panel + optional agent sidebar) — correct by construction
     /// as that layout changes, not by keeping two copies of it in sync.
     pub content_area_size: Cell<Size>,
+    /// The physical-pixel size the active tab's session was last actually
+    /// told to `resize()` to — compared against on every `ServoFrame` tick
+    /// to decide whether a new `resize()` call is needed at all. Tracked
+    /// here rather than re-derived from `HeadlessServoSession::size()`
+    /// because that getter reflects `resize()`'s own immediate, synchronous
+    /// bookkeeping (it updates `self.width`/`self.height` the instant it's
+    /// called), not whether libservo's own compositor has actually
+    /// finished reallocating the backing surface — see
+    /// `resize_settle_ticks`'s doc comment for why that distinction is the
+    /// whole fix here. Initialized to `(1280, 700)`, matching every
+    /// session's real starting buffer size, so the very first tick doesn't
+    /// treat "unmeasured yet" as "must resize".
+    pub last_resized_content_px: (u32, u32),
+    /// Ticks remaining before it's safe to read a frame from the session
+    /// most recently `resize()`d — see `ServoFrame`'s handler.
+    ///
+    /// **Real bug this exists to fix, not a defensive guess:** calling
+    /// `session.resize()` and then `session.sync_and_read()` (which calls
+    /// `read_to_image` using the buffer's just-updated, post-resize
+    /// dimensions) in the *same* tick produced a directly observed crash
+    /// (segfault, preceded by a `GLD_TEXTURE_INDEX_2D is unloadable`
+    /// warning) and, short of a crash, visibly corrupted frames (page
+    /// content rendered only in a small region with the rest of the
+    /// window black) — because libservo's own resize is not necessarily
+    /// synchronous with the very next `read_to_image` call, so reading
+    /// immediately risks a size-mismatched read against a surface it
+    /// hasn't finished reallocating. While this is nonzero, `ServoFrame`
+    /// still pumps the engine (to give the resize a chance to actually
+    /// process) but skips every session's `sync_and_read()` entirely,
+    /// rather than reading a frame that might not match the buffer's new
+    /// declared size.
+    pub resize_settle_ticks: u8,
     // ── Agent bridge ──────────────────────────────────────────────────────────
     /// The real `ferrite_model::ModelProvider` constructed at startup
     /// (`try_real_model_provider`), or `ferrite_model::MockProvider::new()`
@@ -712,6 +751,8 @@ impl Default for FerriteBrowser {
             cursor_pos: (0.0, 0.0),
             scale_factor: 1.0,
             content_area_size: Cell::new(Size::new(1280.0, 700.0)),
+            last_resized_content_px: (1280, 700),
+            resize_settle_ticks: 0,
             model_provider,
             model_tag_small,
             model_tag_main,
@@ -1397,25 +1438,43 @@ pub fn update(
             // event, so it also picks up a size change caused by toggling
             // the agent sidebar or the audit/JS panel, not only a window
             // resize — those never fire a window-level resize event at
-            // all. `HeadlessServoSession::size()` is cheap (no frame
-            // readback), so comparing before calling `resize()` costs
-            // nothing on the common case where nothing changed.
-            let logical = state.content_area_size.get();
-            let scale = state.scale_factor;
-            let desired_w = (logical.width * scale).round().max(1.0) as u32;
-            let desired_h = (logical.height * scale).round().max(1.0) as u32;
-            if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
-                if session.size() != (desired_w, desired_h) {
-                    session.resize(desired_w, desired_h);
+            // all. Skipped entirely while a previous resize is still
+            // settling (`resize_settle_ticks > 0`) — see that field's doc
+            // comment for the real crash this avoids; `resize()` is never
+            // called again until the settle window from the last one has
+            // fully elapsed.
+            if state.resize_settle_ticks == 0 {
+                let logical = state.content_area_size.get();
+                let scale = state.scale_factor;
+                let desired = (
+                    (logical.width * scale).round().max(1.0) as u32,
+                    (logical.height * scale).round().max(1.0) as u32,
+                );
+                if desired != state.last_resized_content_px {
+                    if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
+                        session.resize(desired.0, desired.1);
+                        state.last_resized_content_px = desired;
+                        state.resize_settle_ticks = RESIZE_SETTLE_TICKS;
+                    }
                 }
             }
 
-            // Pump engine once, then sync every tab's state and read pixels.
+            // Pump engine once, then sync every tab's state and read pixels
+            // — unless a resize just fired this tick (see above), in which
+            // case every session's frame is skipped for `resize_settle_ticks`
+            // more ticks rather than read against a buffer libservo may not
+            // have finished reallocating yet. The previous frame stays
+            // displayed in the meantime — a few tens of ms of an unchanged
+            // image, not a black/corrupted one.
             if let Some(first) = state.servo_sessions.values().next() {
                 first.pump_engine();
             }
-            for session in state.servo_sessions.values_mut() {
-                session.sync_and_read();
+            if state.resize_settle_ticks > 0 {
+                state.resize_settle_ticks -= 1;
+            } else {
+                for session in state.servo_sessions.values_mut() {
+                    session.sync_and_read();
+                }
             }
             let active = state.active_tab;
             if let Some(session) = state.servo_sessions.get(&active) {
@@ -4214,6 +4273,52 @@ mod tests {
             }
             other => panic!("expected a Step entry, got {other:?}"),
         }
+    }
+
+    // ── ServoFrame: resize-settle window (real segfault/corruption fix) ───
+
+    #[test]
+    fn servo_frame_decrements_resize_settle_ticks_and_stops_at_zero() {
+        let mut state = FerriteBrowser {
+            resize_settle_ticks: 2,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::ServoFrame);
+        assert_eq!(state.resize_settle_ticks, 1);
+        let _ = update(&mut state, FerriteBrowserMessage::ServoFrame);
+        assert_eq!(state.resize_settle_ticks, 0);
+        let _ = update(&mut state, FerriteBrowserMessage::ServoFrame);
+        assert_eq!(
+            state.resize_settle_ticks, 0,
+            "must not underflow past zero on a later tick"
+        );
+    }
+
+    #[test]
+    fn servo_frame_does_not_arm_the_resize_settle_window_without_a_session_to_resize() {
+        // R7: no HeadlessServoSession is ever constructed in this test
+        // build (the stub's own `new()` always returns `Err`), so
+        // `servo_sessions` is always empty here — this proves the settle
+        // window only ever arms as a *result* of an actual `resize()`
+        // call, not speculatively just because the measured content area
+        // differs from `last_resized_content_px`.
+        let mut state = FerriteBrowser {
+            content_area_size: Cell::new(Size::new(999.0, 999.0)),
+            ..FerriteBrowser::default()
+        };
+        assert_eq!(state.last_resized_content_px, (1280, 700));
+
+        let _ = update(&mut state, FerriteBrowserMessage::ServoFrame);
+
+        assert_eq!(
+            state.resize_settle_ticks, 0,
+            "no session existed to resize, so nothing should have armed the settle window"
+        );
+        assert_eq!(
+            state.last_resized_content_px,
+            (1280, 700),
+            "must not be updated unless a resize() call actually happened"
+        );
     }
 
     // ── AgentStepReady/LiveRunReady: message-driven step-loop plumbing ────

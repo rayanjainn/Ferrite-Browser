@@ -529,15 +529,6 @@ mod inner {
             }
         }
 
-        /// Returns the render surface's current `(width, height)`, in
-        /// physical pixels — the same space [`Self::get_frame`]/[`Self::resize`]
-        /// use. Cheap (reads two `u32` fields, no frame readback), so callers
-        /// can compare against a desired size every tick to decide whether
-        /// [`Self::resize`] is actually needed.
-        pub fn size(&self) -> (u32, u32) {
-            (self.width, self.height)
-        }
-
         /// Resize the render surface and notify the WebView.
         pub fn resize(&mut self, width: u32, height: u32) {
             self.width = width;
@@ -662,10 +653,6 @@ impl HeadlessServoSession {
 
     pub fn get_frame(&self) -> Option<(u32, u32, Vec<u8>)> {
         None
-    }
-
-    pub fn size(&self) -> (u32, u32) {
-        (0, 0)
     }
 
     pub fn resize(&mut self, _width: u32, _height: u32) {}

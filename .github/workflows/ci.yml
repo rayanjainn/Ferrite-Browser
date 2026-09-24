@@ -57,8 +57,16 @@ jobs:
           cargo install cargo-machete --locked
           cargo machete
 
+      # EmbarkStudios/cargo-deny-action@v2 is a Docker container action —
+      # GitHub Actions only supports container actions on Linux runners,
+      # so it fails outright ("Container action is only supported on
+      # Linux") the moment this job's matrix is macOS-only. Native
+      # install + run instead, the same pattern cargo-machete above
+      # already uses, which works on any runner OS.
       - name: License / advisory / duplicate-version audit (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check
 
       - name: Doc-drift checks
         run: |
