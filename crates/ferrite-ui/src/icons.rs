@@ -51,6 +51,23 @@ pub enum Icon {
     /// External-link glyph used by the consent panel's "Contacted <origin>"
     /// rows.
     Origin,
+    /// C2: agent step-history glyphs, one per `AgentAction` group (see
+    /// `lib.rs`'s `icon_for_action`) — grouped by the same action-class
+    /// boundaries `ferrite_core::Primitive`'s own taxonomy uses
+    /// (navigate/read/interact/write/execute/...) rather than one icon per
+    /// raw primitive, so the set stays small and each glyph stays
+    /// recognizable at the sidebar's small render size.
+    Navigate,
+    Read,
+    Click,
+    Write,
+    /// Scroll/wait/screenshot — grouped under one "system action" glyph;
+    /// none of the three is common or visually distinct enough on its own
+    /// to justify a dedicated icon yet. Split out the moment one needs to
+    /// read differently from the others.
+    Activity,
+    Download,
+    Clipboard,
 }
 
 // A bookmark/star icon and a settings/gear icon were drawn for this charter
@@ -85,6 +102,13 @@ pub fn icon_bytes(kind: Icon) -> &'static [u8] {
         Icon::Console => include_bytes!("../assets/icons/console.svg"),
         Icon::Agent => include_bytes!("../assets/icons/agent.svg"),
         Icon::Origin => include_bytes!("../assets/icons/origin.svg"),
+        Icon::Navigate => include_bytes!("../assets/icons/navigate.svg"),
+        Icon::Read => include_bytes!("../assets/icons/read.svg"),
+        Icon::Click => include_bytes!("../assets/icons/click.svg"),
+        Icon::Write => include_bytes!("../assets/icons/write.svg"),
+        Icon::Activity => include_bytes!("../assets/icons/activity.svg"),
+        Icon::Download => include_bytes!("../assets/icons/download.svg"),
+        Icon::Clipboard => include_bytes!("../assets/icons/clipboard.svg"),
     }
 }
 
@@ -109,7 +133,7 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, color: Color) -> Element<'a,
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 14] = [
+    const ALL: [Icon; 21] = [
         Icon::Back,
         Icon::Forward,
         Icon::Reload,
@@ -124,6 +148,13 @@ mod tests {
         Icon::Console,
         Icon::Agent,
         Icon::Origin,
+        Icon::Navigate,
+        Icon::Read,
+        Icon::Click,
+        Icon::Write,
+        Icon::Activity,
+        Icon::Download,
+        Icon::Clipboard,
     ];
 
     /// Every icon variant embeds real, well-formed SVG data — catches a

@@ -81,8 +81,15 @@ libservo = { git = "https://github.com/servo/servo", tag = "v0.0.5" }
 # — enabling it here is sufficient regardless of what `iced`'s own "svg"
 # feature (which only forwards to iced_widget/svg for `iced::widget::svg`
 # call sites) is set to.
+# C3a: "lazy" adds `iced_widget::responsive` (`lazy = ["ouroboros"]` on
+# iced_widget 0.13.4's own Cargo.toml), imported directly the same way —
+# `ferrite-ui` uses it to measure the Servo content area's real logical
+# size on every layout pass instead of hand-replicating the chrome layout's
+# heights/widths, so the Servo render buffer and mouse-event coordinates
+# stay correct regardless of window size, panel visibility, or later
+# layout changes (see lib.rs's `content_area_size` doc comment).
 iced = { version = "0.13", features = ["tokio"] }
-iced_widget = { version = "0.13", features = ["image", "svg"] }
+iced_widget = { version = "0.13", features = ["image", "svg", "lazy"] }
 urlencoding = "2"
 
 # ── path deps (in-workspace crates) ──────────────────────────────────────

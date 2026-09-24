@@ -2940,3 +2940,265 @@ CLAUDE.md's own invariant names) was never actually enforced on this
 branch's first commit — caught by inspection, fixed by amending that
 commit, not filed as a T-### (it's a per-checkout git config step, not a
 code defect; see `scripts/hooks/install.sh`).
+
+## 2026-09-24 — coordinator — CI: manual-trigger-only, macOS-only (T-210 resolved by owner decision)
+
+**Landed:** `.github/workflows/ci.yml` rewritten per an explicit project-
+owner decision (T-210 had been sitting as "needs owner confirmation"
+since A1 — see that row's prior text). Two changes, both applied to
+every job:
+
+1. **Trigger:** removed `push`, `pull_request`, and the weekly
+   `schedule` cron entirely. Every job (`ci`, `build-servo-release`,
+   `release`) is now `workflow_dispatch`-only — nothing runs
+   automatically on a push or merge to `main`; every run, including the
+   fast lint/test gate, is a manual "Run workflow" click.
+2. **Platform:** dropped `ubuntu-latest`/`windows-latest` from both the
+   `ci` and `build-servo-release` matrices — macOS only. The `ci` job's
+   platform-conditional steps (fmt-check, `cargo machete`, `cargo deny`,
+   the doc-drift scripts) used to run only under `if: matrix.platform ==
+   'linux'` (one canonical platform, to avoid tripling non-platform-
+   dependent checks); with Linux gone they now just run unconditionally
+   on the one remaining platform, same checks, same behavior. `release`'s
+   Windows artifact download/publish step and `binary_suffix` handling
+   are removed — the rolling "latest" release now ships a macOS binary
+   only. `Swatinem/rust-cache@v2`'s cache keys narrowed to `macos`/
+   `servo-macos` (previously per-platform-in-matrix).
+
+**Docs updated to match, not left stale:** `docs/TO-DO.md`'s T-210 row
+marked `done — owner decided`, its stale "needs owner confirmation"
+framing removed; the file's top summary counts re-tallied (44 done, was
+43; 1 needing owner confirmation, was 2) and the "needs a decision only
+the project owner can make" bullet split so it no longer bundles T-210 in
+with the still-open T-209 (license choice). `docs/REBUILD_DIRECTIVE.md`
+deliberately **not** edited — per that file's own header, it's the
+original plan/record of what A1 built and why, not a place later
+operational decisions get retroactively rewritten into; the actual
+current behavior lives in `ci.yml` itself and this entry.
+
+**Not verified live:** this sandbox cannot run GitHub Actions (same
+limitation every prior agent touching `ci.yml` has hit, going back to
+A0/A1). Verified locally instead: `python3 -c "import yaml;
+yaml.safe_load(open('.github/workflows/ci.yml'))"` parses clean; every
+step command in the rewritten file (`cargo fmt --all --check`, `cargo
+clippy --workspace --all-targets -- -D warnings`, `cargo machete`,
+`cargo test --workspace`, `cargo build --release -p ferrite-shell`,
+`sh scripts/check_purge.sh`, `sh scripts/check_no_archive_links.sh`) is
+identical to what the pre-existing Linux-gated steps already ran, just no
+longer conditional — so this is a trigger/matrix change, not a new,
+unverified command.
+
+**Commits:** `3fd5f9c`.
+
+**Known issues discovered:** none. T-209 (license choice) remains the
+one open owner-decision item.
+
+## 2026-09-24 — coordinator — C3a: Servo render-buffer/coordinate correctness fix (window resize, HiDPI blur, hover/click offset)
+
+**Scope:** first item of the C-series post-C1 plan (`docs/handoffs/c01.md`'s
+"what C2 reuses and does next" plus this session's own C2/C3 planning turn,
+recorded in chat, not yet a written handoff file). Reported by the user
+directly running the app: window opens medium-sized and centered rather
+than filling the display; hovering/clicking a link lands on the wrong spot
+("have to move my cursor above the link"); rendered pages look soft/blurry;
+no favicons anywhere. Root-caused before writing any fix, not guessed —
+see below.
+
+**Root cause, confirmed by reading source, not assumed:**
+`HeadlessServoSession::new(1280, 700)` creates a render buffer at a fixed
+size once at startup. `crates/ferrite-ui/src/lib.rs` never called
+`session.resize()` (that method existed in `ferrite-servo/src/session.rs`
+with zero callers, grep-confirmed) — the buffer stayed 1280×700 forever.
+The frame is displayed via `iced_widget::image` at `Length::Fill`, i.e.
+stretched to whatever the real content area is, and raw `mouse_area`
+logical-point positions were passed straight through to
+`session.send_mouse_move`/etc. with no scale correction at all. The moment
+the real window wasn't exactly 1280×700 physical pixels — any resize, the
+agent sidebar's 320px, or a HiDPI/Retina display's own scale factor — the
+visually-displayed frame and Servo's internal coordinate space diverged.
+That mismatch is the hover/click offset bug and, separately (upscaling a
+fixed low-res buffer to a bigger/differently-shaped area, with no
+HiDPI-aware oversampling at all), the blur. `ContentAreaResized`/
+`content_y_offset` (a pre-existing message/field pair that looked like it
+should have been the fix) turned out to be dead code — defined and handled,
+but never actually dispatched from anywhere, grep-confirmed
+(`grep -n "ContentAreaResized {" crates/ferrite-ui/src/lib.rs` matched only
+the enum definition and its match arm) — removed rather than wired up,
+since the real fix (below) makes it unnecessary.
+
+**Fix — three real changes, `crates/ferrite-servo`/`ferrite-ui`/root
+`Cargo.toml`:**
+
+1. **`HeadlessServoSession::size()`** (`ferrite-servo/src/session.rs`,
+   both the real and stub impls) — a cheap `(width, height)` accessor (no
+   frame readback) so a caller can check whether `resize()` is actually
+   needed before calling it.
+2. **The Servo buffer now tracks the real content-area size, every tick.**
+   `FerriteBrowser` gained `content_area_size: Cell<Size>` (logical,
+   written from `view()`'s `responsive`-wrapped content element — see
+   below) and `scale_factor: f32` (physical px per logical point, fetched
+   once via `iced::window::get_scale_factor` right after launch). Chose
+   `iced_widget::responsive` over hand-replicating the chrome layout's
+   heights/widths (tab bar + toolbar + progress bar + optional audit/JS
+   panel + optional 320px agent sidebar) deliberately: `responsive`
+   reports the container's true available size on every layout pass,
+   correct by construction as that layout changes — including whatever
+   C2's agent-panel redesign does to it next — rather than two copies of
+   the same arithmetic that could silently drift out of sync. Needed
+   adding the `iced_widget` `"lazy"` feature (`lazy = ["ouroboros"]` on
+   the pinned 0.13.4) to the one root `Cargo.toml` line, same pattern C1
+   used for `"svg"`. `ServoFrame`'s existing 16ms tick handler now compares
+   `content_area_size × scale_factor` (rounded to physical pixels) against
+   the active tab's `session.size()` and calls `session.resize()` only when
+   they actually differ — reacting to a window resize, an agent-sidebar
+   toggle, or an audit/JS-panel toggle alike, with no extra per-cause
+   plumbing, since a tick already runs continuously regardless of cause.
+3. **Every pointer-event coordinate now scales logical → physical before
+   reaching Servo.** `ServoMouseMove`/`ServoMousePress`/`ServoMouseRelease`/
+   `ServoScroll` all multiply `(x, y)` by `state.scale_factor` at the point
+   they call `send_mouse_move`/`send_mouse_down`/`send_mouse_up`/
+   `send_mouse_click`/`send_scroll` — `cursor_pos` itself stays logical
+   (unchanged meaning, doc comment corrected). Scroll wheel *delta* is left
+   unscaled deliberately (already OS-level units, independent of display
+   scale) — only the event's *position* needed the fix.
+4. **Launch now starts maximized, not a fixed 1280×800 centered window.**
+   `launch()`'s startup `Task` chains `window::get_latest()` →
+   `window::maximize(id, true)` + `window::get_scale_factor(id)` (mapped to
+   the new `ScaleFactorReady` message) — the `.window_size(...).centered()`
+   builder call is now only the frame shown for the instant before that
+   task resolves, not the app's actual working size.
+
+**Favicons and the visual-design pass (C3b/C3c) are not part of this
+entry** — deliberately sequenced after this correctness fix, per this
+session's own plan (restyling hover states on top of broken coordinates
+would have been building on top of the bug, not fixing it).
+
+**Verified:** `cargo build --workspace`, `cargo test --workspace` (every
+crate green, 0 failures — full per-crate counts unchanged from before this
+session's `ferrite-ui`/`ferrite-servo` edits: `ferrite-ui` still 35,
+`ferrite-servo` still 1), `cargo fmt --all --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo machete` (installed this
+session, clean — no unused dependency from the new `lazy` feature) all
+clean. **New-dependency duplicate-version risk checked directly against
+`Cargo.lock`** (the exact class of problem T-231 found from C1's `"svg"`
+feature): `git diff Cargo.lock` shows the `"lazy"` feature added exactly
+five new packages (`ouroboros`, `ouroboros_macro`, `aliasable`, `yansi`,
+`proc-macro2-diagnostics`), each with exactly one version in the lockfile —
+none is a second copy of an already-duplicated crate the way C1's `svg`
+pull of a newer `fontdb`/`kurbo` was. **`cargo-deny` itself was then
+installed and run for real** (it wasn't present in this sandbox at first,
+same gap A1 hit): `cargo deny check` → `advisories ok, bans ok, licenses
+ok, sources ok`, only the one pre-existing `unmatched-source` warning for
+the Servo git dependency every agent since A3 has logged (Servo isn't
+built by default) — confirming the lockfile-diff read above rather than
+leaving it as an inference.
+
+**Not verified live — same limitation every prior UI-touching session has
+stated plainly:** this sandbox has no attached display, so none of window
+maximizing, HiDPI sharpness, or the hover/click coordinate fix could be
+visually confirmed here. Every claim above is a description of the code
+change (the coordinate-space mismatch that existed, and exactly how each
+new line removes it), not an assertion about how it looks or feels — the
+user's own relaunch is the real verification, same as C1's.
+
+**Commits:** `46f9612`, `6a63754` (cargo-deny verification follow-up).
+
+**Known issues discovered, not fixed:** none new. Existing T-223 (iced
+0.13's `button` has no `Focusable` impl) is unrelated and untouched.
+
+## 2026-09-24 — coordinator — C2: agent panel redesign — real per-step icon/label/detail/result feed
+
+**Scope:** second item of this session's C-series plan, `crates/ferrite-ui`
+only. Rebuilds `view_agent_sidebar`'s activity log per the original C2 goal
+(`docs/handoffs/c01.md`'s "what C2 does next" plus this session's own
+planning turn): "live, step-by-step action view... a scrollable action
+history with per-step results (not just the flat `agent_tool_log: Vec
+<String>` label list it renders today)". `AgentStepReady`/`LiveRunReady`/
+run-id staleness checks and the consent panel itself are untouched, per
+that same plan's own constraint.
+
+**What changed, concretely:**
+
+1. **`agent_tool_log: Vec<String>` → `agent_log: Vec<AgentLogEntry>`.**
+   `AgentLogEntry` is `Note(String)` (dry-run-phase progress text, e.g.
+   "dry run complete — checking for unexpected activity" — unchanged
+   content, just a new variant instead of a bare string) or `Step { icon,
+   label, detail, result, blocked }` — real structure the old flat log
+   never carried: `label`/`detail` come from two new pure functions,
+   `action_label`/`action_detail` (replacing `action_log_label`, which
+   only ever produced one opaque `"[navigate] https://..."`-shaped
+   string), and — the actual gap this closes — `result` is the real
+   string `execute_action` returned (or the fixed "blocked by user
+   consent" text when `is_action_rejected` fires first), not just the
+   fact that some action ran. `blocked: bool` is threaded straight from
+   `is_action_rejected`'s own return value (previously only used to
+   choose *which* string to compute, then discarded) so the sidebar can
+   style a blocked step differently.
+2. **Icons per action type**, reusing C1's `icon()`/`Icon` machinery, not
+   a second rendering path. `icon_for_action` groups `AgentAction`'s 19
+   variants into 8 icons by the same action-class boundaries `ferrite_core
+   ::Primitive`'s own taxonomy already uses (navigate/read/click/write/
+   scroll+wait+screenshot/download/clipboard), rather than one icon per
+   raw variant — deliberately: a JsExecute step reuses `Icon::Console`
+   (already this crate's own "code" glyph, from the JS-console toggle
+   button) and `Finish` reuses `Icon::Approve` (its outcome), both pinned
+   by test as intentional reuse, not placeholders. 7 new icons drawn for
+   the remaining groups (`navigate`, `read`, `click`, `write`, `activity`,
+   `download`, `clipboard` — `crates/ferrite-ui/assets/icons/*.svg`), in
+   the exact style C1 established (`viewBox="0 0 24 24" fill="none"
+   stroke="#000000" stroke-width="2" stroke-linecap="round"
+   stroke-linejoin="round"`, confirmed by reading three existing icons
+   before drawing any new one) — `Icon`'s enum/`icon_bytes` grew from 14
+   to 21 variants, `icons::tests`' well-formedness/shared-viewBox tests
+   updated to the new count and passing.
+3. **A live "Step N/max" indicator** in the sidebar header while
+   `live_loop` is `Some` — reads `live.actions_taken.len()`/
+   `live.budget.max_steps`, both fields that already existed on
+   `LiveAgentLoop` for budget accounting; no new state needed.
+4. **"Visible plan/reasoning" — honestly scoped, not silently dropped.**
+   The original C2 goal names this explicitly. `AgentAction`'s wire
+   format (what the model is asked to return, parsed in
+   `ferrite_agent::browser_loop`) carries no reasoning/thought field at
+   all today — adding one would mean changing that shared type's JSON
+   schema (used by both the live loop and the dry run, in a different
+   crate, `ferrite-agent`, outside this charter's `crates/ferrite-ui`
+   file scope) and touching the `SYSTEM_PROMPT` this same session's
+   earlier fix (`bce1521`) already changed once today for a different
+   reason. Judged real, cross-crate, higher-risk work deserving its own
+   deliberate pass, not a rider on a UI-only charter — not attempted here.
+   What ships instead is the closest achievable thing within scope: each
+   step's action *and* its real result together, which is genuine
+   new visibility (what it did and what happened), just not the model's
+   own free-text reasoning for choosing it.
+
+**Tests:** `cargo test -p ferrite-ui` — 39 passed, 0 failed (up from 35; 4
+new: `action_label_and_detail_are_distinct_per_action_kind`,
+`icon_for_action_groups_by_action_class_not_one_icon_per_variant`,
+`agent_step_ready_records_a_real_step_with_its_actual_result` (asserts
+`state.agent_log`'s pushed `Step` carries the selector as `detail` and the
+real "error: no active browser session" fallback as `result` — R7, no
+Servo session exists in this test fixture — rather than a fabricated
+success string), `agent_step_ready_records_a_blocked_step_as_blocked_not_a
+_silent_success`; every pre-existing test passes unmodified, including
+`icons::tests::every_icon_variant_embeds_non_empty_well_formed_svg`/
+`..._shares_the_same_viewbox` against the 7 new icons).
+
+**Verified:** `cargo build --workspace`, `cargo test --workspace` (every
+crate green, 0 failures), `cargo fmt --all --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo machete` all clean. No
+`Cargo.toml` touched this session (all 7 new icons are `include_bytes!`
+of new files, no new crate dependency), so no `cargo deny` re-run needed
+beyond C3a's already-clean one earlier this session.
+
+**Not verified live:** same standing limitation as every UI-touching
+session — no attached display in this sandbox. The icon well-formedness
+tests catch a malformed/empty SVG; they cannot confirm the 7 new glyphs
+are actually recognizable at 12px in the sidebar, which is a real,
+separate claim only the user's own relaunch can settle.
+
+**Commits:** `8bb627f`.
+
+**Known issues discovered, not fixed:** none new. The "visible reasoning"
+scope decision above is a deliberate boundary, not a bug — flagged here
+rather than filed as a T-### since it's a decision needing the user's own
+input on whether it's wanted at all, not a defect with an agreed fix.

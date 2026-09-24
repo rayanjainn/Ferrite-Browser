@@ -13,6 +13,23 @@
 // wheel events and forwards them to `HeadlessServoSession` as native Servo
 // input events (`InputEvent::MouseMove`, `MouseButton`, `Wheel`).
 //
+// ## Coordinate spaces (C3a)
+//
+// `mouse_area`/`responsive` report positions and sizes in iced's logical
+// points; `HeadlessServoSession`'s render buffer and `send_mouse_*`/
+// `send_scroll`'s `DevicePoint` coordinates are physical pixels. Two
+// fields bridge that gap: `scale_factor` (physical px per logical point,
+// fetched once via `iced::window::get_scale_factor` in `launch()`) scales
+// every pointer-event coordinate before it reaches the session, and
+// `content_area_size` (the content container's true logical size, measured
+// by wrapping it in `iced_widget::responsive` in `view()`) drives
+// `ServoFrame`'s tick handler to keep the active tab's session buffer
+// resized to match. Before this, the buffer stayed at its hardcoded
+// startup size forever regardless of window size or panel visibility,
+// which is what made the displayed frame blurry (stretched to fill a
+// differently-sized area) and put the cursor Servo actually saw somewhere
+// other than where it visually was.
+//
 // ## Live agent execution (B3, docs/TO-DO.md T-224/T-220/T-229)
 //
 // The agent loop drives `ferrite_agent::browser_loop::{AgentAction,
@@ -60,10 +77,12 @@ use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{
-    keyboard, time, Background, Border, Color, Element, Length, Padding, Size, Subscription, Task,
-    Theme,
+    keyboard, time, window, Background, Border, Color, Element, Length, Padding, Size,
+    Subscription, Task, Theme,
 };
 use iced_widget::image::{Handle as ImageHandle, Image as ServoImage};
+use iced_widget::responsive;
+use std::cell::Cell;
 
 // ---------------------------------------------------------------------------
 // Real ModelProvider construction (T-229)
@@ -193,33 +212,95 @@ fn is_action_rejected(
     false
 }
 
-/// A short, human-readable progress-log label for `action` — shown in the
-/// agent sidebar's tool log, in the same `[primitive] detail` shape the
-/// pre-B3 log used.
-fn action_log_label(action: &AgentAction) -> String {
+/// C2: a short, human-readable name for `action`'s kind — e.g. "Navigate",
+/// "Click" — shown as the step's title in the agent sidebar's activity
+/// feed. Paired with [`action_detail`] (the action's own parameter, if
+/// any) and [`icon_for_action`] (its icon), replacing the old flat
+/// `[primitive] detail` single-string log line (B3-era) with three
+/// separately-styleable pieces.
+fn action_label(action: &AgentAction) -> &'static str {
     match action {
-        AgentAction::Navigate { url } => format!("[navigate] {url}"),
-        AgentAction::GoBack => "[navigate] back".to_string(),
-        AgentAction::GoForward => "[navigate] forward".to_string(),
-        AgentAction::Reload => "[navigate] reload".to_string(),
-        AgentAction::ReadDom => "[dom.read] snapshot".to_string(),
-        AgentAction::Query { selector } => format!("[dom.query] {selector}"),
-        AgentAction::ReadText { selector } => format!("[dom.read] {selector}"),
-        AgentAction::Click { selector } => format!("[click] {selector}"),
-        AgentAction::TypeText { selector, .. } => format!("[dom.write] type into {selector}"),
-        AgentAction::FillForm { fields } => format!("[form.fill] {} field(s)", fields.len()),
-        AgentAction::SelectOption { selector, .. } => format!("[dom.write] select in {selector}"),
-        AgentAction::Scroll { dx, dy } => format!("[scroll] ({dx}, {dy})"),
-        AgentAction::WaitForSelector { selector } => format!("[wait] for {selector}"),
-        AgentAction::WaitIdle => "[wait] idle".to_string(),
-        AgentAction::Screenshot => "[screenshot]".to_string(),
-        AgentAction::Download { url } => format!("[download] {url}"),
-        AgentAction::ClipboardRead => "[clipboard.read]".to_string(),
-        AgentAction::ClipboardWrite { text } => format!("[clipboard.write] {text}"),
-        AgentAction::JsExecute { script } => {
-            format!("[js.execute] {}", &script[..script.len().min(40)])
+        AgentAction::Navigate { .. } => "Navigate",
+        AgentAction::GoBack => "Go back",
+        AgentAction::GoForward => "Go forward",
+        AgentAction::Reload => "Reload",
+        AgentAction::ReadDom => "Read page",
+        AgentAction::Query { .. } => "Query elements",
+        AgentAction::ReadText { .. } => "Read text",
+        AgentAction::Click { .. } => "Click",
+        AgentAction::TypeText { .. } => "Type text",
+        AgentAction::FillForm { .. } => "Fill form",
+        AgentAction::SelectOption { .. } => "Select option",
+        AgentAction::Scroll { .. } => "Scroll",
+        AgentAction::WaitForSelector { .. } => "Wait for element",
+        AgentAction::WaitIdle => "Wait",
+        AgentAction::Screenshot => "Screenshot",
+        AgentAction::Download { .. } => "Download",
+        AgentAction::ClipboardRead => "Read clipboard",
+        AgentAction::ClipboardWrite { .. } => "Write clipboard",
+        AgentAction::JsExecute { .. } => "Run JavaScript",
+        AgentAction::Finish { .. } => "Finish",
+    }
+}
+
+/// C2: `action`'s own parameter, rendered as the step's detail line (a URL,
+/// a selector, the text typed, ...) — empty for an action with nothing
+/// further to show (`GoBack`, `WaitIdle`, ...). See [`action_label`].
+fn action_detail(action: &AgentAction) -> String {
+    match action {
+        AgentAction::Navigate { url } | AgentAction::Download { url } => url.clone(),
+        AgentAction::Query { selector }
+        | AgentAction::ReadText { selector }
+        | AgentAction::Click { selector }
+        | AgentAction::WaitForSelector { selector } => selector.clone(),
+        AgentAction::TypeText { selector, text } => format!("{selector} \u{2192} \"{text}\""),
+        AgentAction::SelectOption { selector, value } => format!("{selector} \u{2192} {value}"),
+        AgentAction::FillForm { fields } => format!("{} field(s)", fields.len()),
+        AgentAction::Scroll { dx, dy } => format!("({dx}, {dy})"),
+        AgentAction::ClipboardWrite { text } => text.clone(),
+        AgentAction::JsExecute { script } => script.clone(),
+        AgentAction::Finish { answer } => answer.clone(),
+        AgentAction::GoBack
+        | AgentAction::GoForward
+        | AgentAction::Reload
+        | AgentAction::ReadDom
+        | AgentAction::WaitIdle
+        | AgentAction::Screenshot
+        | AgentAction::ClipboardRead => String::new(),
+    }
+}
+
+/// C2: the icon shown next to `action`'s step in the agent sidebar's
+/// activity feed. Grouped by the same action-class boundaries
+/// `ferrite_core::Primitive`'s own taxonomy uses (see `Icon`'s doc
+/// comment) rather than one icon per raw `AgentAction` variant, so the
+/// icon set stays small and each glyph stays visually distinct at the
+/// sidebar's render size. `Finish` reuses `Icon::Approve` (its outcome —
+/// the task completing) and `JsExecute` reuses `Icon::Console` (already
+/// this crate's "code"/JS glyph, used by the JS-console toggle button) —
+/// deliberate reuse, not a placeholder, since both already mean exactly
+/// this elsewhere in the same chrome.
+fn icon_for_action(action: &AgentAction) -> Icon {
+    match action {
+        AgentAction::Navigate { .. }
+        | AgentAction::GoBack
+        | AgentAction::GoForward
+        | AgentAction::Reload => Icon::Navigate,
+        AgentAction::ReadDom | AgentAction::ReadText { .. } | AgentAction::Query { .. } => {
+            Icon::Read
         }
-        AgentAction::Finish { .. } => "[finish]".to_string(),
+        AgentAction::Click { .. } => Icon::Click,
+        AgentAction::TypeText { .. }
+        | AgentAction::SelectOption { .. }
+        | AgentAction::FillForm { .. } => Icon::Write,
+        AgentAction::Scroll { .. }
+        | AgentAction::WaitForSelector { .. }
+        | AgentAction::WaitIdle
+        | AgentAction::Screenshot => Icon::Activity,
+        AgentAction::Download { .. } => Icon::Download,
+        AgentAction::ClipboardRead | AgentAction::ClipboardWrite { .. } => Icon::Clipboard,
+        AgentAction::JsExecute { .. } => Icon::Console,
+        AgentAction::Finish { .. } => Icon::Approve,
     }
 }
 
@@ -388,6 +469,37 @@ const C_DANGER: Color = Color {
 // State
 // ---------------------------------------------------------------------------
 
+/// C2: one entry in the agent sidebar's live activity feed
+/// (`FerriteBrowser::agent_log`), replacing the flat `Vec<String>` label
+/// list B3 left (`agent_tool_log`) with real per-step structure: an icon,
+/// a title, the action's own parameter, and — unlike the old log — the
+/// actual result `execute_action` returned, not just the fact that some
+/// action ran.
+#[derive(Debug, Clone)]
+pub enum AgentLogEntry {
+    /// A plain status line from a phase that has no individual action to
+    /// itemize yet — currently only the dry-run phase's progress note
+    /// (`AgentToolLogged`, e.g. "dry run complete — checking for
+    /// unexpected activity").
+    Note(String),
+    /// One action the live loop actually took, or attempted.
+    Step {
+        icon: Icon,
+        label: &'static str,
+        detail: String,
+        /// The real observation `execute_action` returned — or, if
+        /// `blocked` is true, the fixed "blocked by user consent" string
+        /// `is_action_rejected` produces instead of ever calling it.
+        result: String,
+        /// Whether the user's consent decision blocked this action
+        /// before it reached the engine, rather than it having actually
+        /// executed — styled differently in the sidebar (see
+        /// `view_agent_sidebar`) so a blocked step doesn't read as if it
+        /// succeeded.
+        blocked: bool,
+    },
+}
+
 /// State of an in-progress live agent-action loop (post-fingerprint, either
 /// bypassed straight through or after a clean/consented dry run). Lives on
 /// `FerriteBrowser` between the per-step background model calls
@@ -436,10 +548,42 @@ pub struct FerriteBrowser {
     pub new_tab_search_input: String,
     pub js_input: String,
     pub js_output: Vec<(String, String)>,
-    /// Most recent cursor position over the Servo content area (in content pixels).
+    /// Most recent cursor position over the Servo content area, in logical
+    /// points (the same space `mouse_area::on_move` reports and `view()`
+    /// lays widgets out in) — never physical/device pixels. Scaled by
+    /// `scale_factor` at the point each is forwarded to
+    /// `HeadlessServoSession::send_mouse_*`, which operates in the render
+    /// buffer's physical-pixel space (see `scale_factor`'s doc comment).
     pub cursor_pos: (f32, f32),
-    /// Y offset of the Servo content area inside the window (toolbar + tab bar heights).
-    pub content_y_offset: f32,
+    /// Physical pixels per logical point for the app's window, fetched once
+    /// via `iced::window::get_scale_factor` shortly after launch
+    /// (`ScaleFactorReady`) — defaults to `1.0` until that resolves. Needed
+    /// because `HeadlessServoSession`'s render buffer and
+    /// `send_mouse_*`/`send_scroll`'s coordinates are in physical pixels,
+    /// while every iced-reported position (`mouse_area::on_move`,
+    /// `content_area_size`) is in logical points; on a HiDPI/Retina display
+    /// those differ, and conflating them is exactly what caused the
+    /// blurry-frame and hover/click-offset bugs this field's introduction
+    /// fixes (C3a).
+    pub scale_factor: f32,
+    /// Most recently measured logical size of the Servo content area —
+    /// written from `view()`'s `responsive` wrapper around the content
+    /// element (interior mutability: `view()` takes `&self`, so a `Cell`
+    /// is how a read-only render pass can still record what it measured)
+    /// and read back by `ServoFrame`'s tick handler to decide whether the
+    /// active tab's session buffer needs `resize()`ing to match.
+    ///
+    /// Replaces the older `content_y_offset`/`ContentAreaResized`
+    /// message, which tracked only a hardcoded vertical chrome-height
+    /// offset and — verified by grep before this fix — was never actually
+    /// wired to a real producer anywhere in `update()`'s message handling,
+    /// so it always held its initial constant. `responsive` reports the
+    /// container's true available size on every layout pass instead of
+    /// requiring this file to hand-replicate the chrome layout's
+    /// heights/widths (tab bar + toolbar + progress bar + optional
+    /// audit/JS panel + optional agent sidebar) — correct by construction
+    /// as that layout changes, not by keeping two copies of it in sync.
+    pub content_area_size: Cell<Size>,
     // ── Agent bridge ──────────────────────────────────────────────────────────
     /// The real `ferrite_model::ModelProvider` constructed at startup
     /// (`try_real_model_provider`), or `ferrite_model::MockProvider::new()`
@@ -472,8 +616,9 @@ pub struct FerriteBrowser {
     // ── Agent sidebar UI ─────────────────────────────────────────────────────
     pub show_agent_sidebar: bool,
     pub agent_task_input: String,
-    /// One entry per tool call: "[navigate] https://..."
-    pub agent_tool_log: Vec<String>,
+    /// Live activity feed — one entry per dry-run status note or executed
+    /// action, in order. See [`AgentLogEntry`].
+    pub agent_log: Vec<AgentLogEntry>,
     pub agent_response: Option<String>,
     pub agent_is_running: bool,
     /// Sender used by spawned agent task to emit progress messages.
@@ -565,7 +710,8 @@ impl Default for FerriteBrowser {
             js_input: String::new(),
             js_output: Vec::new(),
             cursor_pos: (0.0, 0.0),
-            content_y_offset: TAB_BAR_HEIGHT + TOOLBAR_HEIGHT + 4.0,
+            scale_factor: 1.0,
+            content_area_size: Cell::new(Size::new(1280.0, 700.0)),
             model_provider,
             model_tag_small,
             model_tag_main,
@@ -574,7 +720,7 @@ impl Default for FerriteBrowser {
             live_loop: None,
             show_agent_sidebar: false,
             agent_task_input: String::new(),
-            agent_tool_log: Vec::new(),
+            agent_log: Vec::new(),
             agent_response: None,
             agent_is_running: false,
             agent_event_tx: Some(agent_event_tx),
@@ -639,9 +785,10 @@ pub enum FerriteBrowserMessage {
         delta_x: f32,
         delta_y: f32,
     },
-    ContentAreaResized {
-        height: f32,
-    },
+    /// The window's real scale factor (physical px per logical point),
+    /// fetched once shortly after launch — see `scale_factor`'s doc
+    /// comment on `FerriteBrowser`.
+    ScaleFactorReady(f32),
     // ── Live agent loop (T-224) ──────────────────────────────────────────────
     /// The dry run found nothing unexpected (or the defense mode bypassed
     /// it entirely) — begin the live loop from scratch with `prompt`. Not
@@ -896,32 +1043,47 @@ pub fn update(
         // ── Servo mouse/scroll events ──────────────────────────────────────
         FerriteBrowserMessage::ServoMouseMove { x, y } => {
             state.cursor_pos = (x, y);
+            let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
-                session.send_mouse_move(x, y);
+                // mouse_area reports logical points; HeadlessServoSession's
+                // DevicePoint space is physical pixels — see scale_factor's
+                // doc comment. Without this, a HiDPI display (or any window
+                // size other than the session's hardcoded original buffer)
+                // put the cursor Servo actually sees somewhere other than
+                // where it visually is, which is exactly the "have to hover
+                // above the link" bug this scaling fixes (C3a).
+                session.send_mouse_move(x * scale, y * scale);
             }
         }
         FerriteBrowserMessage::ServoMousePress => {
             let (x, y) = state.cursor_pos;
+            let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
-                session.send_mouse_down(x, y);
+                session.send_mouse_down(x * scale, y * scale);
             }
         }
         FerriteBrowserMessage::ServoMouseRelease => {
             let (x, y) = state.cursor_pos;
+            let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
                 // Up event first, then a synthesised click for hit-testing.
-                session.send_mouse_up(x, y);
-                session.send_mouse_click(x, y);
+                session.send_mouse_up(x * scale, y * scale);
+                session.send_mouse_click(x * scale, y * scale);
             }
         }
         FerriteBrowserMessage::ServoScroll { delta_x, delta_y } => {
             let (x, y) = state.cursor_pos;
+            let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
-                session.send_scroll(x, y, delta_x as f64, delta_y as f64);
+                // Only the position is scaled to physical pixels, matching
+                // every other pointer event above — delta_x/delta_y are
+                // already OS-level wheel/trackpad units, independent of
+                // display scale, and left as iced reports them.
+                session.send_scroll(x * scale, y * scale, delta_x as f64, delta_y as f64);
             }
         }
-        FerriteBrowserMessage::ContentAreaResized { height } => {
-            state.content_y_offset = height;
+        FerriteBrowserMessage::ScaleFactorReady(factor) => {
+            state.scale_factor = factor;
         }
         // ── Agent sidebar ─────────────────────────────────────────────────────
         FerriteBrowserMessage::ToggleAgentSidebar => {
@@ -934,7 +1096,7 @@ pub fn update(
             if state.agent_is_running {
                 return Task::none();
             }
-            state.agent_tool_log.clear();
+            state.agent_log.clear();
             state.agent_response = None;
             state.agent_is_running = true;
             state.run_id += 1;
@@ -1048,7 +1210,7 @@ pub fn update(
             state.agent_handle = Some(handle);
         }
         FerriteBrowserMessage::AgentToolLogged(s) => {
-            state.agent_tool_log.push(s);
+            state.agent_log.push(AgentLogEntry::Note(s));
         }
         FerriteBrowserMessage::AgentCompleted(s) => {
             state.agent_response = Some(s);
@@ -1195,9 +1357,8 @@ pub fn update(
                 }
             }
 
-            let label = action_log_label(&action);
-            let observation = if is_action_rejected(&action, &live.rejected, &live.rejected_origins)
-            {
+            let blocked = is_action_rejected(&action, &live.rejected, &live.rejected_origins);
+            let observation = if blocked {
                 "blocked by user consent".to_string()
             } else if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
                 let mut engine = BorrowedServoEngine::new(session, 1280, 700);
@@ -1206,7 +1367,13 @@ pub fn update(
                 "error: no active browser session".to_string()
             };
 
-            state.agent_tool_log.push(label);
+            state.agent_log.push(AgentLogEntry::Step {
+                icon: icon_for_action(&action),
+                label: action_label(&action),
+                detail: action_detail(&action),
+                result: observation.clone(),
+                blocked,
+            });
             live.messages.push(Message::assistant(
                 serde_json::to_string(&action).unwrap_or_default(),
             ));
@@ -1223,6 +1390,26 @@ pub fn update(
         FerriteBrowserMessage::ServoReady => {}
         FerriteBrowserMessage::ServoFrame => {
             state.progress_offset = (state.progress_offset + 0.02) % 1.0;
+
+            // Keep the active tab's Servo render buffer matched to the real
+            // content-area size (see `content_area_size`'s doc comment).
+            // Runs every tick (16ms) rather than off a dedicated resize
+            // event, so it also picks up a size change caused by toggling
+            // the agent sidebar or the audit/JS panel, not only a window
+            // resize — those never fire a window-level resize event at
+            // all. `HeadlessServoSession::size()` is cheap (no frame
+            // readback), so comparing before calling `resize()` costs
+            // nothing on the common case where nothing changed.
+            let logical = state.content_area_size.get();
+            let scale = state.scale_factor;
+            let desired_w = (logical.width * scale).round().max(1.0) as u32;
+            let desired_h = (logical.height * scale).round().max(1.0) as u32;
+            if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
+                if session.size() != (desired_w, desired_h) {
+                    session.resize(desired_w, desired_h);
+                }
+            }
+
             // Pump engine once, then sync every tab's state and read pixels.
             if let Some(first) = state.servo_sessions.values().next() {
                 first.pump_engine();
@@ -2352,7 +2539,16 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // ── Content area ───────────────────────────────────────────────────────
     let active = state.active_tab;
 
-    let content: Element<FerriteBrowserMessage> =
+    // Wrapped in `responsive` so `state.content_area_size` always reflects
+    // this container's true logical size — whatever else in the layout
+    // (window size, the agent sidebar, the audit/JS panel) is currently
+    // taking space — rather than a value this function would otherwise
+    // have to compute by hand-replicating that layout's arithmetic. See
+    // `content_area_size`'s doc comment and `ServoFrame`'s tick handler,
+    // which reads this back to keep the Servo render buffer's physical
+    // pixel size matched to it.
+    let content: Element<FerriteBrowserMessage> = responsive(move |size: Size| {
+        state.content_area_size.set(size);
         if let Some(err_msg) = state.tab_error.get(active).and_then(|e| e.as_ref()) {
             // Error page
             let failed_url = state.tab_urls.get(active).map(String::as_str).unwrap_or("");
@@ -2450,7 +2646,9 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 ..container::Style::default()
             })
             .into()
-        };
+        }
+    })
+    .into();
 
     // ── Compose layout ──────────────────────────────────────────────────────
     let mut layout: Vec<Element<FerriteBrowserMessage>> =
@@ -2730,12 +2928,26 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
 // ---------------------------------------------------------------------------
 
 fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
-    // Header: "Agent" label + optional Stop button.
+    // Header: "Agent" label + optional step-progress indicator + Stop
+    // button. `live_loop` is only `Some` for the message-driven live run
+    // (not the dry-run phase, which has no per-step budget to show yet).
     let mut header_items: Vec<Element<FerriteBrowserMessage>> = vec![text("Agent")
         .size(16)
         .color(C_TEXT)
         .width(Length::Fill)
         .into()];
+    if let Some(live) = &state.live_loop {
+        header_items.push(
+            text(format!(
+                "Step {}/{}",
+                live.actions_taken.len() + 1,
+                live.budget.max_steps
+            ))
+            .size(11)
+            .color(C_TEXT_DIM)
+            .into(),
+        );
+    }
     if state.agent_is_running {
         header_items.push(
             button(
@@ -3094,43 +3306,81 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
         .height(Length::Fill)
         .into()
     } else {
-        // ── Normal tool call log ──────────────────────────────────────────────
+        // ── Live activity feed (C2) ─────────────────────────────────────────────
+        // One card per `AgentLogEntry::Step` — icon (see `icon_for_action`),
+        // title, the action's own parameter, and the real result
+        // `execute_action` returned — not just the fact that some action
+        // ran, which is all the pre-C2 flat-string log showed. A blocked
+        // step (the user rejected it in consent) is styled in the danger
+        // color throughout, so it reads as "this did NOT happen" rather
+        // than blending in with a normal completed step.
         let dots = match ((state.progress_offset * 3.0) as usize) % 4 {
             0 => "",
             1 => ".",
             2 => "..",
             _ => "...",
         };
-        let log_items: Vec<Element<FerriteBrowserMessage>> =
-            if state.agent_tool_log.is_empty() && !state.agent_is_running {
-                vec![text("No active session.").size(12).color(C_TEXT_DIM).into()]
-            } else {
-                let mut items: Vec<Element<_>> = state
-                    .agent_tool_log
-                    .iter()
-                    .map(|entry| {
-                        container(
-                            row![
-                                text("->").size(12).color(C_ACCENT),
-                                text(entry.as_str()).size(12).color(C_TEXT_DIM),
-                            ]
-                            .spacing(4),
-                        )
-                        .padding([2, 0])
-                        .width(Length::Fill)
-                        .into()
-                    })
-                    .collect();
-                if state.agent_is_running {
-                    items.push(
-                        text(format!("Working{}", dots))
-                            .size(12)
-                            .color(C_TEXT_DIM)
-                            .into(),
-                    );
-                }
-                items
-            };
+        let log_items: Vec<Element<FerriteBrowserMessage>> = if state.agent_log.is_empty()
+            && !state.agent_is_running
+        {
+            vec![text("No active session.").size(12).color(C_TEXT_DIM).into()]
+        } else {
+            let mut items: Vec<Element<_>> = state
+                .agent_log
+                .iter()
+                .map(|entry| match entry {
+                    AgentLogEntry::Note(s) => container(
+                        row![
+                            text("->").size(12).color(C_ACCENT),
+                            text(s.as_str()).size(12).color(C_TEXT_DIM),
+                        ]
+                        .spacing(4),
+                    )
+                    .padding([2, 0])
+                    .width(Length::Fill)
+                    .into(),
+                    AgentLogEntry::Step {
+                        icon: step_icon,
+                        label,
+                        detail,
+                        result,
+                        blocked,
+                    } => {
+                        let accent = if *blocked { C_DANGER } else { C_ACCENT };
+                        let mut lines: Vec<Element<FerriteBrowserMessage>> = vec![row![
+                            icon(*step_icon, ICON_SIZE_SM, accent),
+                            text(*label).size(12).color(C_TEXT),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::Alignment::Center)
+                        .into()];
+                        if !detail.is_empty() {
+                            lines
+                                .push(text(truncate(detail, 70)).size(11).color(C_TEXT_DIM).into());
+                        }
+                        lines.push(
+                            text(truncate(result, 90))
+                                .size(11)
+                                .color(if *blocked { C_DANGER } else { C_TEXT_DIM })
+                                .into(),
+                        );
+                        container(column(lines).spacing(2))
+                            .padding([5, 0])
+                            .width(Length::Fill)
+                            .into()
+                    }
+                })
+                .collect();
+            if state.agent_is_running {
+                items.push(
+                    text(format!("Working{}", dots))
+                        .size(12)
+                        .color(C_TEXT_DIM)
+                        .into(),
+                );
+            }
+            items
+        };
 
         let mut log_col_items = log_items;
         if let Some(response) = &state.agent_response {
@@ -3196,6 +3446,25 @@ pub fn launch() -> iced::Result {
         .theme(|_state| Theme::Dark)
         .subscription(subscription)
         .run_with(|| {
+            // C3a: `.window_size(...).centered()` above is only the frame
+            // before the window manager has a chance to place it — the
+            // startup task below immediately requests maximized, so the
+            // app opens filling the display rather than the small
+            // fixed-size centered window it used to. `get_scale_factor`
+            // in the same chain is what makes the Servo render buffer and
+            // every pointer-event coordinate correct on a HiDPI/Retina
+            // display — see `scale_factor`'s doc comment on
+            // `FerriteBrowser` for why both bugs (blurry frame, hover/
+            // click landing in the wrong place) traced back to this
+            // never being queried at all.
+            let startup_window_task = window::get_latest().then(|id| match id {
+                Some(id) => Task::batch([
+                    window::maximize(id, true),
+                    window::get_scale_factor(id).map(FerriteBrowserMessage::ScaleFactorReady),
+                ]),
+                None => Task::none(),
+            });
+
             let mut state = FerriteBrowser::default();
             // T-224/T-229: construct the real ModelProvider here, at actual
             // app startup — never inside `FerriteBrowser::default()` itself
@@ -3217,11 +3486,17 @@ pub fn launch() -> iced::Result {
             match HeadlessServoSession::new(1280, 700) {
                 Ok(session) => {
                     state.servo_sessions.insert(0, session);
-                    (state, Task::done(FerriteBrowserMessage::ServoReady))
+                    (
+                        state,
+                        Task::batch([
+                            Task::done(FerriteBrowserMessage::ServoReady),
+                            startup_window_task,
+                        ]),
+                    )
                 }
                 Err(e) => {
                     eprintln!("[ferrite-ui] Servo unavailable: {}", e);
-                    (state, Task::none())
+                    (state, startup_window_task)
                 }
             }
         })
@@ -3788,6 +4063,157 @@ mod tests {
             !last.content.contains("blocked by user consent"),
             "a non-rejected action must not be reported as consent-blocked: {last:?}"
         );
+    }
+
+    // ── C2: agent_log — real per-step icon/label/detail/result ────────────
+
+    #[test]
+    fn action_label_and_detail_are_distinct_per_action_kind() {
+        assert_eq!(
+            action_label(&AgentAction::Navigate {
+                url: "https://a.example".to_string()
+            }),
+            "Navigate"
+        );
+        assert_eq!(
+            action_detail(&AgentAction::Navigate {
+                url: "https://a.example".to_string()
+            }),
+            "https://a.example"
+        );
+        assert_eq!(
+            action_label(&AgentAction::Click {
+                selector: "#go".to_string()
+            }),
+            "Click"
+        );
+        assert_eq!(
+            action_detail(&AgentAction::Click {
+                selector: "#go".to_string()
+            }),
+            "#go"
+        );
+        assert_eq!(
+            action_detail(&AgentAction::TypeText {
+                selector: "#q".to_string(),
+                text: "hello".to_string(),
+            }),
+            "#q \u{2192} \"hello\""
+        );
+        assert_eq!(action_label(&AgentAction::WaitIdle), "Wait");
+        assert_eq!(action_detail(&AgentAction::WaitIdle), "");
+    }
+
+    #[test]
+    fn icon_for_action_groups_by_action_class_not_one_icon_per_variant() {
+        // Navigate group shares one icon regardless of which navigation
+        // variant fired.
+        assert_eq!(
+            icon_for_action(&AgentAction::Navigate { url: String::new() }),
+            icon_for_action(&AgentAction::GoBack)
+        );
+        assert_eq!(
+            icon_for_action(&AgentAction::GoBack),
+            icon_for_action(&AgentAction::Reload)
+        );
+        // But a genuinely different class gets a different icon.
+        assert_ne!(
+            icon_for_action(&AgentAction::GoBack),
+            icon_for_action(&AgentAction::Click {
+                selector: String::new()
+            })
+        );
+        // Finish/JsExecute deliberately reuse an existing chrome icon
+        // rather than a dedicated one — pinned so that reuse stays
+        // intentional, not silently regressed to something else later.
+        assert_eq!(
+            icon_for_action(&AgentAction::Finish {
+                answer: String::new()
+            }),
+            Icon::Approve
+        );
+        assert_eq!(
+            icon_for_action(&AgentAction::JsExecute {
+                script: String::new()
+            }),
+            Icon::Console
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_step_ready_records_a_real_step_with_its_actual_result() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        state.live_loop = Some(fresh_live_loop());
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Ok(AgentAction::Click {
+                    selector: "#submit".to_string(),
+                }),
+            },
+        );
+
+        assert_eq!(state.agent_log.len(), 1);
+        match &state.agent_log[0] {
+            AgentLogEntry::Step {
+                icon: step_icon,
+                label,
+                detail,
+                result,
+                blocked,
+            } => {
+                assert_eq!(*step_icon, Icon::Click);
+                assert_eq!(*label, "Click");
+                assert_eq!(detail, "#submit");
+                assert!(!blocked);
+                // No active Servo session in this test fixture (R7 — no
+                // real session is ever constructed outside launch()), so
+                // the real fallback string, not a fabricated one, must
+                // land in the step's own result field.
+                assert_eq!(result, "error: no active browser session");
+            }
+            other => panic!("expected a Step entry, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_step_ready_records_a_blocked_step_as_blocked_not_a_silent_success() {
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        let mut live = fresh_live_loop();
+        live.rejected = [ToolId::new("js.execute")].into_iter().collect();
+        state.live_loop = Some(live);
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Ok(AgentAction::JsExecute {
+                    script: "1+1".to_string(),
+                }),
+            },
+        );
+
+        assert_eq!(state.agent_log.len(), 1);
+        match &state.agent_log[0] {
+            AgentLogEntry::Step {
+                blocked, result, ..
+            } => {
+                assert!(
+                    *blocked,
+                    "a rejected action's step must record blocked = true"
+                );
+                assert_eq!(result, "blocked by user consent");
+            }
+            other => panic!("expected a Step entry, got {other:?}"),
+        }
     }
 
     // ── AgentStepReady/LiveRunReady: message-driven step-loop plumbing ────

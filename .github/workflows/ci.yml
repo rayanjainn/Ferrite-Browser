@@ -1,78 +1,34 @@
 name: CI
 
+# Manual trigger only — no automatic run on push or pull_request, and no
+# weekly schedule. This is a deliberate project-owner decision (recorded in
+# docs/PROGRESS.md and docs/TO-DO.md T-210), not the rebuild's original
+# design (docs/REBUILD_DIRECTIVE.md §6/A1 specified push/PR + a weekly
+# Servo-release cron; both are gone here). Use the "Run workflow" button in
+# the Actions tab for every run, including a Servo release.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'deny.toml'
-      - '.devcontainer/**'
-      - '.github/workflows/ci.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'deny.toml'
-      - '.devcontainer/**'
-      - '.github/workflows/ci.yml'
-  # Weekly Servo release build (docs/REBUILD_DIRECTIVE.md §7.1) — Monday
-  # 06:00 UTC. Cron schedules use the DEFAULT branch's workflow file, so
-  # editing this schedule requires merging to main, not just pushing a
-  # branch.
-  schedule:
-    - cron: '0 6 * * 1'
-  # Manual trigger for an on-demand release without waiting for Monday —
-  # use the "Run workflow" button in the Actions tab.
   workflow_dispatch: {}
 
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # Job 1: Build, lint, test — matrix across Linux, macOS & Windows.
-  # Servo-free (default feature set) — docs/REBUILD_DIRECTIVE.md §7.1:
-  # "Servo is optional and off by default", not built on every push. This
-  # is the fast gate that runs on every push/PR; the real-Servo build
-  # lives in the weekly job below.
+  # Job 1: Build, lint, test. macOS only, by project-owner decision — the
+  # rebuild's original ubuntu+windows+macos matrix is gone; this repo
+  # develops and ships macOS-only for now. Servo-free (default feature
+  # set) — docs/REBUILD_DIRECTIVE.md §7.1: "Servo is optional and off by
+  # default." The real-Servo build lives in Job 2, also manual-only.
   # ─────────────────────────────────────────────────────────────
   ci:
-    name: Build, Lint & Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-          - os: windows-latest
-            platform: windows
-          - os: macos-latest
-            platform: macos
+    name: Build, Lint & Test (macOS)
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system dependencies (Linux)
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libsqlite3-dev
-
-      - name: Install system dependencies (macOS)
-        if: matrix.platform == 'macos'
+      - name: Install system dependencies
         run: |
           brew update
           brew install cmake pkg-config openssl sqlite
-
-      - name: Install system dependencies (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          choco install -y cmake sqlite
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -82,14 +38,12 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.platform }}
+          key: macos
 
       - name: Fetch dependencies
         run: cargo fetch
 
-      # Only one platform needs to check formatting — it's not platform-dependent.
       - name: Check formatting
-        if: matrix.platform == 'linux'
         run: cargo fmt --all --check
 
       # --all-targets: the pre-A1 CI omitted this and so never linted test
@@ -99,17 +53,14 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Unused dependencies (cargo-machete)
-        if: matrix.platform == 'linux'
         run: |
           cargo install cargo-machete --locked
           cargo machete
 
       - name: License / advisory / duplicate-version audit (cargo-deny)
-        if: matrix.platform == 'linux'
         uses: EmbarkStudios/cargo-deny-action@v2
 
       - name: Doc-drift checks
-        if: matrix.platform == 'linux'
         run: |
           sh scripts/check_purge.sh
           sh scripts/check_no_archive_links.sh
@@ -122,50 +73,25 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────
   # Job 2: Build the REAL Servo-enabled binary and publish the rolling
-  # "latest" release. Weekly + on-demand only — NOT on every push
-  # (docs/REBUILD_DIRECTIVE.md §7.1: the Servo build costs tens of GB and
-  # 30-60 minutes; gating it behind every push is exactly the cost this
-  # rebuild exists to remove). Use "Run workflow" in the Actions tab for an
-  # immediate release without waiting for the weekly schedule.
-  #
-  # This is a real behavior change from the pre-rebuild pipeline, which
-  # built and released a Servo-enabled binary on every push to main —
-  # flagged in docs/PROGRESS.md, not a silent regression: if this repo's
-  # workflow depends on every push producing a fresh downloadable browser,
-  # that expectation no longer holds and the weekly cadence (or a
-  # manual dispatch) is the replacement.
+  # "latest" release. Manual-only (workflow_dispatch), macOS only —
+  # docs/REBUILD_DIRECTIVE.md §7.1: the Servo build costs tens of GB and
+  # 30-60 minutes; this project's owner has decided no automatic trigger
+  # (push, PR, or schedule) gets to pay that cost — every run, including a
+  # release, is an explicit "Run workflow" click.
   # ─────────────────────────────────────────────────────────────
   build-servo-release:
-    name: Build Servo release (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            platform: windows
-            binary_suffix: ".exe"
-          - os: macos-latest
-            platform: macos
-            binary_suffix: ""
+    name: Build Servo release (macOS)
+    runs-on: macos-latest
+    if: github.event_name == 'workflow_dispatch'
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system dependencies (macOS)
-        if: matrix.platform == 'macos'
+      - name: Install system dependencies
         run: |
           brew update
           brew install cmake pkg-config openssl gstreamer sqlite
-
-      - name: Install system dependencies (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          choco install -y cmake sqlite
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -173,7 +99,7 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: servo-${{ matrix.platform }}
+          key: servo-macos
 
       - name: Build release binary (with Servo)
         run: cargo build --release -p ferrite-shell --features ferrite-servo/servo
@@ -189,29 +115,27 @@ jobs:
         shell: bash
         run: |
           LABEL="${{ steps.label.outputs.binary_label }}"
-          PLATFORM="${{ matrix.platform }}"
-          EXT="${{ matrix.binary_suffix }}"
           mkdir -p staged
-          cp "target/release/ferrite-shell${EXT}" "staged/ferrite-${LABEL}-${PLATFORM}${EXT}"
+          cp "target/release/ferrite-shell" "staged/ferrite-${LABEL}-macos"
 
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ferrite-${{ steps.label.outputs.binary_label }}-${{ matrix.platform }}
+          name: ferrite-${{ steps.label.outputs.binary_label }}-macos
           path: staged/
           retention-days: 90
 
   # ─────────────────────────────────────────────────────────────
-  # Job 3: Publish the rolling "latest" GitHub Release from the weekly/
-  # on-demand Servo build above. Every run replaces the previous
-  # "latest" release's assets; full history is preserved via the commit
-  # SHA baked into each filename.
+  # Job 3: Publish the rolling "latest" GitHub Release from the manual
+  # Servo build above. Every run replaces the previous "latest" release's
+  # assets; full history is preserved via the commit SHA baked into the
+  # filename.
   # ─────────────────────────────────────────────────────────────
   release:
     name: Publish rolling release
     runs-on: ubuntu-22.04
     needs: build-servo-release
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
 
     permissions:
       contents: write
@@ -226,12 +150,6 @@ jobs:
         run: |
           SHA="${{ github.sha }}"
           echo "binary_label=${SHA:0:7}" >> "$GITHUB_OUTPUT"
-
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ferrite-${{ steps.label.outputs.binary_label }}-windows
-          path: downloaded/windows
 
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
@@ -251,11 +169,10 @@ jobs:
           cat <<EOF > release_notes.md
           ## ferrite · latest
 
-          > This release is rebuilt weekly (and on manual dispatch), NOT on
-          > every push — the Servo engine build is too expensive to gate
-          > behind every commit. It always contains the most recent
-          > successful weekly/on-demand build, which may be a few days
-          > behind \`main\`.
+          > This release is built manually only (workflow_dispatch) — no
+          > automatic push, PR, or schedule trigger. It always contains the
+          > most recent manually-triggered build, which may be behind
+          > \`main\`.
 
           | Field   | Value |
           |---------|-------|
@@ -266,7 +183,6 @@ jobs:
           ### Downloads
           | Platform | File |
           |----------|------|
-          | Windows  | \`ferrite-${LABEL}-windows.exe\` |
           | macOS    | \`ferrite-${LABEL}-macos\` |
           EOF
 
@@ -286,7 +202,6 @@ jobs:
           prerelease: true
           make_latest: true
           files: |
-            downloaded/windows/ferrite-${{ steps.label.outputs.binary_label }}-windows.exe
             downloaded/macos/ferrite-${{ steps.label.outputs.binary_label }}-macos
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
