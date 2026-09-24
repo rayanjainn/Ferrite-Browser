@@ -54,10 +54,83 @@
 // full reasoning for this deviation from calling `run_agent_loop` directly.
 //
 // ## Keyboard shortcuts (platform-aware)
-//   macOS : Cmd+T/W/R/L/J, F5, F12, Alt+←/→, Esc
-//   other : Ctrl+T/W/R/L/J, F5, F12, Alt+←/→, Esc
+//   macOS : Cmd+T/W/R/L/J/F, Cmd+=/-/0 (zoom), F5, F12, Alt+←/→, Esc
+//   other : Ctrl+T/W/R/L/J/F, Ctrl+=/-/0 (zoom), F5, F12, Alt+←/→, Esc
+//
+// Esc is context-sensitive (C3d): it closes the find bar first if one is
+// open (`show_find_bar`), otherwise it falls through to its pre-existing
+// meaning (stop loading, or unfocus the address bar) — resolved in
+// `update()`'s `EscapePressed` handler, not in `handle_key_press` itself
+// (`iced::keyboard::on_key_press` requires a plain `fn` pointer with no
+// state access — see that function's own doc comment).
+//
+// ## Bookmarks/history/zoom/find-in-page/settings/downloads (C3d)
+//
+// Six features added on top of C3c's palette/theme system, sharing its
+// conventions throughout (every new colour is `state.palette()`/
+// `palette_for_theme(theme)`, no new hardcoded `Color` literals):
+// - **Bookmarks** are pure UI + JSON persistence (`Bookmark`,
+//   `load_bookmarks_from`/`save_bookmarks_to`, injected `&Path` for
+//   testability, `default_bookmarks_path()` resolving the real one via
+//   `dirs::home_dir()` — loaded once in `launch()`, never in `Default`, the
+//   same test-safety discipline `try_real_model_provider()` already
+//   established for the model provider).
+// - **History** has two independent halves, deliberately not one. Per-tab
+//   `GoBack`/`GoForward`/`can_go_back`/`can_go_forward` now read Servo's own
+//   real native session history (`HeadlessServoSession::history()`, backed
+//   by `WebViewDelegate::notify_history_changed` — see `ferrite-servo`'s
+//   `session.rs`), which replaced an approximated `Complete`-event counter
+//   that could never tell forward history apart at all
+//   (`can_go_forward()` used to just hardcode `false`) — a real correctness
+//   fix, not new UI. The History **panel**'s browser-wide, recency-ordered
+//   `FerriteBrowser::history` list is populated separately, from
+//   `LoadStatusChanged`'s own already-existing "did this tab's URL really
+//   change" signal (`record_history_visit`) rather than by reading
+//   `session.history()` on every tick — simpler than reconciling N per-tab
+//   Servo history lists into one recency-ordered view, and this crate's own
+//   already-verified-working signal, rather than building the panel's
+//   contents on top of `notify_history_changed`'s data shape, which (like
+//   the rest of `ferrite-servo`'s `servo`-feature code) this session could
+//   only verify by reading the pinned source, not by compiling it. Session-
+//   only: not persisted across restarts (see `history`'s doc comment for
+//   the honest reasoning).
+// - **Zoom** is a per-tab `Vec<f32>` (`tab_zoom`, indexed exactly like
+//   `tab_titles`/`tab_urls`/`tab_favicons`/`tab_favicons`), applied via a
+//   CSS `transform: scale(...)` injected through `execute_js` (Servo has no
+//   native zoom API at this pinned version — see `zoom_script`'s doc
+//   comment) and surfaced in the toolbar only when it isn't 100% (see
+//   `view()`'s toolbar composition comment for the information-architecture
+//   reasoning), plus a `default_zoom` setting for new tabs in the Settings
+//   tab.
+// - **Find-in-page** is a dismissible overlay-styled bar (not a permanent
+//   toolbar element), driving a standards-based DOM search
+//   (`document.createTreeWalker`/`Range`, no `window.find()`) via the same
+//   `execute_js` path zoom uses — see `find_script`/`find_navigate_script`.
+// - **Settings** is a read-only view of the resolved model config
+//   (`model_tag_small`/`model_tag_main`/`model_cache_dir`) plus real working
+//   toggles for the state this crate already has (theme, default zoom) — no
+//   free-text model-tag entry, per `CLAUDE.md` §10.2's no-hardcoded/no-
+//   silently-bypassed-config rule.
+// - **Downloads** are a small, self-contained manager local to this crate
+//   (`DownloadItem`/`DownloadState`, `run_download`): a `tokio::spawn`ed
+//   `reqwest` GET streamed to `dirs::download_dir()`, reporting progress
+//   through the same `agent_event_tx`/`agent_event_rx` channel
+//   `spawn_next_step` already uses for its own background-task-to-UI
+//   messages — deliberately independent of `ferrite_engine::BrowserEngine::
+//   download()` (the agent's dry-run/consent-gated tool vocabulary, a
+//   different concern entirely — see `docs/DECISIONS.md`'s IPI/consent
+//   boundary ADRs). Trigger is a manual "Download current page" action in
+//   the Library panel's Downloads tab; in-page `<a download>` click
+//   interception is out of scope for this pass (stated here, not silently
+//   dropped).
+//
+// All four of bookmarks/history/downloads/settings share one toolbar entry
+// point — the Library panel (`show_library_panel`/`library_tab`) — rather
+// than four more permanent toolbar buttons; see `view()`'s toolbar
+// composition comment for why.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod icons;
@@ -84,6 +157,73 @@ use iced::{
 use iced_widget::image::{Handle as ImageHandle, Image as ServoImage};
 use iced_widget::responsive;
 use std::cell::Cell;
+
+// ---------------------------------------------------------------------------
+// C3d — pure data types: bookmarks, history, zoom, downloads.
+//
+// Kept together, ahead of the `FerriteBrowser` struct they're fields of,
+// matching where `AgentLogEntry`/`StepFailure`/`LiveAgentLoop` already sit
+// relative to it.
+// ---------------------------------------------------------------------------
+
+/// One saved bookmark. Serde-derived for JSON persistence
+/// (`load_bookmarks_from`/`save_bookmarks_to`) — see this module's own doc
+/// comment for the persistence story.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Bookmark {
+    pub title: String,
+    pub url: String,
+}
+
+/// One visited page, as folded into `FerriteBrowser::history` — see that
+/// field's doc comment for why this is a browser-wide list rather than
+/// Servo's own per-tab session history verbatim.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    pub url: String,
+    pub title: String,
+    pub visited_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Which sub-view the Library panel currently shows — see `view()`'s
+/// toolbar composition comment for why these four live behind one toggle
+/// instead of four separate toolbar buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LibraryTab {
+    #[default]
+    Bookmarks,
+    History,
+    Downloads,
+    Settings,
+}
+
+/// One entry in `FerriteBrowser::downloads` — a page fetched by the
+/// "Download current page" action (Library panel, Downloads tab), streamed
+/// to disk by `run_download`.
+#[derive(Debug, Clone)]
+pub struct DownloadItem {
+    pub id: u64,
+    pub url: String,
+    pub file_name: String,
+    pub path: PathBuf,
+    pub state: DownloadState,
+}
+
+/// Progress state of one [`DownloadItem`], advanced by the
+/// `DownloadProgress`/`DownloadCompleted`/`DownloadFailed` messages
+/// `run_download` sends back over `agent_event_tx`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DownloadState {
+    InProgress {
+        downloaded_bytes: u64,
+        /// `None` when the server's response carried no `Content-Length`
+        /// (e.g. chunked transfer encoding) — the UI then shows bytes
+        /// downloaded so far without a percentage, rather than guessing.
+        total_bytes: Option<u64>,
+    },
+    Completed,
+    Failed(String),
+}
 
 // ---------------------------------------------------------------------------
 // Real ModelProvider construction (T-229)
@@ -369,6 +509,7 @@ const MOD_LABEL: &str = "Ctrl";
 
 const ADDRESS_BAR_ID: &str = "ferrite_address_bar";
 const JS_INPUT_ID: &str = "ferrite_js_input";
+const FIND_INPUT_ID: &str = "ferrite_find_input";
 
 const TOOLBAR_HEIGHT: f32 = 46.0;
 const TAB_BAR_HEIGHT: f32 = 36.0;
@@ -972,6 +1113,104 @@ pub struct FerriteBrowser {
     /// `.theme(...)` closure returns — see [`AppTheme`]. Toggled by
     /// `ToggleTheme`, e.g. the toolbar's sun/moon button.
     pub theme_mode: AppTheme,
+    // ── C3d: bookmarks ───────────────────────────────────────────────────
+    /// Every saved bookmark, in the order they were added — no separate
+    /// sort key; the Bookmarks tab shows them in this order and a removal
+    /// (`RemoveBookmark`) is by index into this same `Vec`.
+    pub bookmarks: Vec<Bookmark>,
+    /// Where `bookmarks` is persisted, resolved once by `launch()`
+    /// (`default_bookmarks_path()`) — `None` in every test and in any
+    /// `FerriteBrowser::default()` construction (this field is never set
+    /// there, kept test-safe/R7 the same way `model_provider`'s real
+    /// construction is deferred to `launch()` alone), meaning a bookmark
+    /// change in that context updates `bookmarks` in memory but is never
+    /// written to disk — the correct, honest behavior for a test, not a
+    /// silently-swallowed I/O error.
+    pub bookmarks_path: Option<PathBuf>,
+    // ── C3d: history ─────────────────────────────────────────────────────
+    /// Every page visited this session, oldest first — one browser-wide
+    /// list rather than Servo's own per-tab session history verbatim
+    /// (`HeadlessServoSession::history()`), because most real browsers'
+    /// history UI is itself one recency-ordered list across all tabs, not
+    /// per-tab — simpler to build and to read than reconciling N per-tab
+    /// lists into one view would be, at the cost of losing Servo's own
+    /// per-tab back/forward *order* here (still available, unaffected, via
+    /// `can_go_back`/`can_go_forward`/`GoBack`/`GoForward`, which read
+    /// Servo's per-tab history directly — this list is for the History
+    /// *panel* only, not navigation). Appended to by `LoadStatusChanged`
+    /// (see that handler) whenever a tab's URL genuinely changes to
+    /// something real (not `about:blank`), deduplicated against its own
+    /// immediately-preceding entry (`record_history_visit`) so a reload
+    /// doesn't spam the list with repeats of the same URL.
+    ///
+    /// **Not persisted across restarts — a deliberate scope cut, not an
+    /// oversight.** A real browser does persist history, but doing that
+    /// correctly (merge semantics across restarts, a retention/eviction
+    /// policy, migrating the JSON shape over time) is materially more
+    /// design work than bookmarks' simple "load once, save on every
+    /// change" — out of proportion to what this pass can verify without a
+    /// real display to check it against. Session-only history is still a
+    /// real, working feature (find-in-page and zoom are also session-only
+    /// state, for the same proportionality reason).
+    pub history: Vec<HistoryEntry>,
+    // ── C3d: zoom ─────────────────────────────────────────────────────────
+    /// Per-tab zoom level, `1.0` = 100% — same indexing convention as
+    /// `tab_titles`/`tab_urls`/`tab_favicons`, kept in sync on
+    /// `AddTab`/`CloseTab`. Applied via `zoom_script` through `execute_js`
+    /// (Servo has no native zoom API at this pinned version).
+    pub tab_zoom: Vec<f32>,
+    /// The zoom level a freshly-added tab starts at — a genuinely-settable
+    /// preference (Settings tab, `SetDefaultZoom`), distinct from `1.0`
+    /// being merely `AddTab`'s old hardcoded default.
+    pub default_zoom: f32,
+    // ── C3d: find-in-page ────────────────────────────────────────────────
+    /// Whether the find bar overlay is shown — toggled by `OpenFindBar`/
+    /// `CloseFindBar` (Cmd/Ctrl+F to open, Escape to close while it's the
+    /// thing on screen that Escape should act on — see `handle_key_press`).
+    pub show_find_bar: bool,
+    pub find_query: String,
+    /// Total matches found by the most recent search (`find_script`) — `0`
+    /// both before any search has run and when a search found nothing;
+    /// `find_current_index` distinguishes those in the UI to avoid a
+    /// content-free "0 of 0" line while the bar has just opened.
+    pub find_match_count: usize,
+    /// 1-based index of the currently-highlighted match, `0` when there is
+    /// no current match (no search run yet, or the last search found
+    /// nothing).
+    pub find_current_index: usize,
+    // ── C3d: downloads ───────────────────────────────────────────────────
+    /// Every download started this session, in the order `DownloadCurrentPage`
+    /// created them — `run_download`'s progress messages (`DownloadProgress`/
+    /// `DownloadCompleted`/`DownloadFailed`) update the matching entry by
+    /// `id` in place, so completed downloads stay in the list rather than
+    /// disappearing.
+    pub downloads: Vec<DownloadItem>,
+    /// Monotonically increasing id source for `downloads` — never reused,
+    /// even across a download's whole lifetime, so a stale progress message
+    /// from an aborted/superseded download (there is no cancel action yet,
+    /// but a duplicate id would still be a latent bug) can never be
+    /// misattributed to a later one.
+    pub next_download_id: u64,
+    /// Real downloads directory, resolved once by `launch()`
+    /// (`default_downloads_dir()`) — `None` in every test/`Default`
+    /// construction, same test-safety discipline as `bookmarks_path`.
+    /// `DownloadCurrentPage` is a no-op (returns `Task::none()`) when this
+    /// is `None`, rather than guessing a path.
+    pub downloads_dir: Option<PathBuf>,
+    // ── C3d: Library panel (bookmarks/history/downloads/settings) ──────────
+    /// Whether the Library panel (the toolbar's single consolidated entry
+    /// point for all four C3d list/settings views) is shown — mutually
+    /// exclusive with the audit/JS-console bottom panels, the same way
+    /// those two are already mutually exclusive with each other.
+    pub show_library_panel: bool,
+    /// Which of the four sub-views the Library panel currently shows.
+    pub library_tab: LibraryTab,
+    /// `ferrite_model::ModelConfig::cache_dir`, resolved once by `launch()`
+    /// alongside `model_tag_small`/`model_tag_main` — displayed read-only in
+    /// the Settings tab. `None` when no real provider is configured
+    /// (`model_tag_small`/`model_tag_main` stay `"unconfigured"` in that
+    /// same case).
+    pub model_cache_dir: Option<String>,
 }
 
 impl FerriteBrowser {
@@ -1047,6 +1286,21 @@ impl Default for FerriteBrowser {
             hovered_tab: None,
             consent_panel_anim: 0.0,
             theme_mode: AppTheme::Dark,
+            bookmarks: Vec::new(),
+            bookmarks_path: None,
+            history: Vec::new(),
+            tab_zoom: vec![1.0],
+            default_zoom: 1.0,
+            show_find_bar: false,
+            find_query: String::new(),
+            find_match_count: 0,
+            find_current_index: 0,
+            downloads: Vec::new(),
+            next_download_id: 0,
+            downloads_dir: None,
+            show_library_panel: false,
+            library_tab: LibraryTab::default(),
+            model_cache_dir: None,
         }
     }
 }
@@ -1160,6 +1414,68 @@ pub enum FerriteBrowserMessage {
     /// Flips `FerriteBrowser::theme_mode` between `AppTheme::Dark` and
     /// `AppTheme::Light` — sent by the toolbar's sun/moon button.
     ToggleTheme,
+    // ── C3d: bookmarks ────────────────────────────────────────────────────
+    /// Star-toggle the active tab's current URL — bookmarks it if it isn't
+    /// already, removes the existing bookmark if it is. No-op for
+    /// `about:blank`/an empty URL.
+    ToggleBookmarkCurrentPage,
+    /// Removes `FerriteBrowser::bookmarks[index]` — a no-op (not a panic) if
+    /// `index` is out of bounds, e.g. a stale button press racing a
+    /// concurrent removal.
+    RemoveBookmark(usize),
+    // ── C3d: history ──────────────────────────────────────────────────────
+    /// Empties `FerriteBrowser::history`. Session-only either way (see that
+    /// field's doc comment) — this just lets the user clear it before the
+    /// session ends too.
+    ClearHistory,
+    // ── C3d: zoom ─────────────────────────────────────────────────────────
+    /// Steps the active tab's zoom to the next level up `ZOOM_LEVELS`.
+    ZoomIn,
+    /// Steps the active tab's zoom to the next level down `ZOOM_LEVELS`.
+    ZoomOut,
+    /// Resets the active tab's zoom to 100%.
+    ZoomReset,
+    /// Sets `FerriteBrowser::default_zoom` (Settings tab) — affects tabs
+    /// created after this point, not the currently active one.
+    SetDefaultZoom(f32),
+    // ── C3d: find-in-page ────────────────────────────────────────────────
+    /// Opens the find bar (Cmd/Ctrl+F) and focuses its input.
+    OpenFindBar,
+    /// Closes the find bar and clears any highlights it left on the page.
+    CloseFindBar,
+    /// The find bar's input changed — re-runs the search immediately (live
+    /// highlighting, the same convention every mainstream browser's own
+    /// find bar uses) rather than waiting for Enter.
+    FindQueryChanged(String),
+    /// Advances to the next match, wrapping past the last one.
+    FindNext,
+    /// Moves to the previous match, wrapping past the first one.
+    FindPrevious,
+    // ── C3d: downloads ───────────────────────────────────────────────────
+    /// "Download current page" (Library panel, Downloads tab) — starts a
+    /// background `reqwest` GET of the active tab's current URL, streamed
+    /// to `downloads_dir`.
+    DownloadCurrentPage,
+    /// One more chunk of `id`'s download arrived — `run_download` sends
+    /// this on every chunk, not only periodically, so the UI's progress bar
+    /// is exactly as current as the underlying stream.
+    DownloadProgress {
+        id: u64,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    },
+    DownloadCompleted {
+        id: u64,
+    },
+    DownloadFailed {
+        id: u64,
+        error: String,
+    },
+    // ── C3d: Library panel ───────────────────────────────────────────────
+    /// Toggles the Library panel (bookmarks/history/downloads/settings).
+    ToggleLibraryPanel,
+    /// Switches the Library panel's active sub-view.
+    SelectLibraryTab(LibraryTab),
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,6 +1493,7 @@ pub fn update(
             state.tab_error.push(None);
             state.tab_titles.push("New Tab".to_string());
             state.tab_favicons.push(None);
+            state.tab_zoom.push(state.default_zoom);
             let new_idx = state.tabs.len() - 1;
             state.active_tab = new_idx;
             state.address_bar_input = String::new();
@@ -1206,6 +1523,9 @@ pub fn update(
                 }
                 if i < state.tab_favicons.len() {
                     state.tab_favicons.remove(i);
+                }
+                if i < state.tab_zoom.len() {
+                    state.tab_zoom.remove(i);
                 }
                 state.servo_sessions.remove(&i);
                 let keys_to_shift: Vec<usize> = state
@@ -1283,6 +1603,34 @@ pub fn update(
                 if !url.is_empty() && url != state.address_bar_input {
                     state.address_bar_input = url.clone();
                 }
+                // C3d: record this visit before `tab_urls[tab]` is
+                // overwritten below — `status == "complete"` only (not
+                // every "loading" tick that also flows through this
+                // branch), so a page is recorded once it actually finished
+                // loading, not once per intermediate load event, and never
+                // for `about:blank`/an empty URL.
+                if status == "complete" && !url.is_empty() && url != "about:blank" {
+                    let title = state
+                        .tab_titles
+                        .get(tab)
+                        .cloned()
+                        .filter(|t| !t.is_empty() && t != "New Tab")
+                        .unwrap_or_else(|| url.clone());
+                    record_history_visit(&mut state.history, url.clone(), title);
+                    // Re-apply the active tab's zoom on every real
+                    // navigation — a fresh document has no memory of the
+                    // CSS transform a previous page's `zoom_script` call
+                    // injected, so without this every navigation would
+                    // silently reset to 100%.
+                    if tab == state.active_tab {
+                        let level = state.tab_zoom.get(tab).copied().unwrap_or(1.0);
+                        if (level - 1.0).abs() > f32::EPSILON {
+                            if let Some(session) = state.servo_sessions.get_mut(&tab) {
+                                let _ = session.execute_js(&zoom_script(level));
+                            }
+                        }
+                    }
+                }
                 if tab < state.tab_urls.len() && !url.is_empty() {
                     state.tab_urls[tab] = url;
                 }
@@ -1292,12 +1640,14 @@ pub fn update(
             state.show_audit_panel = !state.show_audit_panel;
             if state.show_audit_panel {
                 state.show_js_console = false;
+                state.show_library_panel = false;
             }
         }
         FerriteBrowserMessage::ToggleJsConsole => {
             state.show_js_console = !state.show_js_console;
             if state.show_js_console {
                 state.show_audit_panel = false;
+                state.show_library_panel = false;
             }
         }
         FerriteBrowserMessage::RefreshAuditLog => {
@@ -1328,7 +1678,30 @@ pub fn update(
             return Task::done(FerriteBrowserMessage::CloseTab(i));
         }
         FerriteBrowserMessage::EscapePressed => {
-            if state.is_loading {
+            // C3d: the find bar, if open, is the most specific/topmost
+            // thing Escape can mean — closing it takes priority over
+            // Escape's pre-existing meanings below, the same "closest,
+            // most specific overlay wins" convention every mainstream
+            // browser's own find bar follows. `handle_key_press` cannot
+            // make this decision itself (`keyboard::on_key_press` requires
+            // a plain `fn` pointer with no `&FerriteBrowser` access — see
+            // that function's own doc comment), so both cases route through
+            // this one `EscapePressed` message and are told apart here,
+            // where `state` is actually available.
+            if state.show_find_bar {
+                // Applied directly (not via `Task::done(CloseFindBar)`) so
+                // a single `update()` call — the shape every test in this
+                // module already calls `update()` with — observes the
+                // effect immediately, exactly like the `is_loading`/
+                // `address_bar_focused` branches below.
+                state.show_find_bar = false;
+                if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
+                    let _ = session.execute_js(FIND_CLEAR_SCRIPT);
+                }
+                state.find_query.clear();
+                state.find_match_count = 0;
+                state.find_current_index = 0;
+            } else if state.is_loading {
                 return Task::done(FerriteBrowserMessage::StopLoading);
             } else {
                 state.address_bar_focused = false;
@@ -1842,8 +2215,239 @@ pub fn update(
         FerriteBrowserMessage::ToggleTheme => {
             state.theme_mode = state.theme_mode.toggled();
         }
+        // ── C3d: bookmarks ──────────────────────────────────────────────────
+        FerriteBrowserMessage::ToggleBookmarkCurrentPage => {
+            let url = state
+                .tab_urls
+                .get(state.active_tab)
+                .cloned()
+                .unwrap_or_default();
+            if url.is_empty() || url == "about:blank" {
+                return Task::none();
+            }
+            if let Some(pos) = state.bookmarks.iter().position(|b| b.url == url) {
+                state.bookmarks.remove(pos);
+            } else {
+                let title = state
+                    .tab_titles
+                    .get(state.active_tab)
+                    .cloned()
+                    .filter(|t| !t.is_empty() && t != "New Tab")
+                    .unwrap_or_else(|| url.clone());
+                state.bookmarks.push(Bookmark { title, url });
+            }
+            persist_bookmarks(state);
+        }
+        FerriteBrowserMessage::RemoveBookmark(index) => {
+            if index < state.bookmarks.len() {
+                state.bookmarks.remove(index);
+                persist_bookmarks(state);
+            }
+        }
+        // ── C3d: history ─────────────────────────────────────────────────────
+        FerriteBrowserMessage::ClearHistory => {
+            state.history.clear();
+        }
+        // ── C3d: zoom ───────────────────────────────────────────────────────
+        FerriteBrowserMessage::ZoomIn => {
+            let current = state.tab_zoom.get(state.active_tab).copied().unwrap_or(1.0);
+            apply_zoom(state, next_zoom_level(current));
+        }
+        FerriteBrowserMessage::ZoomOut => {
+            let current = state.tab_zoom.get(state.active_tab).copied().unwrap_or(1.0);
+            apply_zoom(state, prev_zoom_level(current));
+        }
+        FerriteBrowserMessage::ZoomReset => {
+            apply_zoom(state, 1.0);
+        }
+        FerriteBrowserMessage::SetDefaultZoom(level) => {
+            state.default_zoom = level;
+        }
+        // ── C3d: find-in-page ───────────────────────────────────────────────
+        FerriteBrowserMessage::OpenFindBar => {
+            state.show_find_bar = true;
+            state.find_query.clear();
+            state.find_match_count = 0;
+            state.find_current_index = 0;
+            return text_input::focus(text_input::Id::new(FIND_INPUT_ID));
+        }
+        FerriteBrowserMessage::CloseFindBar => {
+            state.show_find_bar = false;
+            if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
+                let _ = session.execute_js(FIND_CLEAR_SCRIPT);
+            }
+            state.find_query.clear();
+            state.find_match_count = 0;
+            state.find_current_index = 0;
+        }
+        FerriteBrowserMessage::FindQueryChanged(s) => {
+            state.find_query = s;
+            run_find(state);
+        }
+        FerriteBrowserMessage::FindNext => {
+            find_navigate(state, true);
+        }
+        FerriteBrowserMessage::FindPrevious => {
+            find_navigate(state, false);
+        }
+        // ── C3d: downloads ──────────────────────────────────────────────────
+        FerriteBrowserMessage::DownloadCurrentPage => {
+            let url = state
+                .tab_urls
+                .get(state.active_tab)
+                .cloned()
+                .unwrap_or_default();
+            if url.is_empty() || url == "about:blank" {
+                return Task::none();
+            }
+            let Some(dir) = state.downloads_dir.clone() else {
+                return Task::none();
+            };
+            let Some(tx) = state.agent_event_tx.clone() else {
+                return Task::none();
+            };
+            let dest = resolve_download_path(&dir, &url, &state.downloads);
+            let id = state.next_download_id;
+            state.next_download_id += 1;
+            let file_name = dest
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "download".to_string());
+            state.downloads.push(DownloadItem {
+                id,
+                url: url.clone(),
+                file_name,
+                path: dest.clone(),
+                state: DownloadState::InProgress {
+                    downloaded_bytes: 0,
+                    total_bytes: None,
+                },
+            });
+            tokio::task::spawn(run_download(id, url, dest, tx));
+        }
+        FerriteBrowserMessage::DownloadProgress {
+            id,
+            downloaded_bytes,
+            total_bytes,
+        } => {
+            if let Some(item) = state.downloads.iter_mut().find(|d| d.id == id) {
+                item.state = DownloadState::InProgress {
+                    downloaded_bytes,
+                    total_bytes,
+                };
+            }
+        }
+        FerriteBrowserMessage::DownloadCompleted { id } => {
+            if let Some(item) = state.downloads.iter_mut().find(|d| d.id == id) {
+                item.state = DownloadState::Completed;
+            }
+        }
+        FerriteBrowserMessage::DownloadFailed { id, error } => {
+            if let Some(item) = state.downloads.iter_mut().find(|d| d.id == id) {
+                item.state = DownloadState::Failed(error);
+            }
+        }
+        // ── C3d: Library panel ──────────────────────────────────────────────
+        FerriteBrowserMessage::ToggleLibraryPanel => {
+            state.show_library_panel = !state.show_library_panel;
+            if state.show_library_panel {
+                state.show_audit_panel = false;
+                state.show_js_console = false;
+            }
+        }
+        FerriteBrowserMessage::SelectLibraryTab(tab) => {
+            state.library_tab = tab;
+        }
     }
     Task::none()
+}
+
+/// Saves `state.bookmarks` to `state.bookmarks_path` if one is set (real
+/// startup, `launch()`) — a no-op, not a panic, when it isn't (every test/
+/// `Default` construction, R7). A write failure is logged, not surfaced to
+/// the UI — the in-memory `bookmarks` list (what the user actually sees) is
+/// already correct either way; only the next restart would lose the change,
+/// same class of degradation the audit log's own best-effort writes already
+/// accept elsewhere in this crate.
+fn persist_bookmarks(state: &FerriteBrowser) {
+    if let Some(path) = &state.bookmarks_path {
+        if let Err(e) = save_bookmarks_to(path, &state.bookmarks) {
+            eprintln!("[ferrite-ui] failed to save bookmarks to {path:?}: {e}");
+        }
+    }
+}
+
+/// Sets the active tab's zoom level and (re)applies it to the live page via
+/// `zoom_script`, if a session exists for that tab — the one path both
+/// `ZoomIn`/`ZoomOut`/`ZoomReset` and `LoadStatusChanged`'s re-apply-on-
+/// navigate logic ultimately go through for the interactive case (the
+/// navigate case calls `execute_js` directly since it has no reason to
+/// re-clamp/look up a level that's already known-valid).
+fn apply_zoom(state: &mut FerriteBrowser, level: f32) {
+    let active = state.active_tab;
+    if active < state.tab_zoom.len() {
+        state.tab_zoom[active] = level;
+    }
+    if let Some(session) = state.servo_sessions.get_mut(&active) {
+        let _ = session.execute_js(&zoom_script(level));
+    }
+}
+
+/// Runs `state.find_query` against the active tab's page (`find_script`) and
+/// updates `find_match_count`/`find_current_index` from the result — the
+/// live-search path (`FindQueryChanged`). A blank query clears any existing
+/// highlights and zeroes both counters, same as `CloseFindBar`, but without
+/// closing the bar itself.
+fn run_find(state: &mut FerriteBrowser) {
+    let query = state.find_query.clone();
+    if query.is_empty() {
+        if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
+            let _ = session.execute_js(FIND_CLEAR_SCRIPT);
+        }
+        state.find_match_count = 0;
+        state.find_current_index = 0;
+        return;
+    }
+    let Some(session) = state.servo_sessions.get_mut(&state.active_tab) else {
+        return;
+    };
+    let raw = session.execute_js(&find_script(&query)).unwrap_or_default();
+    apply_find_result(state, &raw);
+}
+
+/// `FindNext`/`FindPrevious` — moves the highlighted match without
+/// re-running the whole-page search `run_find` does, matching every real
+/// browser's find bar (next/previous is cheap; a fresh search is not).
+fn find_navigate(state: &mut FerriteBrowser, forward: bool) {
+    if state.find_match_count == 0 {
+        return;
+    }
+    let Some(session) = state.servo_sessions.get_mut(&state.active_tab) else {
+        return;
+    };
+    let raw = session
+        .execute_js(&find_navigate_script(forward))
+        .unwrap_or_default();
+    apply_find_result(state, &raw);
+}
+
+/// Parses `raw` (whatever `HeadlessServoSession::execute_js` returned for a
+/// `find_script`/`find_navigate_script` call — see `extract_json_object`'s
+/// doc comment for why that parsing has to be defensive) and updates
+/// `find_match_count`/`find_current_index` from it. Leaves both fields
+/// unchanged (rather than zeroing them) if `raw` doesn't parse — a
+/// malformed/unexpected response should not visibly reset an otherwise-valid
+/// in-progress search.
+fn apply_find_result(state: &mut FerriteBrowser, raw: &str) {
+    let Some(value) = extract_json_object(raw) else {
+        return;
+    };
+    if let Some(count) = value.get("count").and_then(|v| v.as_u64()) {
+        state.find_match_count = count as usize;
+    }
+    if let Some(current) = value.get("current").and_then(|v| v.as_u64()) {
+        state.find_current_index = current as usize;
+    }
 }
 
 fn sync_nav_state(state: &mut FerriteBrowser) {
@@ -2337,6 +2941,468 @@ fn resolve_url(input: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// C3d: bookmarks — JSON persistence
+// ---------------------------------------------------------------------------
+//
+// `load_bookmarks_from`/`save_bookmarks_to` take an explicit `&Path` (unit-
+// tested directly against a temp-directory path — real filesystem I/O, but
+// never the network, so R7 is unaffected) rather than resolving the real
+// home-directory path internally; `default_bookmarks_path()` is the
+// separate, untested-directly wrapper that does that resolution, matching
+// `ferrite-model::config::default_cache_dir()`'s own dependency-injection
+// shape exactly (see that function for the template this follows).
+
+/// The real bookmarks-file path — `~/.local/share/ferrite/bookmarks.json`,
+/// XDG-style. Bookmarks are a real, non-disposable loss to the user (unlike
+/// `ferrite-model`'s response cache), so this lives under a data directory,
+/// not `~/.cache/...` — deliberately distinct from
+/// `ferrite_model::config::default_cache_dir()`'s `~/.cache/ferrite-model`.
+/// `None` if the home directory cannot be resolved at all; `launch()` treats
+/// that the same way it treats no model provider being configured — the
+/// feature degrades (bookmarks stay in-memory-only for the session) rather
+/// than panicking.
+fn default_bookmarks_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(
+        home.join(".local")
+            .join("share")
+            .join("ferrite")
+            .join("bookmarks.json"),
+    )
+}
+
+/// Loads the bookmark list from `path` — `Vec::new()` (not an error) if the
+/// file doesn't exist yet (the common case: first ever run) or fails to
+/// parse (a hand-edited or corrupted file should not crash the browser on
+/// startup; the user simply starts with an empty list, same fail-open-to-
+/// empty shape `CLAUDE.md`'s fingerprint invariant uses for a different
+/// reason).
+fn load_bookmarks_from(path: &Path) -> Vec<Bookmark> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Persists `bookmarks` to `path` as pretty-printed JSON, creating the
+/// containing directory if needed.
+fn save_bookmarks_to(path: &Path, bookmarks: &[Bookmark]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(bookmarks).unwrap_or_else(|_| "[]".to_string());
+    std::fs::write(path, json)
+}
+
+// ---------------------------------------------------------------------------
+// C3d: history — recording
+// ---------------------------------------------------------------------------
+
+/// Appends one visit to `history`, deduplicated against the immediately
+/// preceding entry only (not the whole list — visiting the same page again
+/// after browsing elsewhere is a real, distinct visit worth recording again,
+/// same as any real browser's history) so a reload or an in-page redirect
+/// loop doesn't spam the list with consecutive repeats of the same URL.
+fn record_history_visit(history: &mut Vec<HistoryEntry>, url: String, title: String) {
+    if history.last().is_some_and(|last| last.url == url) {
+        return;
+    }
+    history.push(HistoryEntry {
+        url,
+        title,
+        visited_at: chrono::Utc::now(),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// C3d: zoom — discrete levels + the CSS-transform injection script
+// ---------------------------------------------------------------------------
+
+/// Standard browser zoom steps, 50%–300% — the same step set Chrome/Firefox
+/// expose in their own zoom menus, so `ZoomIn`/`ZoomOut` feel like a familiar
+/// browser rather than an arbitrary continuous slider.
+const ZOOM_LEVELS: &[f32] = &[
+    0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+];
+
+/// The next level up from `current`, or the top of the range if already
+/// there (or above it, e.g. after a `SetDefaultZoom` value that doesn't
+/// land exactly on a step).
+fn next_zoom_level(current: f32) -> f32 {
+    ZOOM_LEVELS
+        .iter()
+        .copied()
+        .find(|&z| z > current + f32::EPSILON)
+        .unwrap_or(*ZOOM_LEVELS.last().unwrap())
+}
+
+/// The next level down from `current`, or the bottom of the range if
+/// already there (or below it).
+fn prev_zoom_level(current: f32) -> f32 {
+    ZOOM_LEVELS
+        .iter()
+        .rev()
+        .copied()
+        .find(|&z| z < current - f32::EPSILON)
+        .unwrap_or(ZOOM_LEVELS[0])
+}
+
+/// The CSS-transform-based zoom script — Servo has no native zoom API at
+/// this pinned version (verified directly against the pinned `libservo`
+/// source, per this charter's own research brief), so zoom is applied the
+/// same way find-in-page is: injected JS via `execute_js`. `transform:
+/// scale(...)` (core CSS) is used rather than the nonstandard, legacy
+/// WebKit `zoom` property, which is not certain to exist in a real,
+/// standards-focused engine like Servo. The compensating `width:
+/// (100/level)%` keeps a `level < 1.0` page from leaving a visible gap on
+/// the right/bottom of the viewport (a scaled-down element's layout box
+/// shrinks with it unless its width is grown back out to compensate) and
+/// keeps a `level > 1.0` page's content reachable by scrolling rather than
+/// clipped at the original viewport width.
+fn zoom_script(level: f32) -> String {
+    format!(
+        "(function(){{\
+           var el = document.documentElement;\
+           el.style.transformOrigin = '0 0';\
+           el.style.transform = 'scale({level:.4})';\
+           el.style.width = '{compensated:.4}%';\
+         }})()",
+        level = level,
+        compensated = 100.0 / level,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// C3d: find-in-page — standards-based DOM search script
+// ---------------------------------------------------------------------------
+//
+// Both scripts below are standards-based (`document.createTreeWalker`,
+// `Range`, `NodeFilter`) rather than the legacy, nonstandard
+// `window.find()`, which is not certain to exist in Servo's JS/DOM
+// implementation (same reasoning as `zoom_script` avoiding the nonstandard
+// `zoom` CSS property) — per this charter's own research brief. Each script
+// returns `JSON.stringify(...)` as its final expression; `execute_js`
+// returns whatever `HeadlessServoSession`'s underlying `evaluate_javascript`
+// callback hands back, `Debug`-formatted from Servo's own JS-value type —
+// this crate has not verified that type's exact shape against the pinned
+// `libservo` source the way the favicon/history work was, so
+// `extract_json_object` (below) parses defensively rather than assuming the
+// return value is exactly the raw JSON string this script produces.
+
+/// Clears every highlight `find_script`/`find_navigate_script` may have
+/// left in the page — run on `CloseFindBar` and on an empty `FindQueryChanged`.
+const FIND_CLEAR_SCRIPT: &str = "(function(){\
+    document.querySelectorAll('mark[data-ferrite-find]').forEach(function(m){\
+        var p = m.parentNode;\
+        if (!p) return;\
+        p.replaceChild(document.createTextNode(m.textContent), m);\
+        p.normalize();\
+    });\
+    return JSON.stringify({count:0,current:0});\
+})()";
+
+/// Highlights every case-insensitive occurrence of `query` in the page's
+/// visible text (skipping `<script>`/`<style>` text nodes) by wrapping each
+/// match in a `<mark data-ferrite-find>`, marks the first one current, and
+/// returns `{"count": N, "current": 1}` (or `{"count": 0, "current": 0}` for
+/// no matches). Re-running this (e.g. on every `FindQueryChanged` keystroke)
+/// first clears any previous highlights via the same logic
+/// `FIND_CLEAR_SCRIPT` uses, so stale highlights from an earlier query never
+/// linger alongside a new query's.
+///
+/// `query` is embedded via `serde_json::to_string`, which produces a
+/// properly quoted-and-escaped JS string literal — not string-concatenated
+/// raw, which would let a query containing a quote character break out of
+/// the literal.
+fn find_script(query: &str) -> String {
+    let query_literal = serde_json::to_string(query).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "(function(){{\
+           document.querySelectorAll('mark[data-ferrite-find]').forEach(function(m){{\
+               var p = m.parentNode; if (!p) return;\
+               p.replaceChild(document.createTextNode(m.textContent), m);\
+               p.normalize();\
+           }});\
+           var q = {query_literal};\
+           if (!q) {{ return JSON.stringify({{count:0,current:0}}); }}\
+           var lowerQ = q.toLowerCase();\
+           var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);\
+           var ranges = [];\
+           var node;\
+           while ((node = walker.nextNode())) {{\
+               var parentTag = node.parentElement ? node.parentElement.tagName : '';\
+               if (parentTag === 'SCRIPT' || parentTag === 'STYLE') continue;\
+               var text = node.textContent;\
+               var lower = text.toLowerCase();\
+               var idx = 0;\
+               while ((idx = lower.indexOf(lowerQ, idx)) !== -1) {{\
+                   var r = document.createRange();\
+                   r.setStart(node, idx);\
+                   r.setEnd(node, idx + q.length);\
+                   ranges.push(r);\
+                   idx += q.length;\
+               }}\
+           }}\
+           ranges.reverse().forEach(function(r){{\
+               var mark = document.createElement('mark');\
+               mark.setAttribute('data-ferrite-find', '1');\
+               mark.style.backgroundColor = '#ffd54f';\
+               mark.style.color = '#000000';\
+               try {{ r.surroundContents(mark); }} catch (e) {{}}\
+           }});\
+           var marks = document.querySelectorAll('mark[data-ferrite-find]');\
+           if (marks.length > 0) {{\
+               marks[0].setAttribute('data-ferrite-find-current', '1');\
+               marks[0].style.backgroundColor = '#ff9800';\
+               marks[0].scrollIntoView({{block: 'center'}});\
+           }}\
+           return JSON.stringify({{count: marks.length, current: marks.length > 0 ? 1 : 0}});\
+         }})()",
+        query_literal = query_literal,
+    )
+}
+
+/// Moves the "current" highlight among the marks `find_script` already left
+/// in the page, wrapping past either end, scrolls the new current match into
+/// view, and returns `{"count": N, "current": newIndex}` — does not
+/// re-search the page (matches `find_script` already found stay found).
+fn find_navigate_script(forward: bool) -> String {
+    let step = if forward { 1 } else { -1 };
+    format!(
+        "(function(){{\
+           var marks = document.querySelectorAll('mark[data-ferrite-find]');\
+           if (marks.length === 0) {{ return JSON.stringify({{count:0,current:0}}); }}\
+           var curIdx = 0;\
+           for (var i = 0; i < marks.length; i++) {{\
+               if (marks[i].hasAttribute('data-ferrite-find-current')) {{ curIdx = i; break; }}\
+           }}\
+           marks[curIdx].removeAttribute('data-ferrite-find-current');\
+           marks[curIdx].style.backgroundColor = '#ffd54f';\
+           var nextIdx = (curIdx + ({step}) + marks.length) % marks.length;\
+           marks[nextIdx].setAttribute('data-ferrite-find-current', '1');\
+           marks[nextIdx].style.backgroundColor = '#ff9800';\
+           marks[nextIdx].scrollIntoView({{block: 'center'}});\
+           return JSON.stringify({{count: marks.length, current: nextIdx + 1}});\
+         }})()",
+        step = step,
+    )
+}
+
+/// Defensive extraction of a JSON object from whatever
+/// `HeadlessServoSession::execute_js` returned for a `find_script`/
+/// `find_navigate_script` call. Tries a direct parse first (the case if
+/// Servo's `evaluate_javascript` callback hands back the raw JS string
+/// value unwrapped); if that fails, falls back to locating the first `{`
+/// and last `}` in the raw text and parsing that substring (tolerant of an
+/// unknown `Debug`-formatted wrapper, e.g. an enum variant like
+/// `String("{...}")`, around the JSON this crate's own scripts always
+/// produce as their JS return value) — see this module's find-in-page
+/// section header for why this crate cannot assume the exact shape without
+/// having verified Servo's JS-value type directly. Returns `None` if
+/// neither attempt parses, rather than guessing.
+fn extract_json_object(raw: &str) -> Option<serde_json::Value> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        return Some(value);
+    }
+    // Try a Rust-`Debug`-quoted string wrapper next, e.g. `String("{\"count\":1}")`
+    // — the content between the first and last `"`, with `\"`/`\\` unescaped,
+    // parsed as JSON. This has to come before the brace-finding fallback
+    // below: a `Debug`-escaped `\"` is not valid raw JSON syntax on its own,
+    // so naively slicing between the first `{` and last `}` of the original
+    // string (without unescaping first) would hand `serde_json` a string it
+    // can never parse.
+    if let (Some(start), Some(end)) = (raw.find('"'), raw.rfind('"')) {
+        if end > start {
+            let unescaped = raw[start + 1..end]
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\");
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&unescaped) {
+                return Some(value);
+            }
+        }
+    }
+    // Fall back to the first `{`/last `}` directly — handles a wrapper with
+    // no quoting at all (e.g. a bare `Display` impl around the raw JSON).
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    serde_json::from_str(&raw[start..=end]).ok()
+}
+
+// ---------------------------------------------------------------------------
+// C3d: downloads — path resolution + the background streaming task
+// ---------------------------------------------------------------------------
+//
+// Deliberately independent of `ferrite_engine::BrowserEngine::download()`
+// (the agent's dry-run/consent-gated tool vocabulary) — see this module's
+// own doc comment for the ADR/consent-boundary reasoning. This is a plain
+// user-facing "download this link" feature, entirely local to `ferrite-ui`.
+
+/// The real downloads directory — `dirs::download_dir()`, falling back to
+/// the home directory if the platform has no dedicated one (matches this
+/// crate's own already-established "fail to a documented fallback, not a
+/// panic" shape for a resolvable-but-imperfect path, the same spirit as
+/// `default_bookmarks_path`, though that one has no fallback of its own
+/// since a bookmarks *file* needs a specific parent, not just any writable
+/// directory).
+fn default_downloads_dir() -> Option<PathBuf> {
+    dirs::download_dir().or_else(dirs::home_dir)
+}
+
+/// The filename component of `url`'s path — `"download"` if `url` doesn't
+/// parse, has no path segments, or its last segment is empty (e.g. a URL
+/// ending in `/`).
+fn download_file_name(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.path_segments()
+                .and_then(|mut s| s.next_back().map(str::to_string))
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "download".to_string())
+}
+
+/// Where a new download of `url` into `dir` should be written — pure and
+/// fully testable without any real filesystem I/O: collision-avoidance is
+/// checked only against `existing`'s already-known destination paths (the
+/// in-memory download list this session itself created), the same
+/// dependency-injection shape `load_bookmarks_from`/`save_bookmarks_to` use
+/// for a different reason (there, testability without touching `$HOME`;
+/// here, testability without touching the real filesystem at all). A real
+/// browser would also check for a same-named file already on disk from
+/// outside this session, which this does not — an honest, documented scope
+/// cut, not an oversight: the session's own download list is the only
+/// collision source this crate can check without live filesystem I/O in an
+/// automated test (R7 is about network, not local disk, but this function's
+/// purity is worth keeping regardless).
+fn resolve_download_path(dir: &Path, url: &str, existing: &[DownloadItem]) -> PathBuf {
+    let base_name = download_file_name(url);
+    let taken: std::collections::HashSet<&Path> =
+        existing.iter().map(|d| d.path.as_path()).collect();
+    let candidate = dir.join(&base_name);
+    if !taken.contains(candidate.as_path()) {
+        return candidate;
+    }
+    let (stem, ext) = match base_name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), ext.to_string()),
+        _ => (base_name.clone(), String::new()),
+    };
+    let mut n = 1u32;
+    loop {
+        let name = if ext.is_empty() {
+            format!("{stem} ({n})")
+        } else {
+            format!("{stem} ({n}).{ext}")
+        };
+        let candidate = dir.join(name);
+        if !taken.contains(candidate.as_path()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Human-readable byte count for the Downloads tab's progress line — B/KB/
+/// MB/GB, one decimal place above the smallest unit, matching the
+/// precision real browsers' own download managers show.
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit_index = 0;
+    while value >= 1024.0 && unit_index < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit_index += 1;
+    }
+    if unit_index == 0 {
+        format!("{bytes} {}", UNITS[unit_index])
+    } else {
+        format!("{value:.1} {}", UNITS[unit_index])
+    }
+}
+
+/// The background task `DownloadCurrentPage` spawns (`tokio::task::spawn`,
+/// the same "spawn the I/O, report back over `agent_event_tx`" shape
+/// `spawn_next_step` already established for the agent loop's own
+/// background model calls) — a real `reqwest::Client::get(url)`, streamed
+/// chunk by chunk to `dest` via `tokio::fs::File`, reporting a
+/// `DownloadProgress` message after every chunk. `iced::futures::StreamExt`
+/// (the real `futures` crate iced re-exports — this file already imports it
+/// elsewhere, see `subscription()`'s `agent_event_sub`) drives
+/// `Response::bytes_stream()` without needing a second, independent async
+/// stream dependency.
+async fn run_download(
+    id: u64,
+    url: String,
+    dest: PathBuf,
+    tx: tokio::sync::mpsc::UnboundedSender<FerriteBrowserMessage>,
+) {
+    use iced::futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let client = reqwest::Client::new();
+    let response = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(FerriteBrowserMessage::DownloadFailed {
+                id,
+                error: e.to_string(),
+            });
+            return;
+        }
+    };
+    if let Err(e) = response.error_for_status_ref() {
+        let _ = tx.send(FerriteBrowserMessage::DownloadFailed {
+            id,
+            error: e.to_string(),
+        });
+        return;
+    }
+    let total_bytes = response.content_length();
+    let mut file = match tokio::fs::File::create(&dest).await {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tx.send(FerriteBrowserMessage::DownloadFailed {
+                id,
+                error: format!("creating {}: {}", dest.display(), e),
+            });
+            return;
+        }
+    };
+
+    let mut downloaded: u64 = 0;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(FerriteBrowserMessage::DownloadFailed {
+                    id,
+                    error: e.to_string(),
+                });
+                return;
+            }
+        };
+        if let Err(e) = file.write_all(&chunk).await {
+            let _ = tx.send(FerriteBrowserMessage::DownloadFailed {
+                id,
+                error: e.to_string(),
+            });
+            return;
+        }
+        downloaded += chunk.len() as u64;
+        let _ = tx.send(FerriteBrowserMessage::DownloadProgress {
+            id,
+            downloaded_bytes: downloaded,
+            total_bytes,
+        });
+    }
+    let _ = tx.send(FerriteBrowserMessage::DownloadCompleted { id });
+}
+
+// ---------------------------------------------------------------------------
 // Live agent loop — message-driven step loop shared by the initial
 // (bypassed/clean-dry-run) run and the post-consent real run.
 //
@@ -2719,8 +3785,37 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         state.address_bar_input.clone(),
     ));
 
+    // C3d: bookmark star, in the address bar itself (the common
+    // Chrome/Firefox placement) rather than as a separate toolbar button —
+    // it is a per-page action, exactly like the address bar's own security
+    // indicator right next to it, not a panel toggle. Hidden for
+    // `about:blank` (nothing to bookmark).
+    let is_bookmarked = !is_about && state.bookmarks.iter().any(|b| b.url == current_url);
+    let bookmark_btn: Element<FerriteBrowserMessage> = if is_about {
+        container(text("")).width(Length::Fixed(22.0)).into()
+    } else {
+        button(icon(
+            if is_bookmarked {
+                Icon::BookmarkFilled
+            } else {
+                Icon::BookmarkOutline
+            },
+            ICON_SIZE_SM,
+            if is_bookmarked {
+                palette.accent
+            } else {
+                palette.text_dim
+            },
+        ))
+        .padding(4)
+        .width(Length::Fixed(22.0))
+        .style(nav_btn_style)
+        .on_press(FerriteBrowserMessage::ToggleBookmarkCurrentPage)
+        .into()
+    };
+
     let addr_row = container(
-        row![security_icon, addr_input]
+        row![security_icon, addr_input, bookmark_btn]
             .spacing(6)
             .align_y(iced::Alignment::Center)
             .width(Length::Fill),
@@ -2818,8 +3913,79 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     .style(nav_btn_style)
     .on_press(FerriteBrowserMessage::ToggleTheme);
 
+    // C3d: Library — the single toolbar entry point for bookmarks/history/
+    // downloads/settings (see this file's module docs). Four more features
+    // than C3c's toolbar had, but one more button, not four: a real
+    // information-architecture call, matching the same "clean, not cheap"
+    // goal the theme toggle/loader work already reads as this crate's
+    // stated aesthetic bar (see `docs/PROGRESS.md`'s C3c entry).
+    let library_btn = button(
+        row![
+            icon(
+                Icon::Menu,
+                ICON_SIZE_SM,
+                toggle_icon_color(state.show_library_panel)
+            ),
+            text("Library").size(12),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([5, 10])
+    .style(if state.show_library_panel {
+        panel_btn_active
+    } else {
+        panel_btn_inactive
+    })
+    .on_press(FerriteBrowserMessage::ToggleLibraryPanel);
+
+    // C3d: zoom indicator — only present in the toolbar while the active
+    // tab's zoom isn't 100% (the brief's own explicitly-named low-clutter
+    // pattern: a permanent zoom control for the overwhelmingly common
+    // 100%-zoom case would be exactly the "wall of buttons" this charter
+    // was warned against). A default-zoom *setting* still lives in the
+    // Settings tab regardless of the current tab's own level.
+    let active_zoom = state.tab_zoom.get(active_tab_idx).copied().unwrap_or(1.0);
+    let maybe_zoom_indicator: Option<Element<FerriteBrowserMessage>> =
+        if (active_zoom - 1.0).abs() > f32::EPSILON {
+            Some(
+                container(
+                    row![
+                        button(text("-").size(13))
+                            .padding([2, 8])
+                            .style(panel_btn_inactive)
+                            .on_press(FerriteBrowserMessage::ZoomOut),
+                        button(text(format!("{}%", (active_zoom * 100.0).round() as i32)).size(12))
+                            .padding([2, 8])
+                            .style(panel_btn_inactive)
+                            .on_press(FerriteBrowserMessage::ZoomReset),
+                        button(text("+").size(13))
+                            .padding([2, 8])
+                            .style(panel_btn_inactive)
+                            .on_press(FerriteBrowserMessage::ZoomIn),
+                    ]
+                    .spacing(2)
+                    .align_y(iced::Alignment::Center),
+                )
+                .into(),
+            )
+        } else {
+            None
+        };
+
+    let mut toolbar_items: Vec<Element<FerriteBrowserMessage>> =
+        vec![back_btn.into(), fwd_btn.into(), reload_btn, addr_row.into()];
+    if let Some(zoom_indicator) = maybe_zoom_indicator {
+        toolbar_items.push(zoom_indicator);
+    }
+    toolbar_items.push(library_btn.into());
+    toolbar_items.push(audit_btn.into());
+    toolbar_items.push(js_btn.into());
+    toolbar_items.push(agent_btn.into());
+    toolbar_items.push(theme_btn.into());
+
     let toolbar = container(
-        row![back_btn, fwd_btn, reload_btn, addr_row, audit_btn, js_btn, agent_btn, theme_btn]
+        row(toolbar_items)
             .spacing(4)
             .align_y(iced::Alignment::Center)
             .padding([0, PANEL_PADDING]),
@@ -3100,6 +4266,369 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         None
     };
 
+    // ── Find bar (C3d) ────────────────────────────────────────────────────
+    // An overlay-styled bar in the normal layout flow, not a true floating
+    // widget layer — iced 0.13's `stack` widget is never used elsewhere in
+    // this crate, and introducing it just for this one bar was not worth
+    // the new surface (see this file's module docs). Shown just above the
+    // content area, below any audit/JS/Library panel, matching the
+    // "closest to what it's searching" placement every real browser's find
+    // bar uses.
+    let find_bar: Option<Element<FerriteBrowserMessage>> = if state.show_find_bar {
+        let match_label = if state.find_query.is_empty() {
+            String::new()
+        } else if state.find_match_count == 0 {
+            "No results".to_string()
+        } else {
+            format!("{} of {}", state.find_current_index, state.find_match_count)
+        };
+        Some(
+            container(
+                row![
+                    icon(Icon::Read, ICON_SIZE_SM, palette.text_dim),
+                    text_input("Find in page", &state.find_query)
+                        .id(text_input::Id::new(FIND_INPUT_ID))
+                        .width(Length::Fixed(240.0))
+                        .padding([5, 8])
+                        .size(13)
+                        .style(|_: &Theme, status| {
+                            let focused = matches!(status, text_input::Status::Focused);
+                            text_input::Style {
+                                background: Background::Color(palette.input),
+                                border: Border {
+                                    radius: iced::border::Radius::new(6.0),
+                                    width: if focused { 1.5 } else { 1.0 },
+                                    color: if focused {
+                                        palette.accent
+                                    } else {
+                                        palette.divider
+                                    },
+                                },
+                                icon: palette.text_dim,
+                                placeholder: palette.text_dim,
+                                value: palette.text,
+                                selection: Color {
+                                    a: 0.30,
+                                    ..palette.accent
+                                },
+                            }
+                        })
+                        .on_input(FerriteBrowserMessage::FindQueryChanged)
+                        .on_submit(FerriteBrowserMessage::FindNext),
+                    text(match_label).size(12).color(palette.text_dim),
+                    button(icon(Icon::Back, ICON_SIZE_SM, palette.text_dim))
+                        .padding(6)
+                        .style(nav_btn_style)
+                        .on_press(FerriteBrowserMessage::FindPrevious),
+                    button(icon(Icon::Forward, ICON_SIZE_SM, palette.text_dim))
+                        .padding(6)
+                        .style(nav_btn_style)
+                        .on_press(FerriteBrowserMessage::FindNext),
+                    button(icon(Icon::Close, ICON_SIZE_SM, palette.text_dim))
+                        .padding(6)
+                        .style(nav_btn_style)
+                        .on_press(FerriteBrowserMessage::CloseFindBar),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .padding([6, PANEL_PADDING]),
+            )
+            .width(Length::Fill)
+            .style(|_: &Theme| container::Style {
+                background: Some(Background::Color(palette.raised)),
+                border: Border {
+                    color: palette.divider,
+                    width: 1.0,
+                    radius: iced::border::Radius::default(),
+                },
+                ..container::Style::default()
+            })
+            .into(),
+        )
+    } else {
+        None
+    };
+
+    // ── Library panel (C3d): bookmarks / history / downloads / settings ────
+    let library_panel: Option<Element<FerriteBrowserMessage>> = if state.show_library_panel {
+        let lib_tab_btn = |label: &'static str, tab: LibraryTab| {
+            let is_active = state.library_tab == tab;
+            button(text(label).size(12))
+                .padding([4, 10])
+                .style(if is_active {
+                    panel_btn_active
+                } else {
+                    panel_btn_inactive
+                })
+                .on_press(FerriteBrowserMessage::SelectLibraryTab(tab))
+        };
+        let hdr = container(
+            row![
+                text("  Library")
+                    .size(12)
+                    .color(palette.text)
+                    .width(Length::Fill),
+                lib_tab_btn("Bookmarks", LibraryTab::Bookmarks),
+                lib_tab_btn("History", LibraryTab::History),
+                lib_tab_btn("Downloads", LibraryTab::Downloads),
+                lib_tab_btn("Settings", LibraryTab::Settings),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .padding([5, PANEL_PADDING]),
+        )
+        .width(Length::Fill)
+        .style(|_: &Theme| container::Style {
+            background: Some(Background::Color(palette.raised)),
+            ..container::Style::default()
+        });
+
+        let empty_row = |msg: &str| -> Element<FerriteBrowserMessage> {
+            container(text(msg.to_string()).size(12).color(palette.text_dim))
+                .padding([12, PANEL_PADDING])
+                .into()
+        };
+
+        let body_rows: Vec<Element<FerriteBrowserMessage>> = match state.library_tab {
+            LibraryTab::Bookmarks => {
+                if state.bookmarks.is_empty() {
+                    vec![empty_row(
+                        "No bookmarks yet — use the star in the address bar.",
+                    )]
+                } else {
+                    state
+                        .bookmarks
+                        .iter()
+                        .enumerate()
+                        .map(|(i, b)| {
+                            let url = b.url.clone();
+                            mouse_area(
+                                container(
+                                    row![
+                                        column![
+                                            text(b.title.clone()).size(13).color(palette.text),
+                                            text(b.url.clone()).size(11).color(palette.text_dim),
+                                        ]
+                                        .spacing(2)
+                                        .width(Length::Fill),
+                                        button(text("Remove").size(11))
+                                            .padding([3, 8])
+                                            .style(panel_btn_inactive)
+                                            .on_press(FerriteBrowserMessage::RemoveBookmark(i)),
+                                    ]
+                                    .spacing(8)
+                                    .align_y(iced::Alignment::Center)
+                                    .padding([6, PANEL_PADDING]),
+                                )
+                                .width(Length::Fill),
+                            )
+                            .on_press(FerriteBrowserMessage::NavigateRequested(url))
+                            .into()
+                        })
+                        .collect()
+                }
+            }
+            LibraryTab::History => {
+                let mut rows = vec![container(
+                    button(text("Clear history").size(11))
+                        .padding([3, 8])
+                        .style(panel_btn_inactive)
+                        .on_press(FerriteBrowserMessage::ClearHistory),
+                )
+                .padding([6, PANEL_PADDING])
+                .into()];
+                if state.history.is_empty() {
+                    rows.push(empty_row("No history yet this session."));
+                } else {
+                    rows.extend(state.history.iter().rev().map(|entry| {
+                        let url = entry.url.clone();
+                        mouse_area(
+                            container(
+                                row![
+                                    column![
+                                        text(truncate(&entry.title, 60))
+                                            .size(13)
+                                            .color(palette.text),
+                                        text(truncate(&entry.url, 70))
+                                            .size(11)
+                                            .color(palette.text_dim),
+                                    ]
+                                    .spacing(2)
+                                    .width(Length::Fill),
+                                    text(entry.visited_at.format("%H:%M").to_string())
+                                        .size(11)
+                                        .color(palette.text_dim),
+                                ]
+                                .spacing(8)
+                                .align_y(iced::Alignment::Center)
+                                .padding([6, PANEL_PADDING]),
+                            )
+                            .width(Length::Fill),
+                        )
+                        .on_press(FerriteBrowserMessage::NavigateRequested(url))
+                        .into()
+                    }));
+                }
+                rows
+            }
+            LibraryTab::Downloads => {
+                let mut rows = vec![container(
+                    button(text("Download current page").size(12))
+                        .padding([6, 12])
+                        .style(accent_btn_style)
+                        .on_press(FerriteBrowserMessage::DownloadCurrentPage),
+                )
+                .padding([6, PANEL_PADDING])
+                .into()];
+                if state.downloads.is_empty() {
+                    rows.push(empty_row("No downloads yet."));
+                } else {
+                    rows.extend(state.downloads.iter().rev().map(|d| {
+                        let (status_text, status_color) = match &d.state {
+                            DownloadState::InProgress {
+                                downloaded_bytes,
+                                total_bytes: Some(total),
+                            } if *total > 0 => (
+                                format!(
+                                    "{} — {}%",
+                                    format_bytes(*downloaded_bytes),
+                                    (*downloaded_bytes as f64 / *total as f64 * 100.0).round()
+                                        as u32
+                                ),
+                                palette.text_dim,
+                            ),
+                            DownloadState::InProgress {
+                                downloaded_bytes, ..
+                            } => (
+                                format!("{} downloaded", format_bytes(*downloaded_bytes)),
+                                palette.text_dim,
+                            ),
+                            DownloadState::Completed => ("Completed".to_string(), palette.safe),
+                            DownloadState::Failed(e) => (format!("Failed: {e}"), palette.danger),
+                        };
+                        container(
+                            column![
+                                text(d.file_name.clone()).size(13).color(palette.text),
+                                text(status_text).size(11).color(status_color),
+                            ]
+                            .spacing(2)
+                            .padding([6, PANEL_PADDING]),
+                        )
+                        .width(Length::Fill)
+                        .into()
+                    }));
+                }
+                rows
+            }
+            LibraryTab::Settings => {
+                let cfg_row = |label: &str, value: &str| -> Element<FerriteBrowserMessage> {
+                    container(
+                        row![
+                            text(label.to_string())
+                                .size(12)
+                                .color(palette.text_dim)
+                                .width(Length::Fixed(140.0)),
+                            text(value.to_string()).size(12).color(palette.text),
+                        ]
+                        .spacing(8),
+                    )
+                    .padding([4, PANEL_PADDING])
+                    .into()
+                };
+                let zoom_preset_btn = |pct: u32| {
+                    let level = pct as f32 / 100.0;
+                    let is_active = (state.default_zoom - level).abs() < f32::EPSILON;
+                    button(text(format!("{pct}%")).size(12))
+                        .padding([4, 10])
+                        .style(if is_active {
+                            panel_btn_active
+                        } else {
+                            panel_btn_inactive
+                        })
+                        .on_press(FerriteBrowserMessage::SetDefaultZoom(level))
+                };
+                vec![
+                    container(
+                        text("Model configuration (read-only)")
+                            .size(12)
+                            .color(palette.text),
+                    )
+                    .padding(Padding {
+                        top: 8.0,
+                        right: PANEL_PADDING as f32,
+                        bottom: 2.0,
+                        left: PANEL_PADDING as f32,
+                    })
+                    .into(),
+                    cfg_row("Small-tier tag", &state.model_tag_small),
+                    cfg_row("Main-tier tag", &state.model_tag_main),
+                    cfg_row(
+                        "Response cache dir",
+                        state.model_cache_dir.as_deref().unwrap_or("(unconfigured)"),
+                    ),
+                    container(text(""))
+                        .width(Length::Fill)
+                        .height(Length::Fixed(1.0))
+                        .style(separator_style)
+                        .into(),
+                    container(text("Appearance").size(12).color(palette.text))
+                        .padding(Padding {
+                            top: 6.0,
+                            right: PANEL_PADDING as f32,
+                            bottom: 2.0,
+                            left: PANEL_PADDING as f32,
+                        })
+                        .into(),
+                    container(
+                        row![
+                            text("Theme")
+                                .size(12)
+                                .color(palette.text_dim)
+                                .width(Length::Fixed(140.0)),
+                            button(text(if is_light_theme { "Light" } else { "Dark" }).size(12))
+                                .padding([4, 10])
+                                .style(panel_btn_inactive)
+                                .on_press(FerriteBrowserMessage::ToggleTheme),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .padding([4, PANEL_PADDING])
+                    .into(),
+                    container(
+                        row![
+                            text("Default zoom for new tabs")
+                                .size(12)
+                                .color(palette.text_dim)
+                                .width(Length::Fixed(140.0)),
+                            zoom_preset_btn(75),
+                            zoom_preset_btn(100),
+                            zoom_preset_btn(125),
+                            zoom_preset_btn(150),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .padding([4, PANEL_PADDING])
+                    .into(),
+                ]
+            }
+        };
+
+        Some(
+            container(column![
+                hdr,
+                scrollable(column(body_rows).spacing(0)).height(Length::Fill)
+            ])
+            .width(Length::Fill)
+            .height(280)
+            .style(bottom_panel_style)
+            .into(),
+        )
+    } else {
+        None
+    };
+
     // ── Content area ───────────────────────────────────────────────────────
     let active = state.active_tab;
 
@@ -3236,6 +4765,12 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         layout.push(p);
     } else if let Some(p) = js_panel {
         layout.push(p);
+    } else if let Some(p) = library_panel {
+        layout.push(p);
+    }
+
+    if let Some(bar) = find_bar {
+        layout.push(bar);
     }
 
     // Wrap browser viewport + optional agent sidebar in a horizontal row.
@@ -3416,6 +4951,15 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 // Subscription
 // ---------------------------------------------------------------------------
 
+/// A pure `Key + Modifiers -> Message` mapping — `iced::keyboard::on_key_press`
+/// requires a plain `fn` pointer (verified against the pinned `iced_futures`
+/// 0.13.2 source: it takes `fn(Key, Modifiers) -> Option<Message>`, not a
+/// closure, so nothing here can capture `&FerriteBrowser` state directly).
+/// Escape's two possible meanings (close the find bar vs. its pre-existing
+/// stop-loading/unfocus-address-bar behavior) are therefore both resolved to
+/// the *same* `EscapePressed` message here, and `update()`'s handler for it
+/// is what actually reads `state.show_find_bar` to pick between them — see
+/// that handler and this file's module docs' keyboard-shortcuts section.
 fn handle_key_press(
     key: keyboard::Key,
     modifiers: keyboard::Modifiers,
@@ -3435,6 +4979,13 @@ fn handle_key_press(
             "r" => Some(FerriteBrowserMessage::Reload),
             "l" => Some(FerriteBrowserMessage::FocusAddressBar),
             "j" => Some(FerriteBrowserMessage::ToggleJsConsole),
+            "f" => Some(FerriteBrowserMessage::OpenFindBar),
+            // "=" covers the common US-keyboard case where Cmd/Ctrl+Plus is
+            // actually sent as Cmd/Ctrl+'=' (Plus's un-shifted key); "+" is
+            // handled too for a layout/OS that does send it directly.
+            "=" | "+" => Some(FerriteBrowserMessage::ZoomIn),
+            "-" => Some(FerriteBrowserMessage::ZoomOut),
+            "0" => Some(FerriteBrowserMessage::ZoomReset),
             _ => None,
         },
         keyboard::Key::Named(Named::F5) => Some(FerriteBrowserMessage::Reload),
@@ -4077,6 +5628,7 @@ pub fn launch() -> iced::Result {
             if let Some((provider, config)) = try_real_model_provider() {
                 state.model_tag_small = config.tag(ModelTier::Small).to_string();
                 state.model_tag_main = config.tag(ModelTier::Main).to_string();
+                state.model_cache_dir = Some(config.cache_dir.display().to_string());
                 state.model_provider = provider;
             } else {
                 eprintln!(
@@ -4084,6 +5636,28 @@ pub fn launch() -> iced::Result {
                      FERRITE_MODEL_MAIN unset, or no Ollama/Gemini credential found) — the \
                      fingerprint's may_use layer and the live agent loop will both fail to \
                      empty/fail closed rather than run against a real model"
+                );
+            }
+            // C3d: bookmarks/downloads real-path resolution and the one-time
+            // bookmarks load — both only ever happen here, at real app
+            // startup, never inside `FerriteBrowser::default()` (same
+            // test-safety discipline as the model-provider construction
+            // just above: dozens of tests construct `FerriteBrowser`
+            // directly and must never touch `$HOME`/the filesystem).
+            if let Some(path) = default_bookmarks_path() {
+                state.bookmarks = load_bookmarks_from(&path);
+                state.bookmarks_path = Some(path);
+            } else {
+                eprintln!(
+                    "[ferrite-ui] cannot resolve the home directory for the bookmarks file — \
+                     bookmarks will work for this session but won't be saved"
+                );
+            }
+            state.downloads_dir = default_downloads_dir();
+            if state.downloads_dir.is_none() {
+                eprintln!(
+                    "[ferrite-ui] cannot resolve a downloads directory — \
+                     the download-current-page action will be a no-op"
                 );
             }
             match HeadlessServoSession::new(1280, 700) {
@@ -5377,5 +6951,659 @@ mod tests {
         let evidence = evidence_for(&task);
         let decision = ConsentDecision::default();
         assert_consent_panel_inputs_are_plain_data(&diff, &expected, &evidence, &decision);
+    }
+
+    // ── C3d: bookmarks ───────────────────────────────────────────────────
+
+    /// A process-unique path under the real temp dir — real filesystem I/O
+    /// (not the network, so R7 is unaffected, same as
+    /// `RefreshAuditLog`/`HeadlessServoSession::new`'s own use of
+    /// `std::env::temp_dir()` elsewhere in this workspace), but never a real
+    /// `$HOME` path, matching `load_bookmarks_from`/`save_bookmarks_to`'s
+    /// whole reason for taking an explicit `&Path`.
+    fn temp_test_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("ferrite_ui_test_{name}_{nanos}.json"))
+    }
+
+    #[test]
+    fn load_bookmarks_from_a_missing_file_is_an_empty_list_not_an_error() {
+        let path = temp_test_path("missing_bookmarks");
+        assert_eq!(load_bookmarks_from(&path), Vec::new());
+    }
+
+    #[test]
+    fn load_bookmarks_from_unparseable_json_is_an_empty_list_not_a_panic() {
+        let path = temp_test_path("corrupt_bookmarks");
+        std::fs::write(&path, b"not valid json").unwrap();
+        assert_eq!(load_bookmarks_from(&path), Vec::new());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_then_load_bookmarks_round_trips() {
+        let path = temp_test_path("round_trip_bookmarks");
+        let bookmarks = vec![
+            Bookmark {
+                title: "Example".to_string(),
+                url: "https://example.com".to_string(),
+            },
+            Bookmark {
+                title: "Rust".to_string(),
+                url: "https://rust-lang.org".to_string(),
+            },
+        ];
+        save_bookmarks_to(&path, &bookmarks).unwrap();
+        assert_eq!(load_bookmarks_from(&path), bookmarks);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_bookmarks_to_creates_missing_parent_directories() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ferrite_ui_test_bm_dir_{nanos}"));
+        let path = dir.join("nested").join("bookmarks.json");
+        assert!(!dir.exists());
+        save_bookmarks_to(&path, &[]).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toggle_bookmark_current_page_adds_then_removes_it() {
+        let path = temp_test_path("toggle_bookmark");
+        let mut state = FerriteBrowser {
+            bookmarks_path: Some(path.clone()),
+            tab_urls: vec!["https://example.com".to_string()],
+            tab_titles: vec!["Example Site".to_string()],
+            ..FerriteBrowser::default()
+        };
+
+        let _ = update(&mut state, FerriteBrowserMessage::ToggleBookmarkCurrentPage);
+        assert_eq!(state.bookmarks.len(), 1);
+        assert_eq!(state.bookmarks[0].url, "https://example.com");
+        assert_eq!(state.bookmarks[0].title, "Example Site");
+        // Persisted for real, since bookmarks_path is set in this test.
+        assert_eq!(load_bookmarks_from(&path).len(), 1);
+
+        let _ = update(&mut state, FerriteBrowserMessage::ToggleBookmarkCurrentPage);
+        assert!(state.bookmarks.is_empty());
+        assert!(load_bookmarks_from(&path).is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn toggle_bookmark_current_page_is_a_no_op_for_about_blank() {
+        let mut state = FerriteBrowser::default();
+        let _ = update(&mut state, FerriteBrowserMessage::ToggleBookmarkCurrentPage);
+        assert!(state.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn remove_bookmark_out_of_bounds_is_a_no_op_not_a_panic() {
+        let mut state = FerriteBrowser::default();
+        let _ = update(&mut state, FerriteBrowserMessage::RemoveBookmark(0));
+        assert!(state.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn remove_bookmark_by_index_removes_exactly_that_one() {
+        let mut state = FerriteBrowser {
+            bookmarks: vec![
+                Bookmark {
+                    title: "A".to_string(),
+                    url: "https://a.example".to_string(),
+                },
+                Bookmark {
+                    title: "B".to_string(),
+                    url: "https://b.example".to_string(),
+                },
+            ],
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::RemoveBookmark(0));
+        assert_eq!(state.bookmarks.len(), 1);
+        assert_eq!(state.bookmarks[0].url, "https://b.example");
+    }
+
+    // ── C3d: history ─────────────────────────────────────────────────────
+
+    #[test]
+    fn record_history_visit_dedups_only_against_the_immediately_preceding_entry() {
+        let mut history = Vec::new();
+        record_history_visit(
+            &mut history,
+            "https://a.example".to_string(),
+            "A".to_string(),
+        );
+        record_history_visit(
+            &mut history,
+            "https://a.example".to_string(),
+            "A".to_string(),
+        );
+        assert_eq!(history.len(), 1, "consecutive repeat should be deduped");
+
+        record_history_visit(
+            &mut history,
+            "https://b.example".to_string(),
+            "B".to_string(),
+        );
+        record_history_visit(
+            &mut history,
+            "https://a.example".to_string(),
+            "A".to_string(),
+        );
+        assert_eq!(
+            history.len(),
+            3,
+            "revisiting a.example after browsing elsewhere is a real, distinct visit"
+        );
+    }
+
+    #[test]
+    fn load_status_changed_records_a_completed_real_navigation_in_history() {
+        let mut state = FerriteBrowser::default();
+        assert!(state.history.is_empty());
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::LoadStatusChanged {
+                tab: 0,
+                status: "complete".to_string(),
+                url: "https://example.com".to_string(),
+            },
+        );
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history[0].url, "https://example.com");
+    }
+
+    #[test]
+    fn load_status_changed_does_not_record_loading_events_or_about_blank() {
+        let mut state = FerriteBrowser::default();
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::LoadStatusChanged {
+                tab: 0,
+                status: "loading".to_string(),
+                url: "https://example.com".to_string(),
+            },
+        );
+        assert!(
+            state.history.is_empty(),
+            "a loading event is not a completed visit"
+        );
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::LoadStatusChanged {
+                tab: 0,
+                status: "complete".to_string(),
+                url: "about:blank".to_string(),
+            },
+        );
+        assert!(
+            state.history.is_empty(),
+            "about:blank is never a real visit"
+        );
+    }
+
+    #[test]
+    fn clear_history_empties_the_list() {
+        let mut state = FerriteBrowser {
+            history: vec![HistoryEntry {
+                url: "https://example.com".to_string(),
+                title: "Example".to_string(),
+                visited_at: chrono::Utc::now(),
+            }],
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::ClearHistory);
+        assert!(state.history.is_empty());
+    }
+
+    // ── C3d: zoom ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn next_zoom_level_steps_up_through_the_table() {
+        assert_eq!(next_zoom_level(1.0), 1.1);
+        assert_eq!(next_zoom_level(0.9), 1.0);
+    }
+
+    #[test]
+    fn next_zoom_level_clamps_at_the_top_of_the_range() {
+        assert_eq!(next_zoom_level(3.0), 3.0);
+        assert_eq!(next_zoom_level(10.0), 3.0);
+    }
+
+    #[test]
+    fn prev_zoom_level_steps_down_through_the_table() {
+        assert_eq!(prev_zoom_level(1.0), 0.9);
+        assert_eq!(prev_zoom_level(1.1), 1.0);
+    }
+
+    #[test]
+    fn prev_zoom_level_clamps_at_the_bottom_of_the_range() {
+        assert_eq!(prev_zoom_level(0.5), 0.5);
+        assert_eq!(prev_zoom_level(0.1), 0.5);
+    }
+
+    #[test]
+    fn zoom_script_contains_the_scale_and_compensating_width() {
+        let script = zoom_script(1.25);
+        assert!(script.contains("scale(1.2500)"), "{script}");
+        assert!(script.contains("80.0000%"), "{script}"); // 100 / 1.25 = 80
+        assert!(
+            !script.contains("window.find"),
+            "must not use the nonstandard `zoom` CSS property either — checked its absence \
+             by grepping for a telltale unrelated API instead of the property name, which \
+             this script's own `transform`/`width` keywords would otherwise false-positive on"
+        );
+        assert!(!script.contains("el.style.zoom"));
+    }
+
+    #[test]
+    fn zoom_in_and_out_change_the_active_tabs_zoom_only() {
+        let mut state = FerriteBrowser {
+            tabs: vec!["A".to_string(), "B".to_string()],
+            tab_zoom: vec![1.0, 1.0],
+            active_tab: 0,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::ZoomIn);
+        assert_eq!(state.tab_zoom[0], 1.1);
+        assert_eq!(
+            state.tab_zoom[1], 1.0,
+            "the inactive tab's zoom is untouched"
+        );
+
+        let _ = update(&mut state, FerriteBrowserMessage::ZoomOut);
+        assert_eq!(state.tab_zoom[0], 1.0);
+
+        state.tab_zoom[0] = 1.5;
+        let _ = update(&mut state, FerriteBrowserMessage::ZoomReset);
+        assert_eq!(state.tab_zoom[0], 1.0);
+    }
+
+    #[test]
+    fn set_default_zoom_affects_only_tabs_added_after_it() {
+        let mut state = FerriteBrowser::default();
+        assert_eq!(state.tab_zoom, vec![1.0]);
+        let _ = update(&mut state, FerriteBrowserMessage::SetDefaultZoom(1.25));
+        assert_eq!(state.tab_zoom, vec![1.0], "the existing tab is unaffected");
+        let _ = update(&mut state, FerriteBrowserMessage::AddTab);
+        assert_eq!(state.tab_zoom.last().copied(), Some(1.25));
+    }
+
+    #[test]
+    fn add_tab_and_close_tab_keep_tab_zoom_in_sync() {
+        let mut state = FerriteBrowser::default();
+        let _ = update(&mut state, FerriteBrowserMessage::AddTab);
+        let _ = update(&mut state, FerriteBrowserMessage::AddTab);
+        assert_eq!(state.tab_zoom.len(), state.tabs.len());
+        let _ = update(&mut state, FerriteBrowserMessage::CloseTab(0));
+        assert_eq!(state.tab_zoom.len(), state.tabs.len());
+    }
+
+    // ── C3d: find-in-page ────────────────────────────────────────────────
+
+    #[test]
+    fn find_script_json_escapes_the_query() {
+        let script = find_script("a \"quoted\" term");
+        assert!(script.contains(r#""a \"quoted\" term""#), "{script}");
+        assert!(!script.contains("window.find("));
+        assert!(script.contains("createTreeWalker"));
+    }
+
+    #[test]
+    fn find_script_for_an_empty_query_short_circuits_to_zero() {
+        let script = find_script("");
+        assert!(script.contains("count:0,current:0"));
+    }
+
+    #[test]
+    fn find_navigate_script_steps_forward_or_backward() {
+        assert!(find_navigate_script(true).contains("(curIdx + (1)"));
+        assert!(find_navigate_script(false).contains("(curIdx + (-1)"));
+    }
+
+    #[test]
+    fn extract_json_object_parses_a_direct_json_string() {
+        let value = extract_json_object(r#"{"count":3,"current":1}"#).unwrap();
+        assert_eq!(value["count"], 3);
+        assert_eq!(value["current"], 1);
+    }
+
+    #[test]
+    fn extract_json_object_parses_json_wrapped_in_an_unknown_debug_format() {
+        // Simulates `execute_js` handing back a `Debug`-formatted enum
+        // wrapper around the JS string value, e.g. `String("{...}")` — see
+        // this function's own doc comment for why this defensiveness
+        // exists at all.
+        let value = extract_json_object(r#"String("{\"count\":2,\"current\":2}")"#).unwrap();
+        assert_eq!(value["count"], 2);
+        assert_eq!(value["current"], 2);
+    }
+
+    #[test]
+    fn extract_json_object_returns_none_for_text_with_no_braces() {
+        assert!(extract_json_object("no json here").is_none());
+    }
+
+    #[test]
+    fn apply_find_result_updates_match_count_and_current_index() {
+        let mut state = FerriteBrowser::default();
+        apply_find_result(&mut state, r#"{"count":5,"current":3}"#);
+        assert_eq!(state.find_match_count, 5);
+        assert_eq!(state.find_current_index, 3);
+    }
+
+    #[test]
+    fn apply_find_result_leaves_counts_unchanged_on_unparseable_input() {
+        let mut state = FerriteBrowser {
+            find_match_count: 7,
+            find_current_index: 2,
+            ..FerriteBrowser::default()
+        };
+        apply_find_result(&mut state, "garbage");
+        assert_eq!(state.find_match_count, 7);
+        assert_eq!(state.find_current_index, 2);
+    }
+
+    #[test]
+    fn open_find_bar_resets_query_and_counts_and_shows_the_bar() {
+        let mut state = FerriteBrowser {
+            find_query: "stale".to_string(),
+            find_match_count: 4,
+            find_current_index: 2,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::OpenFindBar);
+        assert!(state.show_find_bar);
+        assert!(state.find_query.is_empty());
+        assert_eq!(state.find_match_count, 0);
+        assert_eq!(state.find_current_index, 0);
+    }
+
+    #[test]
+    fn close_find_bar_hides_it_and_clears_counts() {
+        let mut state = FerriteBrowser {
+            show_find_bar: true,
+            find_query: "x".to_string(),
+            find_match_count: 2,
+            find_current_index: 1,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::CloseFindBar);
+        assert!(!state.show_find_bar);
+        assert!(state.find_query.is_empty());
+        assert_eq!(state.find_match_count, 0);
+    }
+
+    #[test]
+    fn find_query_changed_to_empty_clears_counts_even_with_no_session() {
+        let mut state = FerriteBrowser {
+            find_match_count: 3,
+            find_current_index: 1,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::FindQueryChanged(String::new()),
+        );
+        assert_eq!(state.find_match_count, 0);
+        assert_eq!(state.find_current_index, 0);
+    }
+
+    // ── C3d: downloads ───────────────────────────────────────────────────
+
+    #[test]
+    fn download_file_name_uses_the_last_path_segment() {
+        assert_eq!(
+            download_file_name("https://example.com/files/report.pdf"),
+            "report.pdf"
+        );
+    }
+
+    #[test]
+    fn download_file_name_falls_back_for_a_trailing_slash_or_unparseable_url() {
+        assert_eq!(download_file_name("https://example.com/"), "download");
+        assert_eq!(download_file_name("not a url"), "download");
+    }
+
+    #[test]
+    fn resolve_download_path_uses_the_bare_name_when_theres_no_collision() {
+        let dir = PathBuf::from("/tmp/downloads");
+        let path = resolve_download_path(&dir, "https://example.com/report.pdf", &[]);
+        assert_eq!(path, dir.join("report.pdf"));
+    }
+
+    #[test]
+    fn resolve_download_path_avoids_colliding_with_an_existing_download() {
+        let dir = PathBuf::from("/tmp/downloads");
+        let existing = vec![DownloadItem {
+            id: 1,
+            url: "https://example.com/report.pdf".to_string(),
+            file_name: "report.pdf".to_string(),
+            path: dir.join("report.pdf"),
+            state: DownloadState::Completed,
+        }];
+        let path = resolve_download_path(&dir, "https://example.com/report.pdf", &existing);
+        assert_eq!(path, dir.join("report (1).pdf"));
+    }
+
+    #[test]
+    fn resolve_download_path_keeps_stepping_past_multiple_collisions() {
+        let dir = PathBuf::from("/tmp/downloads");
+        let existing = vec![
+            DownloadItem {
+                id: 1,
+                url: "u1".to_string(),
+                file_name: "report.pdf".to_string(),
+                path: dir.join("report.pdf"),
+                state: DownloadState::Completed,
+            },
+            DownloadItem {
+                id: 2,
+                url: "u2".to_string(),
+                file_name: "report (1).pdf".to_string(),
+                path: dir.join("report (1).pdf"),
+                state: DownloadState::Completed,
+            },
+        ];
+        let path = resolve_download_path(&dir, "https://example.com/report.pdf", &existing);
+        assert_eq!(path, dir.join("report (2).pdf"));
+    }
+
+    #[test]
+    fn resolve_download_path_handles_an_extensionless_name() {
+        let dir = PathBuf::from("/tmp/downloads");
+        let existing = vec![DownloadItem {
+            id: 1,
+            url: "u".to_string(),
+            file_name: "download".to_string(),
+            path: dir.join("download"),
+            state: DownloadState::Completed,
+        }];
+        let path = resolve_download_path(&dir, "https://example.com/", &existing);
+        assert_eq!(path, dir.join("download (1)"));
+    }
+
+    #[test]
+    fn format_bytes_scales_through_units() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[tokio::test]
+    async fn download_current_page_is_a_no_op_without_a_configured_downloads_dir() {
+        let mut state = FerriteBrowser {
+            tab_urls: vec!["https://example.com/file.txt".to_string()],
+            downloads_dir: None,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::DownloadCurrentPage);
+        assert!(state.downloads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_current_page_is_a_no_op_for_about_blank() {
+        let mut state = FerriteBrowser {
+            downloads_dir: Some(PathBuf::from("/tmp")),
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::DownloadCurrentPage);
+        assert!(state.downloads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_current_page_records_an_in_progress_item_and_spawns_the_fetch() {
+        // R7: this handler spawns a real background `reqwest` task, but —
+        // per this test module's own header comment — a `#[tokio::test]`
+        // that never `.await`s past the point of spawning never actually
+        // polls it into making a live call; only the synchronous, in-
+        // `update()` bookkeeping below is exercised.
+        let mut state = FerriteBrowser {
+            tab_urls: vec!["https://example.com/report.pdf".to_string()],
+            downloads_dir: Some(PathBuf::from("/tmp/ferrite_downloads_test")),
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::DownloadCurrentPage);
+        assert_eq!(state.downloads.len(), 1);
+        assert_eq!(state.downloads[0].id, 0);
+        assert_eq!(state.downloads[0].file_name, "report.pdf");
+        assert_eq!(state.next_download_id, 1);
+        assert!(matches!(
+            state.downloads[0].state,
+            DownloadState::InProgress {
+                downloaded_bytes: 0,
+                total_bytes: None
+            }
+        ));
+    }
+
+    #[test]
+    fn download_progress_updates_the_matching_item_by_id() {
+        let mut state = FerriteBrowser {
+            downloads: vec![DownloadItem {
+                id: 42,
+                url: "u".to_string(),
+                file_name: "f".to_string(),
+                path: PathBuf::from("/tmp/f"),
+                state: DownloadState::InProgress {
+                    downloaded_bytes: 0,
+                    total_bytes: None,
+                },
+            }],
+            ..FerriteBrowser::default()
+        };
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::DownloadProgress {
+                id: 42,
+                downloaded_bytes: 100,
+                total_bytes: Some(200),
+            },
+        );
+        assert!(matches!(
+            state.downloads[0].state,
+            DownloadState::InProgress {
+                downloaded_bytes: 100,
+                total_bytes: Some(200)
+            }
+        ));
+    }
+
+    #[test]
+    fn download_completed_and_failed_update_the_matching_item() {
+        let mut state = FerriteBrowser {
+            downloads: vec![DownloadItem {
+                id: 1,
+                url: "u".to_string(),
+                file_name: "f".to_string(),
+                path: PathBuf::from("/tmp/f"),
+                state: DownloadState::InProgress {
+                    downloaded_bytes: 0,
+                    total_bytes: None,
+                },
+            }],
+            ..FerriteBrowser::default()
+        };
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::DownloadCompleted { id: 1 },
+        );
+        assert_eq!(state.downloads[0].state, DownloadState::Completed);
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::DownloadFailed {
+                id: 1,
+                error: "boom".to_string(),
+            },
+        );
+        assert_eq!(
+            state.downloads[0].state,
+            DownloadState::Failed("boom".to_string())
+        );
+    }
+
+    // ── C3d: Library panel ───────────────────────────────────────────────
+
+    #[test]
+    fn toggle_library_panel_closes_audit_and_js_panels() {
+        let mut state = FerriteBrowser {
+            show_audit_panel: true,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::ToggleLibraryPanel);
+        assert!(state.show_library_panel);
+        assert!(!state.show_audit_panel);
+    }
+
+    #[test]
+    fn toggle_audit_panel_closes_the_library_panel() {
+        let mut state = FerriteBrowser {
+            show_library_panel: true,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::ToggleAuditPanel);
+        assert!(state.show_audit_panel);
+        assert!(!state.show_library_panel);
+    }
+
+    #[test]
+    fn select_library_tab_switches_the_active_sub_view() {
+        let mut state = FerriteBrowser::default();
+        assert_eq!(state.library_tab, LibraryTab::Bookmarks);
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::SelectLibraryTab(LibraryTab::Downloads),
+        );
+        assert_eq!(state.library_tab, LibraryTab::Downloads);
+    }
+
+    // ── C3d: Escape resolves through EscapePressed, not handle_key_press ──
+
+    #[test]
+    fn escape_closes_the_find_bar_before_its_other_meanings() {
+        let mut state = FerriteBrowser {
+            show_find_bar: true,
+            is_loading: true,
+            ..FerriteBrowser::default()
+        };
+        let _ = update(&mut state, FerriteBrowserMessage::EscapePressed);
+        assert!(!state.show_find_bar);
+        // is_loading is untouched here — EscapePressed only *returns* a
+        // Task::done(StopLoading) in the non-find-bar branch; this handler
+        // exercised the find-bar branch instead, so no StopLoading dispatch
+        // happened within this single `update()` call.
+        assert!(state.is_loading);
     }
 }
