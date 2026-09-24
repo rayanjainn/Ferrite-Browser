@@ -3085,10 +3085,13 @@ feature): `git diff Cargo.lock` shows the `"lazy"` feature added exactly
 five new packages (`ouroboros`, `ouroboros_macro`, `aliasable`, `yansi`,
 `proc-macro2-diagnostics`), each with exactly one version in the lockfile —
 none is a second copy of an already-duplicated crate the way C1's `svg`
-pull of a newer `fontdb`/`kurbo` was. `cargo-deny` itself was not
-installed in this sandbox at the time of writing (being installed
-alongside this entry; if that run surfaces anything, it'll be a follow-up
-note, not a silent gap).
+pull of a newer `fontdb`/`kurbo` was. **`cargo-deny` itself was then
+installed and run for real** (it wasn't present in this sandbox at first,
+same gap A1 hit): `cargo deny check` → `advisories ok, bans ok, licenses
+ok, sources ok`, only the one pre-existing `unmatched-source` warning for
+the Servo git dependency every agent since A3 has logged (Servo isn't
+built by default) — confirming the lockfile-diff read above rather than
+leaving it as an inference.
 
 **Not verified live — same limitation every prior UI-touching session has
 stated plainly:** this sandbox has no attached display, so none of window
