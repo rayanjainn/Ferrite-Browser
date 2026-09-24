@@ -530,12 +530,42 @@ mod inner {
         }
 
         /// Resize the render surface and notify the WebView.
+        ///
+        /// **Real bug this shape fixes — verified against the pinned
+        /// `libservo` source (`components/paint/painter.rs`'s
+        /// `resize_rendering_context`, `components/servo/webview.rs`'s
+        /// `WebView::resize`), not guessed:** this used to also call
+        /// `self.rendering_context.resize(size)` directly, in addition to
+        /// `webview.resize(size)`. `webview.resize()` shares the exact same
+        /// `RenderingContext` this session holds (`WebViewBuilder::new`
+        /// below is given `rendering_context.clone()`), and internally
+        /// calls `Painter::resize_rendering_context`, which starts with
+        /// `if self.rendering_context.size() == new_size { return; }`
+        /// before it does anything else — including the transaction that
+        /// tells the compositor the viewport changed and schedules a
+        /// repaint at the new size. Calling `rendering_context.resize()`
+        /// ourselves *first* made that check see "no change" every time
+        /// (we'd already set the size Servo was about to compare against),
+        /// so the repaint-at-new-size step silently never ran — the page
+        /// stayed rendered at its old size forever, with the rest of the
+        /// now-larger buffer left uninitialized (observed directly: page
+        /// content confined to a small region, the rest of the window
+        /// black). Separately, that direct call also never established
+        /// this context as current first (unlike `sync_and_read()`'s own
+        /// `make_current()` call below, and unlike what
+        /// `resize_rendering_context` itself does internally before
+        /// touching the surface) — a real, additional risk of corrupting
+        /// GL/surfman state if some other tab's context was left current,
+        /// consistent with the "texture unloadable" GL warning and
+        /// segfault also observed. Servo's own reference headless embedder
+        /// (`servoshell`'s `headless_window.rs::request_resize`) calls only
+        /// `webview.resize()`, with a comment explaining why:
+        /// "[we] must notify `Paint` here" — `webview.resize()` alone is
+        /// the complete, correct call; this now matches that exactly.
         pub fn resize(&mut self, width: u32, height: u32) {
             self.width = width;
             self.height = height;
-            let size = PhysicalSize { width, height };
-            self.rendering_context.resize(size);
-            self.webview.resize(size);
+            self.webview.resize(PhysicalSize { width, height });
         }
 
         /// Send a mouse-move event to the WebView at pixel coordinates `(x, y)`.
