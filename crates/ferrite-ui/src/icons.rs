@@ -68,6 +68,12 @@ pub enum Icon {
     Activity,
     Download,
     Clipboard,
+    /// C3c: the toolbar's theme toggle shows this while `AppTheme::Dark` is
+    /// active (click switches to light).
+    Sun,
+    /// C3c: shown while `AppTheme::Light` is active (click switches to
+    /// dark).
+    Moon,
 }
 
 // A bookmark/star icon and a settings/gear icon were drawn for this charter
@@ -109,6 +115,8 @@ pub fn icon_bytes(kind: Icon) -> &'static [u8] {
         Icon::Activity => include_bytes!("../assets/icons/activity.svg"),
         Icon::Download => include_bytes!("../assets/icons/download.svg"),
         Icon::Clipboard => include_bytes!("../assets/icons/clipboard.svg"),
+        Icon::Sun => include_bytes!("../assets/icons/sun.svg"),
+        Icon::Moon => include_bytes!("../assets/icons/moon.svg"),
     }
 }
 
@@ -133,7 +141,7 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, color: Color) -> Element<'a,
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 21] = [
+    const ALL: [Icon; 23] = [
         Icon::Back,
         Icon::Forward,
         Icon::Reload,
@@ -155,6 +163,8 @@ mod tests {
         Icon::Activity,
         Icon::Download,
         Icon::Clipboard,
+        Icon::Sun,
+        Icon::Moon,
     ];
 
     /// Every icon variant embeds real, well-formed SVG data — catches a
