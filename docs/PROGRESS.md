@@ -2940,3 +2940,56 @@ CLAUDE.md's own invariant names) was never actually enforced on this
 branch's first commit — caught by inspection, fixed by amending that
 commit, not filed as a T-### (it's a per-checkout git config step, not a
 code defect; see `scripts/hooks/install.sh`).
+
+## 2026-09-24 — coordinator — CI: manual-trigger-only, macOS-only (T-210 resolved by owner decision)
+
+**Landed:** `.github/workflows/ci.yml` rewritten per an explicit project-
+owner decision (T-210 had been sitting as "needs owner confirmation"
+since A1 — see that row's prior text). Two changes, both applied to
+every job:
+
+1. **Trigger:** removed `push`, `pull_request`, and the weekly
+   `schedule` cron entirely. Every job (`ci`, `build-servo-release`,
+   `release`) is now `workflow_dispatch`-only — nothing runs
+   automatically on a push or merge to `main`; every run, including the
+   fast lint/test gate, is a manual "Run workflow" click.
+2. **Platform:** dropped `ubuntu-latest`/`windows-latest` from both the
+   `ci` and `build-servo-release` matrices — macOS only. The `ci` job's
+   platform-conditional steps (fmt-check, `cargo machete`, `cargo deny`,
+   the doc-drift scripts) used to run only under `if: matrix.platform ==
+   'linux'` (one canonical platform, to avoid tripling non-platform-
+   dependent checks); with Linux gone they now just run unconditionally
+   on the one remaining platform, same checks, same behavior. `release`'s
+   Windows artifact download/publish step and `binary_suffix` handling
+   are removed — the rolling "latest" release now ships a macOS binary
+   only. `Swatinem/rust-cache@v2`'s cache keys narrowed to `macos`/
+   `servo-macos` (previously per-platform-in-matrix).
+
+**Docs updated to match, not left stale:** `docs/TO-DO.md`'s T-210 row
+marked `done — owner decided`, its stale "needs owner confirmation"
+framing removed; the file's top summary counts re-tallied (44 done, was
+43; 1 needing owner confirmation, was 2) and the "needs a decision only
+the project owner can make" bullet split so it no longer bundles T-210 in
+with the still-open T-209 (license choice). `docs/REBUILD_DIRECTIVE.md`
+deliberately **not** edited — per that file's own header, it's the
+original plan/record of what A1 built and why, not a place later
+operational decisions get retroactively rewritten into; the actual
+current behavior lives in `ci.yml` itself and this entry.
+
+**Not verified live:** this sandbox cannot run GitHub Actions (same
+limitation every prior agent touching `ci.yml` has hit, going back to
+A0/A1). Verified locally instead: `python3 -c "import yaml;
+yaml.safe_load(open('.github/workflows/ci.yml'))"` parses clean; every
+step command in the rewritten file (`cargo fmt --all --check`, `cargo
+clippy --workspace --all-targets -- -D warnings`, `cargo machete`,
+`cargo test --workspace`, `cargo build --release -p ferrite-shell`,
+`sh scripts/check_purge.sh`, `sh scripts/check_no_archive_links.sh`) is
+identical to what the pre-existing Linux-gated steps already ran, just no
+longer conditional — so this is a trigger/matrix change, not a new,
+unverified command.
+
+**Commits:** (this session's branch — see the commit that lands this
+entry alongside `ci.yml`).
+
+**Known issues discovered:** none. T-209 (license choice) remains the
+one open owner-decision item.
