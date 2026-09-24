@@ -3320,7 +3320,7 @@ adjustment) — but only the user's own relaunch, on the exact
 `gemma4:31b`/real-Servo configuration that crashed before, can actually
 confirm this holds.
 
-**Commits:** (see the commit landing alongside this entry).
+**Commits:** `ec1fe8b`.
 
 **Known issues discovered, not fixed:** the `RESIZE_SETTLE_TICKS = 3`
 margin is a considered guess, not a measured value — flagged inline above
