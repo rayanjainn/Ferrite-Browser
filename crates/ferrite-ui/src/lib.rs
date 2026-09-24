@@ -65,7 +65,8 @@ use icons::{icon, Icon};
 
 use ferrite_agent::browser_loop::{
     compact_observation, execute_action, run_agent_loop, trim_message_history, AgentAction,
-    LoopBudget, LoopStopReason, SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION,
+    LoopBudget, LoopStopReason, AGENT_LOOP_NUM_PREDICT, MAX_CONSECUTIVE_MALFORMED_STEPS,
+    SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION,
 };
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
 use ferrite_engine_servo::BorrowedServoEngine;
@@ -73,7 +74,7 @@ use ferrite_ipi::comparator::{compare, ConsentDecision, ExpectedFingerprint, Fin
 use ferrite_ipi::dry_run::DryRunRecord;
 use ferrite_ipi::tool_decision::{DefenseMode, LoopOutcome, ToolDecisionEngine, ToolId};
 use ferrite_ipi::IpiTask;
-use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier};
+use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier, SamplingOptions};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{
@@ -514,6 +515,26 @@ pub enum AgentLogEntry {
     },
 }
 
+/// Why one step's background model call did not produce a usable
+/// `AgentAction`, carried over `AgentStepReady` in place of a plain
+/// `String` so the handler in `update()` can tell the two failure modes
+/// apart and treat them differently.
+#[derive(Debug, Clone)]
+pub enum StepFailure {
+    /// The model provider call itself failed (network, auth, timeout,
+    /// empty response, …). Never retried — a broken provider will not
+    /// self-correct by being asked again in the same way.
+    Model(String),
+    /// The response body was not a single, complete, valid JSON
+    /// `AgentAction` — most often a `finish.answer` truncated mid-string by
+    /// the provider's own output cap, or stray prose/markdown fencing
+    /// around the JSON. `AgentStepReady`'s handler retries this, up to
+    /// `MAX_CONSECUTIVE_MALFORMED_STEPS` times, by feeding `message` back
+    /// to the model as an observation rather than ending the run on what
+    /// is often a one-off, self-correctable glitch.
+    Malformed { raw: String, message: String },
+}
+
 /// State of an in-progress live agent-action loop (post-fingerprint, either
 /// bypassed straight through or after a clean/consented dry run). Lives on
 /// `FerriteBrowser` between the per-step background model calls
@@ -539,6 +560,12 @@ pub struct LiveAgentLoop {
     /// Origins the user rejected in the consent panel, if this loop is the
     /// post-consent real run.
     rejected_origins: std::collections::HashSet<String>,
+    /// Consecutive unparseable model responses seen in a row — mirrors
+    /// `browser_loop::run_agent_loop`'s own counter of the same name.
+    /// Reset to `0` the moment a step parses successfully; once it exceeds
+    /// `MAX_CONSECUTIVE_MALFORMED_STEPS`, the run ends with the parse error
+    /// instead of retrying again. See `AgentStepReady`'s handler.
+    consecutive_malformed: u32,
 }
 
 pub struct FerriteBrowser {
@@ -851,10 +878,11 @@ pub enum FerriteBrowserMessage {
         prompt: String,
     },
     /// One step's background model call returned the next `AgentAction` to
-    /// take (or `Err` if the model call itself failed/was unparseable).
+    /// take (or `Err` if the model call itself failed or was unparseable
+    /// — see `StepFailure`).
     AgentStepReady {
         run_id: u64,
-        action: Result<AgentAction, String>,
+        action: Result<AgentAction, StepFailure>,
     },
     // ── Agent sidebar ─────────────────────────────────────────────────────────
     ToggleAgentSidebar,
@@ -1377,10 +1405,43 @@ pub fn update(
             };
 
             let action = match action {
-                Ok(a) => a,
-                Err(reason) => {
+                Ok(a) => {
+                    live.consecutive_malformed = 0;
+                    a
+                }
+                Err(StepFailure::Model(reason)) => {
                     state.agent_response = Some(format!("[error] {reason}"));
                     state.agent_is_running = false;
+                    return Task::none();
+                }
+                Err(StepFailure::Malformed { raw, message }) => {
+                    live.consecutive_malformed += 1;
+                    if live.consecutive_malformed > MAX_CONSECUTIVE_MALFORMED_STEPS {
+                        state.agent_response = Some(format!("[error] {message} (raw: {raw})"));
+                        state.agent_is_running = false;
+                        return Task::none();
+                    }
+                    // Give the model a chance to self-correct — the same
+                    // retry-with-feedback shape `browser_loop::
+                    // run_agent_loop` uses, and for the same reason: a
+                    // truncated or malformed response is often a one-off
+                    // glitch (e.g. a `finish.answer` cut short by the
+                    // provider's output cap) a model recovers from once
+                    // told what was wrong, so ending the whole task on the
+                    // first one turned a recoverable hiccup into a hard
+                    // failure. Not counted against `budget.max_steps` — no
+                    // real browser action was taken — but independently
+                    // bounded by `MAX_CONSECUTIVE_MALFORMED_STEPS` above.
+                    live.messages
+                        .push(Message::assistant(compact_observation(raw.trim())));
+                    live.messages.push(Message::user(format!(
+                        "Observation: your last response could not be parsed as a single, \
+                         complete, valid JSON action ({message}). It may have been cut off \
+                         or included extra text. Respond with EXACTLY ONE complete, valid \
+                         JSON object and nothing else."
+                    )));
+                    trim_message_history(&mut live.messages);
+                    spawn_next_step(state, run_id, live);
                     return Task::none();
                 }
             };
@@ -1970,6 +2031,7 @@ fn start_live_loop(
         budget: LoopBudget::default(),
         rejected,
         rejected_origins,
+        consecutive_malformed: 0,
     };
     spawn_next_step(state, run_id, live);
 }
@@ -2003,12 +2065,17 @@ fn spawn_next_step(state: &mut FerriteBrowser, run_id: u64, live: LiveAgentLoop)
 
     let handle = tokio::task::spawn(async move {
         let request = CompletionRequest::new(model_tag_main, ModelTier::Main, messages)
-            .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION);
-        let action = match provider.complete(request).await {
-            Ok(response) => serde_json::from_str::<AgentAction>(response.content.trim())
-                .map_err(|e| format!("{e} (raw: {})", response.content)),
-            Err(e) => Err(e.to_string()),
-        };
+            .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION)
+            .with_options(SamplingOptions::default().with_num_predict(AGENT_LOOP_NUM_PREDICT));
+        let action =
+            match provider.complete(request).await {
+                Ok(response) => serde_json::from_str::<AgentAction>(response.content.trim())
+                    .map_err(|e| StepFailure::Malformed {
+                        raw: response.content,
+                        message: e.to_string(),
+                    }),
+                Err(e) => Err(StepFailure::Model(e.to_string())),
+            };
         let _ = event_tx.send(FerriteBrowserMessage::AgentStepReady { run_id, action });
     });
 
@@ -3701,6 +3768,7 @@ mod tests {
             budget: LoopBudget::default(),
             rejected: Default::default(),
             rejected_origins: Default::default(),
+            consecutive_malformed: 0,
         }
     }
 
@@ -4425,7 +4493,7 @@ mod tests {
             &mut state,
             FerriteBrowserMessage::AgentStepReady {
                 run_id: 1,
-                action: Err("no provider configured".to_string()),
+                action: Err(StepFailure::Model("no provider configured".to_string())),
             },
         );
         assert_eq!(
@@ -4433,6 +4501,89 @@ mod tests {
             Some("[error] no provider configured")
         );
         assert!(!state.agent_is_running);
+    }
+
+    #[tokio::test]
+    async fn agent_step_ready_with_a_malformed_action_retries_instead_of_failing_immediately() {
+        // Real, reproduced failure mode: a `finish.answer` truncated
+        // mid-string by the provider's output cap comes back as
+        // unparseable JSON. A single such glitch must not end the whole
+        // task the way it did before this fix — it must be fed back to
+        // the model as a retry, with the run still alive afterward.
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            agent_is_running: true,
+            ..FerriteBrowser::default()
+        };
+        state.live_loop = Some(fresh_live_loop());
+        let messages_before = state.live_loop.as_ref().unwrap().messages.len();
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Err(StepFailure::Malformed {
+                    raw: r#"{"action":"finish","answer":"This page is a"#.to_string(),
+                    message: "EOF while parsing a string at line 1 column 44".to_string(),
+                }),
+            },
+        );
+
+        assert!(
+            state.agent_is_running,
+            "a single malformed response must not end the run while retries remain"
+        );
+        assert!(
+            state.agent_response.is_none(),
+            "no raw parser error should ever reach the user while a retry is still possible"
+        );
+        let live = state
+            .live_loop
+            .expect("the loop must still be alive, retrying the step");
+        assert_eq!(live.consecutive_malformed, 1);
+        assert_eq!(
+            live.messages.len(),
+            messages_before + 2,
+            "a retry-with-feedback pair (the raw response, then a request to retry) must \
+             have been appended to the conversation"
+        );
+    }
+
+    #[test]
+    fn agent_step_ready_gives_up_after_max_consecutive_malformed_responses() {
+        // A model stuck producing garbage must still fail fast rather than
+        // retry forever — bounded by MAX_CONSECUTIVE_MALFORMED_STEPS, not
+        // by the step budget (a retry never counts as a step).
+        let mut state = FerriteBrowser {
+            run_id: 1,
+            ..FerriteBrowser::default()
+        };
+        let mut live = fresh_live_loop();
+        live.consecutive_malformed = MAX_CONSECUTIVE_MALFORMED_STEPS;
+        state.live_loop = Some(live);
+
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 1,
+                action: Err(StepFailure::Malformed {
+                    raw: "still garbage".to_string(),
+                    message: "EOF while parsing a string".to_string(),
+                }),
+            },
+        );
+
+        assert!(
+            state
+                .agent_response
+                .as_deref()
+                .unwrap_or_default()
+                .contains("EOF while parsing a string"),
+            "the real parse error must surface once retries are exhausted: {:?}",
+            state.agent_response
+        );
+        assert!(!state.agent_is_running);
+        assert!(state.live_loop.is_none());
     }
 
     #[test]

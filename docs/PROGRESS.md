@@ -3428,3 +3428,116 @@ user's own relaunch, on the same `gemma4:31b`/real-Servo configuration
 that crashed twice already, can confirm this holds.
 
 **Commits:** `cf41cd5`.
+
+## 2026-09-24 — coordinator — agent loop's truncated-JSON crash: real bug found live, root-caused and fixed with a retry, not a band-aid
+
+**Scope:** the user hit this live in the running app (task: "whats on
+this page" against `https://doc.rust-lang.org`) after the segfault fix
+above merged — the agent sidebar's final "Answer" showed a raw parser
+error instead of a real answer, on a fresh branch off the now-merged
+`main`, `fix/agent-json-parse-and-truncation`:
+
+```
+[error] EOF while parsing a string at line 1 column 565 (raw: {"action":"finish","answer":"This page is
+the Rust Documentation overview, ... Documentation for `rustc` (the compiler),
+`Cargo` (build tool), `rustdoc` (documentation tool), and `Clippy` (static analyzer), as)
+```
+
+**Root cause, traced to a real, named default, not inferred from the log
+alone.** Both the agent loop's live implementations —
+`ferrite-agent::browser_loop::run_agent_loop` and `ferrite-ui`'s
+message-driven mirror of it (`spawn_next_step`) — built every
+`CompletionRequest` with `ferrite_model::SamplingOptions::default()`,
+never overriding `num_predict`. That default is `128`
+(`crates/ferrite-model/src/request.rs`), which is correct for the
+*fingerprint* call (`docs/REBUILD_DIRECTIVE.md` §10.2: "a short JSON
+array... `num_predict` is capped around 128") but was silently reused for
+the agent loop's own, much larger completions too — a full `AgentAction`
+JSON object, and for `Finish`, a freeform prose `answer` that routinely
+runs well past 128 tokens for anything but a one-line response. Ollama
+hard-truncates generation the instant the cap is hit, mid-token if
+necessary — so a longer answer comes back as a JSON object whose `answer`
+string was never closed, and `serde_json` fails exactly as observed:
+"EOF while parsing a string". This reproduces on *any* answer long enough
+to cross 128 tokens, not just this one page — a real, generally-hit bug,
+not a one-off.
+
+Separately, both loops treated *any* parse failure — this truncation
+included — as immediately fatal: the very first malformed response ended
+the whole task, with the raw `serde_json` error and the raw (truncated)
+response dumped straight into the "Answer" field the user reads. A model
+glitch that is often self-correctable on the next turn was being treated
+as unrecoverable.
+
+**Fix, two parts, `crates/ferrite-agent/src/browser_loop.rs` +
+`crates/ferrite-ui/src/lib.rs`:**
+
+1. **`AGENT_LOOP_NUM_PREDICT = 2048`** (new `pub const` in
+   `browser_loop.rs`, imported into `ferrite-ui` alongside the other
+   constants it already shares, e.g. `SYSTEM_PROMPT`) — passed via
+   `.with_options(SamplingOptions::default().with_num_predict(...))` on
+   every agent-loop (`ModelTier::Main`) completion request in both
+   implementations. Generous headroom for a real answer or a
+   `fill_form`/`js_execute` payload, while still a real, finite cap, per
+   §10.3's "cap `num_predict` on every call" — the fingerprint call's own
+   `ModelTier::Small` request is untouched and still gets the 128 default,
+   which is correct for it.
+2. **Bounded self-repair retry**, same shape in both loops: a malformed
+   response is no longer immediately fatal. The raw response is pushed as
+   the model's own turn, followed by a message asking for exactly one
+   complete, valid JSON object, and the loop continues — `browser_loop.rs`
+   restructured from `for _ in 0..budget.max_steps` to an explicit
+   `steps_taken` counter so a retry does not consume a step of
+   `LoopBudget::max_steps` (no real browser action was taken); `ferrite-ui`
+   already only counts `actions_taken`, so its retry path (routed through
+   a new `StepFailure` enum on `AgentStepReady`, replacing the old plain
+   `String` error so a provider failure and a parse failure can be told
+   apart and handled differently) needed no equivalent restructuring.
+   Retries are independently bounded by the new
+   `MAX_CONSECUTIVE_MALFORMED_STEPS = 2` (both loops import the one
+   constant), reset to `0` the moment a step parses successfully, so a
+   model stuck producing garbage still fails fast — 3 consecutive failures
+   ends the run with the real parse error, same as before this fix, just
+   no longer on the very first one.
+
+**Tests, both crates:** `browser_loop.rs` — the existing
+`a_malformed_action_stops_the_loop_rather_than_panicking` updated to use
+`always_content` (every attempt, not just the first, must fail, since the
+retry budget itself is what now ends it) plus a new assertion that a
+retry which never recovers is never recorded as an action taken; two new
+tests, `a_malformed_response_is_retried_and_recovers_on_the_next_valid_one`
+(a malformed-then-valid sequence reaches `Finished`, not
+`MalformedAction`) and `a_malformed_response_retry_does_not_consume_the_step_budget`
+(two malformed responses plus two real actions plus finish all complete
+under a 3-step budget — would fail at 1 real action if retries were
+charged against it). `ferrite-ui` — the existing
+`agent_step_ready_with_a_model_error_fails_the_task` updated for the
+`StepFailure::Model` wrapper; two new tests,
+`agent_step_ready_with_a_malformed_action_retries_instead_of_failing_immediately`
+(the run stays alive, `agent_response` stays `None`, and exactly one
+retry-feedback pair is appended) and
+`agent_step_ready_gives_up_after_max_consecutive_malformed_responses`
+(starting already at the retry limit, the next failure surfaces the real
+parse error and ends the run). `ferrite-ui` now 43 tests (up from 41),
+`ferrite-agent` 13 (up from 10).
+
+**Verified:** `cargo build`/`clippy --all-targets -D warnings`/`fmt
+--check`/`test` on `ferrite-agent` and `ferrite-ui` individually, then the
+same four plus `cargo machete` and `cargo deny check` across the full
+workspace — every crate green, 0 failures, `advisories ok, bans ok,
+licenses ok, sources ok` (same pre-existing Servo-git-source warning every
+agent since A3 has logged). Doc-drift checks (`check_purge.sh`,
+`check_no_archive_links.sh`) clean.
+
+**Not verified live:** this sandbox has no real Ollama backend or API
+key, so the fix rests on the actual `num_predict` default read directly
+from `ferrite-model/src/request.rs` and on the exact truncation point in
+the user's own reported error (`line 1 column 565`, an unterminated
+`answer` string) matching what a 128-token cap predicts, not on
+reproducing the crash and watching it stop. The retry logic itself is
+fully covered by the new deterministic tests above (`MockProvider`, no
+network), so that half of the fix — a malformed response no longer being
+instantly fatal — is verified directly, independent of whether
+`num_predict` was the only ever cause of a malformed response.
+
+**Commits:** `6faeceb`.
