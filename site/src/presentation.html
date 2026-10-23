@@ -346,11 +346,11 @@ body.overview .slide .dot { transform: none; }
   <h2 class="r" style="--i:1">What we will cover</h2>
   <div class="grid g4 mt" style="gap:18px">
     <div class="card r" style="--i:2"><span class="tag acc">1</span><h3 style="margin-top:14px">The problem</h3><p>How a web page can take over an AI agent.</p></div>
-    <div class="card r" style="--i:3"><span class="tag acc">2</span><h3 style="margin-top:14px">What we promised</h3><p>Our goals from the last review, with target numbers.</p></div>
+    <div class="card r" style="--i:3"><span class="tag acc">2</span><h3 style="margin-top:14px">Our objectives</h3><p>What we set out to achieve, with a target number for each.</p></div>
     <div class="card r" style="--i:4"><span class="tag acc">3</span><h3 style="margin-top:14px">What we built</h3><p>How Ferrite works, and the app itself.</p></div>
     <div class="card r" style="--i:5"><span class="tag acc">4</span><h3 style="margin-top:14px">How we tested</h3><p>Our two tests, AgentDojo, and what each number means.</p></div>
     <div class="card r" style="--i:6"><span class="tag acc">5</span><h3 style="margin-top:14px">Results</h3><p>What worked, in plain numbers.</p></div>
-    <div class="card r" style="--i:7"><span class="tag acc">6</span><h3 style="margin-top:14px">Promised vs delivered</h3><p>Every goal, met or not.</p></div>
+    <div class="card r" style="--i:7"><span class="tag acc">6</span><h3 style="margin-top:14px">Target vs result</h3><p>Every objective, met or not.</p></div>
     <div class="card r" style="--i:8"><span class="tag acc">7</span><h3 style="margin-top:14px">Limits</h3><p>What our numbers do not prove.</p></div>
     <div class="card r" style="--i:9"><span class="tag acc">8</span><h3 style="margin-top:14px">Next steps</h3><p>What we will do next.</p></div>
   </div>
@@ -400,35 +400,16 @@ body.overview .slide .dot { transform: none; }
   <div class="takeaway r" style="--i:4"><div class="ico">→</div><div>Like a <b>guest list</b> at a door: it does not matter what a stranger says, if they are not on the list they do not get in without the host saying yes.</div></div>
 </section>
 
-<!-- 6. Last review vs now -->
-<section class="slide" data-title="Since the last review">
-  <div class="kicker r" style="--i:0">Since the last review</div>
-  <h2 class="r" style="--i:1">What we planned, and what we changed</h2>
-  <div class="tbl r mt-s" style="--i:2">
-    <table class="simple">
-      <thead><tr><th>Last review (the plan)</th><th>Now (what we built)</th><th>Why we changed it</th></tr></thead>
-      <tbody>
-        <tr><td style="font-weight:500">A “capability broker” giving tokens to every action</td><td>Predict the task's needs, test the plan, compare, ask</td><td>Tokens alone don't say <i>which</i> actions a task should need. Prediction does.</td></tr>
-        <tr><td style="font-weight:500">Extensions in a WebAssembly sandbox</td><td>Dropped</td><td>Not needed to stop the agent; time went to testing.</td></tr>
-        <tr><td style="font-weight:500">Two engines: Servo + Chromium (CEF)</td><td>Servo only, with many fixes</td><td>One engine done well beats two half-done.</td></tr>
-        <tr><td style="font-weight:500">Ad blocking with ≥10% bandwidth saving</td><td>Dropped</td><td>Not part of the security question.</td></tr>
-        <tr><td style="font-weight:500">Hash-chained audit log</td><td><b style="color:var(--good)">Kept and built</b></td><td>It proves after the fact what was allowed or blocked.</td></tr>
-        <tr><td style="font-weight:500">20+ attack scenarios</td><td><b style="color:var(--good)">1,984 test cases</b>, incl. AgentDojo</td><td>A fair test needs many cases and an outside benchmark.</td></tr>
-      </tbody>
-    </table>
-  </div>
-</section>
-
 <!-- 7. Objectives -->
-<section class="slide" data-title="Our goals">
-  <div class="kicker r" style="--i:0">Our goals · set before building</div>
-  <h2 class="r" style="--i:1">What we promised, with a number for each</h2>
+<section class="slide" data-title="Our objectives">
+  <div class="kicker r" style="--i:0">Our objectives</div>
+  <h2 class="r" style="--i:1">What we set out to achieve, with a target for each</h2>
   <div class="grid g2 mt-s" style="gap:16px 22px">
     <div class="card obj r" style="--i:2"><div class="id">1</div><div><h3>Stop the attacks</h3><p>Far fewer attacks should work than with no protection.</p><div class="target">Target: <b>far fewer than 100%</b> of attacks work (with no protection, all of them work)</div></div></div>
     <div class="card obj r" style="--i:3"><div class="id">2</div><div><h3>Check every action</h3><p>Nothing outside the list may run without asking.</p><div class="target">Target: <b>100%</b> of such actions caught</div></div></div>
     <div class="card obj r" style="--i:4"><div class="id">3</div><div><h3>Don't block normal work</h3><p>Normal tasks should rarely be stopped by mistake.</p><div class="target">Target: <b>few false alarms</b> on normal tasks</div></div></div>
     <div class="card obj r" style="--i:5"><div class="id">4</div><div><h3>Be fast</h3><p>The check itself must not slow the browser down.</p><div class="target">Target: <b>&lt; 1 ms</b> per check</div></div></div>
-    <div class="card obj r" style="--i:6"><div class="id">5</div><div><h3>Test at scale, and fairly</h3><p>Many attacks, plus an outside benchmark we did not write.</p><div class="target">Target: <b>20+</b> attack scenarios</div></div></div>
+    <div class="card obj r" style="--i:6"><div class="id">5</div><div><h3>Test at scale, and fairly</h3><p>Many attacks, plus an outside benchmark we did not write.</p><div class="target">Target: <b>≈ 360</b> test cases, incl. an outside benchmark</div></div></div>
     <div class="card obj r" style="--i:7"><div class="id">6</div><div><h3>Prove it afterwards, and be honest</h3><p>Every decision in a log that shows tampering; say what we cannot stop.</p><div class="target">Target: <b>log verifies</b> · <b>blind spot measured</b></div></div></div>
   </div>
 </section>
@@ -652,40 +633,22 @@ body.overview .slide .dot { transform: none; }
 </section>
 
 <!-- 21. Promised vs delivered -->
-<section class="slide" data-title="Promised vs delivered">
-  <div class="kicker r" style="--i:0">Promised vs delivered</div>
-  <h2 class="r" style="--i:1">Every goal, with its number</h2>
+<section class="slide" data-title="Target vs result">
+  <div class="kicker r" style="--i:0">Objectives · target vs result</div>
+  <h2 class="r" style="--i:1">Every objective, with its number</h2>
   <div class="tbl r mt-s" style="--i:2">
     <table class="pd">
-      <thead><tr><th>Goal</th><th>We promised</th><th>We got</th><th>Result</th></tr></thead>
+      <thead><tr><th>Objective</th><th>Target</th><th>Result</th><th>Status</th></tr></thead>
       <tbody>
         <tr><td>1 · Stop the attacks</td><td>far below 100%</td><td><b style="color:var(--text)">0 of 809</b> (Test A) · <b style="color:var(--text)">31 → 6</b> (Test B)</td><td><span class="tag good">Met</span></td></tr>
         <tr><td>2 · Check every action</td><td>100% caught</td><td><b style="color:var(--text)">624 of 624</b> off-list actions caught</td><td><span class="tag good">Met</span></td></tr>
         <tr><td>3 · Don't block normal work</td><td>few false alarms</td><td><b style="color:var(--text)">0 of 129</b> (Test A) · <b style="color:var(--bad)">86 of 226</b> (Test B)</td><td><span class="tag warn">Half met</span></td></tr>
         <tr><td>4 · Be fast</td><td>&lt; 1 ms per check</td><td><b style="color:var(--text)">0 ms</b> typical, ≤ 1 ms for 95% of checks · 0.7 s when the AI is asked</td><td><span class="tag good">Met</span></td></tr>
-        <tr><td>5 · Test at scale</td><td>20+ scenarios</td><td><b style="color:var(--text)">1,984 tasks</b>, incl. all 1,046 of AgentDojo</td><td><span class="tag good">Met, 99×</span></td></tr>
+        <tr><td>5 · Test at scale</td><td>≈ 360 test cases</td><td><b style="color:var(--text)">1,984 tasks</b>, incl. all 1,046 of AgentDojo</td><td><span class="tag good">Met, 5.5×</span></td></tr>
         <tr><td>6 · Prove it afterwards</td><td>log verifies</td><td>Log checks out; 20 tamper tests pass</td><td><span class="tag good">Met</span></td></tr>
         <tr><td>6 · Be honest</td><td>blind spot measured</td><td>Look-alikes: <b style="color:var(--text)">15%</b> (Test A) · <b style="color:var(--text)">27%</b> (Test B)</td><td><span class="tag good">Met</span></td></tr>
-        <tr><td>Ad blocking</td><td class="was">≥10% bandwidth</td><td>Dropped (not part of the security question)</td><td><span class="tag bad">Dropped</span></td></tr>
-        <tr><td>Research paper</td><td>NDSS / ACSAC</td><td>Results ready, paper not written yet</td><td><span class="tag warn">Pending</span></td></tr>
       </tbody>
     </table>
-  </div>
-</section>
-
-<!-- 22. Engineering -->
-<section class="slide" data-title="The build">
-  <div class="kicker r" style="--i:0">The build, in numbers</div>
-  <h2 class="r" style="--i:1">How much we built</h2>
-  <div class="grid g4 mt">
-    <div class="card stat r" style="--i:2"><div class="num grad" data-count="103739">0</div><div class="lbl">lines of Rust code</div></div>
-    <div class="card stat r" style="--i:3"><div class="num grad" data-count="1685">0</div><div class="lbl">automatic tests, none need internet</div></div>
-    <div class="card stat r" style="--i:4"><div class="num grad" data-count="350">0</div><div class="lbl">code changes saved, since 3 July 2026</div></div>
-    <div class="card stat r" style="--i:5"><div class="num grad" data-count="48">0</div><div class="lbl">fixes inside the Servo engine</div></div>
-  </div>
-  <div class="grid g2 mt" style="gap:24px">
-    <div class="card r" style="--i:6"><h3>Making real websites work</h3><ul class="clean mt-s"><li><b>YouTube video</b> now plays (we added video streaming to the engine)</li><li>Saved data, offline pages, video calls, camera with permission</li><li><b>75 of 94</b> modern web features work in our check</li><li>Speed test (Speedometer): <b>1.96 → 4.21</b>, still behind Brave (15.6)</li></ul></div>
-    <div class="card r" style="--i:7"><h3>Built and shipped properly</h3><ul class="clean mt-s"><li>Tested on <b>Linux, macOS and Windows</b> on every build</li><li>A release goes out only if <b>every</b> check passes: <b>6 downloads</b> each time</li><li>Full check + tests in <b>3 min 32 s</b> (goal: under 5 min)</li><li>Works with Ollama, Gemini, Claude, OpenAI; keys stay in the OS keychain</li></ul></div>
   </div>
 </section>
 
@@ -745,7 +708,7 @@ body.overview .slide .dot { transform: none; }
 <div class="hint" id="hint"><kbd>←</kbd><kbd>→</kbd> move · <kbd>F</kbd> full screen · <kbd>O</kbd> overview · <a href="{{ROOT}}index.html" style="color:inherit">back to the site</a></div>
 <div class="hud" id="hud">
   <button id="prev" aria-label="Previous slide" title="Previous (←)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 6l-6 6 6 6"/></svg></button>
-  <div class="counter" id="counter">1 / 25</div>
+  <div class="counter" id="counter">1 / 23</div>
   <button id="next" aria-label="Next slide" title="Next (→)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></button>
   <button id="fs" aria-label="Full screen" title="Full screen (F)"><svg id="fs-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg><svg id="fs-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg></button>
 </div>
