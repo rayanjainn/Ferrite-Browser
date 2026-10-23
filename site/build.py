@@ -252,7 +252,13 @@ def build() -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(out, encoding="utf-8")
 
-    print(f"built {1 + len(docs)} pages into {DIST.relative_to(HERE.parent)}")
+    # The project-review slide deck: a whole page of its own (no site shell),
+    # served at /presentation/.
+    deck = DIST / "presentation" / "index.html"
+    deck.parent.mkdir(parents=True, exist_ok=True)
+    deck.write_text(sub_tokens((SRC / "presentation.html").read_text(encoding="utf-8"), "../"), encoding="utf-8")
+
+    print(f"built {2 + len(docs)} pages into {DIST.relative_to(HERE.parent)}")
 
 
 # ── Link check ───────────────────────────────────────────────────────────────

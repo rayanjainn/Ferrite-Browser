@@ -10,6 +10,7 @@ site/
 ├── src/
 │   ├── layout.html   page shell: header, footer, theme, <head>
 │   ├── index.html    the landing page
+│   ├── presentation.html  the project-review slide deck, served at /presentation/
 │   └── docs/*.html   one documentation article each (front-matter comment first);
 │                     glossary.html ("Words we use") is the plain-words word list
 └── static/           css, js, fonts, images (copied to dist/static/)
