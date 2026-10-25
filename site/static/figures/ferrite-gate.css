@@ -1,0 +1,7 @@
+.fig-hole{fill:var(--anatomy-shade-0);stroke:none}
+.iso[data-theme="light"] .fig-hole,.fig-light .fig-hole{fill:var(--anatomy-shade-0)}
+.fig-ind{fill:var(--anatomy-shade-0);stroke:var(--anatomy-lo);stroke-width:var(--anatomy-weight);transition:fill .3s}
+.fig-ind[data-state="go"]{fill:var(--fig-go,#46d39a)}
+.fig-ind[data-state="stop"]{fill:var(--fig-warn,#f5a524)}
+.fig-lamp{fill:var(--anatomy-shade-1);stroke:var(--anatomy-mid);stroke-width:var(--anatomy-weight);transition:fill .35s var(--anatomy-ease)}
+.fig-lamp[data-on="1"]{fill:var(--fig-warn,#f5a524)}

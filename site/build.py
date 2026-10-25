@@ -8,6 +8,9 @@ Content lives in site/src/ as plain HTML fragments:
 
   src/layout.html          the page shell ({{TITLE}}, {{DESC}}, {{BODY}}, ...)
   src/index.html           the landing page body
+  src/download.html        the downloads page body (latest build + history)
+  src/figures/<name>.html  isometric figures, built by figures/build.mjs and
+                           inlined with {{figure:<name>}}
   src/docs/<slug>.html     one documentation article each, with a front-matter
                            comment (title / order / group / summary)
 
@@ -191,7 +194,18 @@ def pager(docs: list[dict], i: int, root: str) -> str:
 # ── Page assembly ────────────────────────────────────────────────────────────
 
 
+def render_figures(text: str) -> str:
+    def sub(m: re.Match) -> str:
+        path = SRC / "figures" / f"{m.group(1)}.html"
+        if not path.exists():
+            raise SystemExit(f"missing figure {path.relative_to(HERE)}: run node site/figures/build.mjs")
+        return path.read_text(encoding="utf-8").strip()
+
+    return re.sub(r"\{\{figure:([a-z0-9-]+)\}\}", sub, text)
+
+
 def sub_tokens(text: str, root: str) -> str:
+    text = render_figures(text)
     text = text.replace("{{ROOT}}", root).replace("{{REPO}}", REPO)
     text = text.replace("{{VERSION}}", app_version()).replace("{{ASOF}}", DOCS_AS_OF)
     return render_icons(text)
@@ -207,6 +221,7 @@ def page(layout: str, *, title: str, desc: str, body: str, root: str, nav: str, 
         "BODYCLASS": cls,
         "NAV_HOME": ' aria-current="page"' if nav == "home" else "",
         "NAV_DOCS": ' aria-current="page"' if nav == "docs" else "",
+        "NAV_DOWNLOAD": ' aria-current="page"' if nav == "download" else "",
     }.items():
         out = out.replace("{{" + key + "}}", value)
     return sub_tokens(out, root)
@@ -222,13 +237,13 @@ def build() -> None:
     layout = (SRC / "layout.html").read_text(encoding="utf-8")
     docs = load_docs()
 
-    # Landing page.
-    index = (SRC / "index.html").read_text(encoding="utf-8")
-    meta, body = parse_front(index)
-    (DIST / "index.html").write_text(
-        page(layout, title=SITE_NAME, desc=meta["description"], body=body, root="", nav="home"),
-        encoding="utf-8",
-    )
+    # Top-level pages: the landing page and the downloads page.
+    for name, nav in (("index", "home"), ("download", "download")):
+        meta, body = parse_front((SRC / f"{name}.html").read_text(encoding="utf-8"))
+        (DIST / f"{name}.html").write_text(
+            page(layout, title=meta.get("title", SITE_NAME), desc=meta["description"], body=body, root="", nav=nav, cls=meta.get("class", "")),
+            encoding="utf-8",
+        )
 
     # Documentation.
     for i, d in enumerate(docs):
@@ -247,6 +262,7 @@ def build() -> None:
             body=shell,
             root=root,
             nav="docs",
+            cls="docs-page",
         )
         target = DIST / "docs" / ("index.html" if d["slug"] == "index" else f'{d["slug"]}.html')
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -258,7 +274,7 @@ def build() -> None:
     deck.parent.mkdir(parents=True, exist_ok=True)
     deck.write_text(sub_tokens((SRC / "presentation.html").read_text(encoding="utf-8"), "../"), encoding="utf-8")
 
-    print(f"built {2 + len(docs)} pages into {DIST.relative_to(HERE.parent)}")
+    print(f"built {3 + len(docs)} pages into {DIST.relative_to(HERE.parent)}")
 
 
 # ── Link check ───────────────────────────────────────────────────────────────

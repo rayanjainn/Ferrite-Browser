@@ -1,0 +1,91 @@
+<!--
+title: Download
+description: Download Ferrite for macOS, Windows or Linux. The newest build is picked for your system, and every earlier build stays available.
+-->
+
+<section class="dl-hero" data-releases>
+  <div class="wrap">
+    <span class="pill" data-reveal><span class="dot-live"></span><span data-latest="build"><span class="skel"></span></span> · <span data-latest="date"><span class="skel"></span></span></span>
+    <h1 data-reveal style="--d:80ms">Download <span class="grad-line">Ferrite</span></h1>
+    <p class="lede" data-reveal style="--d:160ms">The newest build that passed CI on every platform, picked for your system. Free and open source. These are unsigned research prototypes, so your system will ask once before the first launch.</p>
+    <div class="dl-main" data-reveal style="--d:240ms">
+      <a class="dl-big" id="dl-big" href="{{REPO}}/releases/tag/latest">{{icon:download}}<span data-big-label>Download the latest build</span></a>
+      <span class="dl-meta" data-big-meta>macOS · Windows · Linux</span>
+      <span class="status-line" data-release-status><i></i>Checking GitHub for the newest build…</span>
+    </div>
+  </div>
+</section>
+
+<section class="h-sec tight" id="platforms">
+  <div class="wrap">
+    <div class="dl-grid" data-stagger>
+      <div class="os-card glass" data-os-card="macos">
+        <div class="os"><span>{{icon:laptop}}</span>macOS</div>
+        <div class="sub">Apple silicon · zip</div>
+        <p>Unzip it and drag <code>Ferrite.app</code> to Applications.</p>
+        <div class="files" data-files><a class="file-btn" href="{{REPO}}/releases/tag/latest">Download for macOS<small>releases</small></a></div>
+      </div>
+      <div class="os-card glass" data-os-card="windows">
+        <div class="os"><span>{{icon:windows}}</span>Windows</div>
+        <div class="sub">x64 · zip</div>
+        <p>Unzip it and run <code>ferrite.exe</code>.</p>
+        <div class="files" data-files><a class="file-btn" href="{{REPO}}/releases/tag/latest">Download for Windows<small>releases</small></a></div>
+      </div>
+      <div class="os-card glass" data-os-card="linux">
+        <div class="os"><span>{{icon:terminal}}</span>Linux</div>
+        <div class="sub">x64 · tar.gz</div>
+        <p>Extract it, then run <code>./ferrite</code>, or <code>./install.sh</code> for a launcher entry.</p>
+        <div class="files" data-files><a class="file-btn" href="{{REPO}}/releases/tag/latest">Download for Linux<small>releases</small></a></div>
+      </div>
+    </div>
+    <p class="tiny" style="text-align:center;margin-top:22px">Media builds add video, audio, WebRTC, camera, microphone and screen sharing. They are experimental and have not been run on a Mac or on Windows by the people who wrote them.</p>
+  </div>
+</section>
+
+<section class="h-sec tight" id="first-launch">
+  <div class="wrap">
+    <div class="h-head" data-reveal>
+      <span class="eyebrow">First launch</span>
+      <h2>Three steps, then connect a model.</h2>
+    </div>
+    <div class="steps-os" data-stagger>
+      <div class="glass"><h3>macOS</h3><ol><li>Unzip and move <code>Ferrite.app</code> to Applications.</li><li>Open it. macOS blocks it once, because it is not notarized.</li><li>System Settings → Privacy &amp; Security → <strong>Open Anyway</strong>. Or run <code>xattr -dr com.apple.quarantine /Applications/Ferrite.app</code>.</li></ol></div>
+      <div class="glass"><h3>Windows</h3><ol><li>Unzip the folder anywhere.</li><li>Run <code>ferrite.exe</code>.</li><li>If SmartScreen asks, choose <strong>More info → Run anyway</strong>.</li></ol></div>
+      <div class="glass"><h3>Linux</h3><ol><li>Extract: <code>tar xzf ferrite-*.tar.gz</code>.</li><li>Run <code>./ferrite</code> or <code>./install.sh</code>.</li><li>You need a graphical session with OpenGL/EGL and the libraries in <code>README.txt</code>.</li></ol></div>
+    </div>
+    <p style="text-align:center;margin-top:26px"><a class="btn btn-ghost" href="{{ROOT}}docs/getting-started.html">Getting started guide {{icon:arrow}}</a></p>
+  </div>
+</section>
+
+<section class="h-sec tight" id="history">
+  <div class="wrap">
+    <div class="h-head" data-reveal>
+      <span class="eyebrow">Every build</span>
+      <h2>Earlier builds stay available.</h2>
+      <p>Each build keeps its own <code>build-&lt;number&gt;-&lt;commit&gt;</code> release, so if the newest one breaks something for you, take an older one. <span data-history-count></span> builds so far.</p>
+    </div>
+    <div class="history-tools" data-reveal>
+      <input type="search" placeholder="Filter by build number or commit…" aria-label="Filter builds" data-history-filter>
+      <a class="btn btn-ghost btn-sm" href="{{REPO}}/releases" rel="noopener">{{icon:github}}All releases on GitHub</a>
+    </div>
+    <div class="history" id="history-list">
+      <div class="rel"><div style="padding:18px 20px"><span class="skel" style="width:40%"></span></div></div>
+      <div class="rel"><div style="padding:18px 20px"><span class="skel" style="width:55%"></span></div></div>
+      <div class="rel"><div style="padding:18px 20px"><span class="skel" style="width:30%"></span></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="h-sec tight" id="source">
+  <div class="wrap">
+    <div class="glass" style="padding:32px" data-reveal>
+      <span class="eyebrow">Or build it from source</span>
+      <h2 style="margin:12px 0 10px">Compile it yourself.</h2>
+      <p class="muted">You need a recent Rust toolchain (the repository pins stable) and a C toolchain with <code>cmake</code> and <code>pkg-config</code>. The first build compiles the Servo engine: plan on 20 to 60 minutes and 10 GB or more.</p>
+<pre><code>$ git clone {{REPO}}
+$ cd Ferrite-Browser
+$ cargo run --release -p ferrite-shell --features ferrite-servo/servo</code></pre>
+      <p class="muted" style="margin-top:16px">Without the Servo feature, the whole defense, the evaluation harness and the test suite still build and run with <code>cargo test --workspace</code>, with no network and no API key. <a href="{{ROOT}}docs/run-it.html">Run it from source</a> lists every recipe.</p>
+    </div>
+  </div>
+</section>

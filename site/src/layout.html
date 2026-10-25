@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{TITLE}}</title>
 <meta name="description" content="{{DESC}}">
-<meta name="theme-color" content="#5b45f0">
+<meta name="theme-color" content="#0a0720">
 <meta property="og:title" content="{{TITLE}}">
 <meta property="og:description" content="{{DESC}}">
 <meta property="og:type" content="website">
@@ -13,6 +13,9 @@
 <link rel="preload" href="{{ROOT}}static/fonts/Inter-Regular.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="{{ROOT}}static/fonts/Inter-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="{{ROOT}}static/css/site.css">
+<link rel="stylesheet" href="{{ROOT}}static/css/home.css">
+<link rel="stylesheet" href="{{ROOT}}static/figures/iso.css">
+<link rel="stylesheet" href="{{ROOT}}static/figures/ferrite-gate.css">
 <script>
   /* Applied before first paint so the page never flashes the wrong theme. */
   (function () {
@@ -29,20 +32,22 @@
     <a class="brand" href="{{ROOT}}index.html"><img src="{{ROOT}}static/img/favicon.png" alt="" width="256" height="256">Ferrite</a>
     <nav class="nav-links" id="nav-links" aria-label="Main">
       <a href="{{ROOT}}index.html#defense">Defense</a>
+      <a href="{{ROOT}}index.html#machine">See it work</a>
       <a href="{{ROOT}}index.html#browser">Browser</a>
       <a href="{{ROOT}}index.html#evaluation">Evaluation</a>
       <a href="{{ROOT}}docs/"{{NAV_DOCS}}>Docs</a>
-      <a href="{{ROOT}}index.html#models">Your model</a>
+      <a href="{{ROOT}}download.html"{{NAV_DOWNLOAD}}>Downloads</a>
       <a href="{{REPO}}" rel="noopener">GitHub</a>
     </nav>
     <span class="nav-spacer"></span>
     <button class="icon-btn" id="theme-toggle" type="button" aria-label="Switch colour theme" title="Switch colour theme">
       <span class="theme-moon">{{icon:moon}}</span><span class="theme-sun">{{icon:sun}}</span>
     </button>
-    <a class="btn btn-primary btn-sm nav-cta" href="{{ROOT}}index.html#download">{{icon:download}}Download</a>
+    <a class="btn btn-primary btn-sm nav-cta" href="{{ROOT}}download.html">{{icon:download}}Download</a>
     <button class="icon-btn menu-btn" id="menu-btn" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="nav-links">{{icon:menu}}</button>
   </div>
 </header>
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
 <main id="main-wrap">
 {{BODY}}
 </main>
@@ -54,7 +59,8 @@
         <p>A browser for AI agents. It limits what a hijacked agent can do, by how it is built. It publishes how well that works, including the limits.</p>
       </div>
       <div><h5>Product</h5>
-        <a href="{{ROOT}}index.html#download">Download</a>
+        <a href="{{ROOT}}download.html">Download</a>
+        <a href="{{ROOT}}download.html#history">Earlier builds</a>
         <a href="{{ROOT}}index.html#models">Connect your model</a>
         <a href="{{ROOT}}docs/getting-started.html">Getting started</a>
         <a href="{{ROOT}}docs/run-it.html">Run it from source</a>
@@ -81,5 +87,9 @@
   </div>
 </footer>
 <script src="{{ROOT}}static/js/site.js" defer></script>
+<script src="{{ROOT}}static/js/motion.js" defer></script>
+<script src="{{ROOT}}static/js/releases.js" defer></script>
+<script src="{{ROOT}}static/figures/iso-kit.js" defer></script>
+<script src="{{ROOT}}static/figures/ferrite-gate.js" defer></script>
 </body>
 </html>

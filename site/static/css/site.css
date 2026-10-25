@@ -43,11 +43,11 @@
 
 /* Dark tokens, declared once and applied for both the OS preference and the toggle. */
 :root[data-theme="dark"] {
-  --bg: #0b0920;
-  --bg-soft: #100d2b;
-  --surface: #14112f;
-  --surface-2: #1a1640;
-  --line: #2a2554;
+  --bg: #07051a;
+  --bg-soft: #0d0a26;
+  --surface: #120e30;
+  --surface-2: #19143f;
+  --line: #2a2458;
   --line-strong: #3a3470;
   --text: #ecebf9;
   --text-2: #b4b1d6;
@@ -70,8 +70,8 @@
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0b0920; --bg-soft: #100d2b; --surface: #14112f; --surface-2: #1a1640;
-    --line: #2a2554; --line-strong: #3a3470; --text: #ecebf9; --text-2: #b4b1d6; --text-3: #8a86b0;
+    --bg: #07051a; --bg-soft: #0d0a26; --surface: #120e30; --surface-2: #19143f;
+    --line: #2a2458; --line-strong: #3a3470; --text: #ecebf9; --text-2: #b4b1d6; --text-3: #8a86b0;
     --accent: #8b7cff; --accent-2: #a89cff; --accent-soft: rgba(139, 124, 255, 0.14);
     --good: #3ddc9a; --good-soft: rgba(61, 220, 154, 0.12);
     --warn: #ffb35c; --warn-soft: rgba(255, 179, 92, 0.12);

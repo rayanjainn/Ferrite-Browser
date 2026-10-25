@@ -1,6 +1,6 @@
-/* Ferrite site: theme, menu, copy buttons, on-page nav, bar animation and the
-   download resolver. Everything degrades: with JavaScript off the page is fully
-   readable and the download buttons link to the GitHub release page. */
+/* Ferrite site: theme, menu, copy buttons, on-page nav and bar animation.
+   Downloads live in releases.js and motion in motion.js. Everything degrades:
+   with JavaScript off the page is fully readable. */
 (function () {
   'use strict';
   var doc = document.documentElement;
@@ -74,56 +74,4 @@
   } else {
     groups.forEach(function (g) { g.classList.add('in-view'); });
   }
-
-  // ── Downloads ──────────────────────────────────────────────────────────
-  var cards = document.querySelectorAll('[data-platform]');
-  if (!cards.length) return;
-
-  var ua = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || '';
-  var mine = /mac/i.test(ua) ? 'macos' : /win/i.test(ua) ? 'windows' : /linux|x11|cros/i.test(ua) ? 'linux' : '';
-  var names = { macos: 'macOS', windows: 'Windows', linux: 'Linux' };
-  cards.forEach(function (c) { if (c.getAttribute('data-platform') === mine) c.classList.add('is-mine'); });
-  var heroLabel = document.getElementById('hero-download-label');
-  if (heroLabel && mine) heroLabel.textContent = 'Download for ' + names[mine];
-
-  var statusEl = document.getElementById('release-status');
-  function setStatus(kind, text) {
-    if (!statusEl) return;
-    statusEl.className = 'status ' + kind;
-    statusEl.innerHTML = '<i></i>' + text;
-  }
-  function mb(n) { return (n / 1048576).toFixed(0) + ' MB'; }
-
-  fetch('https://api.github.com/repos/' + REPO + '/releases/tags/latest', { headers: { Accept: 'application/vnd.github+json' } })
-    .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
-    .then(function (rel) {
-      var found = 0;
-      cards.forEach(function (card) {
-        var suffix = card.getAttribute('data-suffix');
-        var asset = (rel.assets || []).filter(function (a) { return a.name.slice(-suffix.length) === suffix; })[0];
-        var btn = card.querySelector('[data-btn]');
-        var meta = card.querySelector('[data-meta]');
-        if (asset) {
-          found++;
-          btn.href = asset.browser_download_url;
-          btn.removeAttribute('aria-disabled');
-          meta.textContent = asset.name + ' · ' + mb(asset.size);
-          if (card.getAttribute('data-platform') === mine && heroLabel) {
-            var hero = document.getElementById('hero-download');
-            if (hero) hero.href = asset.browser_download_url;
-          }
-        } else {
-          meta.textContent = 'Not in the latest build.';
-        }
-      });
-      if (found) {
-        var when = rel.published_at ? new Date(rel.published_at).toISOString().slice(0, 10) : '';
-        setStatus('ok', 'Latest build' + (when ? ' · ' + when : ''));
-      } else {
-        setStatus('none', 'A release exists but has no packages yet.');
-      }
-    })
-    .catch(function () {
-      setStatus('none', 'No build published yet. Build from source below, or check the releases page.');
-    });
 })();

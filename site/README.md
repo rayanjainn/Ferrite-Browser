@@ -10,11 +10,29 @@ site/
 ├── src/
 │   ├── layout.html   page shell: header, footer, theme, <head>
 │   ├── index.html    the landing page
+│   ├── download.html the downloads page: latest build for your system + every earlier build
+│   ├── figures/      HTML fragments of the isometric figures (generated, committed)
 │   ├── presentation.html  the project-review slide deck, served at /presentation/
 │   └── docs/*.html   one documentation article each (front-matter comment first);
 │                     glossary.html ("Words we use") is the plain-words word list
-└── static/           css, js, fonts, images (copied to dist/static/)
+├── figures/          source of the isometric figures (Node, no dependencies)
+└── static/           css, js, fonts, images, figures/ (copied to dist/static/)
 ```
+
+## Figures and motion
+
+The consent-gate machine on the landing page is an isometric figure drawn with
+the Anatomy kit (`figures/kit/`, MIT). Its geometry and live script come from
+`figures/ferrite-gate.mjs`; rebuild it with `node site/figures/build.mjs`,
+which writes `static/figures/` and `src/figures/ferrite-gate.html`. The output
+is committed, so `build.py` still needs only Python. Pages include a figure
+with `{{figure:<name>}}`.
+
+Everything that moves runs on its own and loops: the figure's tour, the story
+card, the stage cycle, the audit chain (`static/js/motion.js`). Nothing needs a
+click, and under `prefers-reduced-motion` all of it is shown at rest.
+`static/js/releases.js` fills the downloads from the GitHub releases API
+(cached ten minutes per visitor); every button falls back to the releases page.
 
 ## Build and preview
 
