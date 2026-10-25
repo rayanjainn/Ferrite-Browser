@@ -850,7 +850,7 @@ fn user_message<'a>(
     .padding([8, 12])
     .max_width(BUBBLE_MAX_WIDTH)
     .style(move |_: &Theme| container::Style {
-        background: Some(Background::Color(fade(palette.accent, a))),
+        background: Some(Background::Color(fade(palette.accent_fill, a))),
         border: Border {
             radius: iced::border::Radius::new(14.0).bottom_right(4.0),
             ..Border::default()

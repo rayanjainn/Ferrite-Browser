@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Checkout demo</title><link rel="stylesheet" href="demo.css">
+<style>
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.card { padding: 18px; }
+.ph { height: 110px; border-radius: 7px; background: #e9ebee; margin-bottom: 14px; }
+.card h3 { margin: 0 0 6px; font-size: 17px; font-weight: 500; }
+.card p { margin: 0 0 14px; font-size: 22px; font-weight: 700; }
+</style></head>
+<body>
+<header><strong>Sample Shop</strong><nav><a href="#">Laptops</a><a href="#">Phones</a><a href="#">Accessories</a><a href="#">Cart (2)</a></nav></header>
+<main>
+  <h1>Recommended for you</h1>
+  <p class="lede">A local demo page that logs to the console, so the DevTools panel has something real to show.</p>
+  <div class="grid">
+    <div class="card"><div class="ph"></div><h3>Pocket keyboard</h3><p>$49</p><span class="btn">Add to cart</span></div>
+    <div class="card"><div class="ph"></div><h3>Travel dock</h3><p>$89</p><span class="btn">Add to cart</span></div>
+    <div class="card"><div class="ph"></div><h3>Desk lamp</h3><p>$35</p><span class="btn">Add to cart</span></div>
+  </div>
+</main>
+<script>
+console.log('app booted', JSON.stringify({ version: '1.4.2', env: 'dev' }));
+console.info('cart: 2 items restored from the last visit');
+console.warn('Deprecated API: document.write() called after load');
+console.debug('layout pass 3');
+fetch('api/recommendations.json').then(function (r) { if (!r.ok) console.error('Failed to load recommendations: HTTP ' + r.status); });
+document.getElementById('recs').addEventListener('click', function () {});
+</script>
+</body></html>

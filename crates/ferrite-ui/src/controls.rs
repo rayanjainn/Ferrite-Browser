@@ -1167,12 +1167,12 @@ fn checkbox<'a>(
     .height(Length::Fixed(16.0))
     .center(Length::Fixed(16.0))
     .style(move |_: &Theme| container::Style {
-        background: checked.then_some(Background::Color(palette.accent)),
+        background: checked.then_some(Background::Color(palette.accent_fill)),
         border: Border {
             radius: 4.0.into(),
             width: 1.5,
             color: if checked {
-                palette.accent
+                palette.accent_fill
             } else if disabled {
                 tint(palette.text_dim, 0.4)
             } else {

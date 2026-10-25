@@ -1,31 +1,32 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <!-- Ferrite app icon. A faceted hexagonal shield (the containment boundary)
        around a geometric F; the node at the end of the F's middle bar is the
-       agent's single, consent-checked step. Source of truth for every raster
+       agent's single, consent-checked step. Warm ink and one ember, the same
+       palette as the app (crates/ferrite-ui) and the website. Source of truth for every raster
        size: scripts/make_icons.py renders this file. -->
   <defs>
     <linearGradient id="bg" x1="130" y1="60" x2="900" y2="980" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#2b2159"/>
-      <stop offset="0.55" stop-color="#17133a"/>
-      <stop offset="1" stop-color="#0b0a21"/>
+      <stop offset="0" stop-color="#2a221c"/>
+      <stop offset="0.55" stop-color="#16120f"/>
+      <stop offset="1" stop-color="#0b0908"/>
     </linearGradient>
     <radialGradient id="glow" cx="760" cy="860" r="620" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ff7a3d" stop-opacity="0.55"/>
-      <stop offset="0.5" stop-color="#e2447a" stop-opacity="0.18"/>
-      <stop offset="1" stop-color="#e2447a" stop-opacity="0"/>
+      <stop offset="0" stop-color="#ff7a3d" stop-opacity="0.5"/>
+      <stop offset="0.5" stop-color="#c2410c" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#c2410c" stop-opacity="0"/>
     </radialGradient>
     <radialGradient id="halo" cx="380" cy="230" r="520" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#8b7cff" stop-opacity="0.35"/>
-      <stop offset="1" stop-color="#8b7cff" stop-opacity="0"/>
+      <stop offset="0" stop-color="#ffd2a1" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#ffd2a1" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="rim" x1="200" y1="150" x2="820" y2="880" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#ffd2a1"/>
       <stop offset="0.45" stop-color="#ff7a3d"/>
-      <stop offset="1" stop-color="#d8366f"/>
+      <stop offset="1" stop-color="#b43c0b"/>
     </linearGradient>
     <linearGradient id="face" x1="512" y1="170" x2="512" y2="860" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#3a2d7a" stop-opacity="0.85"/>
-      <stop offset="1" stop-color="#1b1544" stop-opacity="0.85"/>
+      <stop offset="0" stop-color="#33291f" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#191410" stop-opacity="0.9"/>
     </linearGradient>
     <linearGradient id="letter" x1="380" y1="300" x2="640" y2="740" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#ffffff"/>
@@ -66,6 +67,6 @@
     <path d="M404 316 H650 a34 34 0 0 1 34 34 v10 a34 34 0 0 1 -34 34 H478 V470 H600 a34 34 0 0 1 34 34 v10 a34 34 0 0 1 -34 34 H478 V690 a34 34 0 0 1 -34 34 h-6 a34 34 0 0 1 -34 -34 V350 a34 34 0 0 1 34 -34 z"/>
   </g>
   <!-- Agent node at the end of the middle bar -->
-  <circle cx="676" cy="535" r="30" fill="#2fe3c2"/>
-  <circle cx="676" cy="535" r="30" fill="none" stroke="#2fe3c2" stroke-opacity="0.35" stroke-width="14"/>
+  <circle cx="676" cy="535" r="30" fill="#ffd2a1"/>
+  <circle cx="676" cy="535" r="30" fill="none" stroke="#ff7a3d" stroke-opacity="0.45" stroke-width="14"/>
 </svg>

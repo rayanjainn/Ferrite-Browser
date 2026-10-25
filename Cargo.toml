@@ -126,6 +126,15 @@ urlencoding = "2"
 # path — `image::load_from_memory` sniffs the real format from its magic
 # bytes, not the URL's extension, so both cases decode through the same call.
 image = { version = "0.25", default-features = false, features = ["ico"] }
+# Site screenshots (`ferrite-ui`'s ignored `site_shots` test only): the app's
+# own views laid out by `iced_runtime::UserInterface` and drawn offscreen by
+# iced's software renderer into a `tiny_skia` pixmap. All three are already in
+# the graph at these versions through `iced` itself (Cargo.lock: iced_runtime
+# 0.13.2, iced_tiny_skia 0.13.0, tiny-skia 0.11.4), so this adds direct edges,
+# not new versions.
+iced_runtime = "0.13"
+iced_tiny_skia = "0.13"
+tiny-skia = { version = "0.11", default-features = false, features = ["std"] }
 
 # ── ferrite-shell (Windows only) ─────────────────────────────────────────
 # Embeds assets/icon/ferrite.ico and the version info in ferrite.exe from a

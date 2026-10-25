@@ -17,11 +17,11 @@
   --text: #1c1a17;
   --text-2: #57524b;
   --text-3: #8a847b;
-  --accent: #c2410c;
-  --accent-2: #d9541e;
-  --accent-soft: rgba(194, 65, 12, 0.08);
-  --ember-a: #d9541e;
-  --ember-b: #c2410c;
+  --accent: #b43c0b;
+  --accent-2: #c2410c;
+  --accent-soft: rgba(180, 60, 11, 0.08);
+  --ember-a: #c2410c;
+  --ember-b: #b43c0b;
   --good: #2f7a52;
   --good-soft: rgba(47, 122, 82, 0.09);
   --warn: #a15c07;

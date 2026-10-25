@@ -32,9 +32,9 @@ summary: Find out why a page misbehaves: the DevTools Console, Network and Engin
 
 <h3>Network</h3>
 <figure class="shot wide">
-  <img class="theme-shot-light" src="{{ROOT}}static/img/devtools-network-light.png" width="1280" height="302" alt="The DevTools Network tab listing five requests (a document, a stylesheet, a script, an image and a fetch) with a notice that status, size and timing are not reported by the engine yet." loading="lazy">
-  <img class="theme-shot-dark" src="{{ROOT}}static/img/devtools-network-dark.png" width="1280" height="302" alt="The DevTools Network tab in the dark theme listing five requests (a document, a stylesheet, a script, an image and a fetch) with a notice that status, size and timing are not reported by the engine yet." loading="lazy">
-  <figcaption>The Network tab. The five requests are the ones the engine reported for the local demo page. The times shown are sample state.</figcaption>
+  <img class="theme-shot-light" src="{{ROOT}}static/img/devtools-network-light.png" width="1280" height="260" alt="The DevTools Network tab listing five requests (a document, a stylesheet, a script, an image and a fetch) with a notice that the status code is not reported by the engine yet." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/devtools-network-dark.png" width="1280" height="260" alt="The DevTools Network tab in the dark theme listing five requests (a document, a stylesheet, a script, an image and a fetch) with a notice that the status code is not reported by the engine yet." loading="lazy">
+  <figcaption>The Network tab, drawn from sample state over a real engine render of a local demo page. The five requests and their times are sample state.</figcaption>
 </figure>
 <p>The tab lists each request that the page made, <em>when it starts</em>. A row shows the relative time, method, type and URL. There is a filter box and there are type chips (Doc, JS, CSS, Img, Font, Media, Other). <code>fetch()</code> and XHR requests fall under <em>Other</em>.</p>
 <div class="callout warn">

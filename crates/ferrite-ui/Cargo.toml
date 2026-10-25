@@ -66,3 +66,8 @@ image = { workspace = true }
 # The fast-lane tests run a loopback-only mock Laya server (127.0.0.1:0, owned
 # by the test, no external network - R7), which needs tokio's `net` feature.
 tokio = { workspace = true, features = ["net"] }
+# `site_shots` (an ignored test) draws the app's views offscreen for the
+# website's screenshots; see the workspace `Cargo.toml` for the versions.
+iced_runtime = { workspace = true }
+iced_tiny_skia = { workspace = true }
+tiny-skia = { workspace = true }

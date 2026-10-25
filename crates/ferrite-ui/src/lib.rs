@@ -892,193 +892,188 @@ pub struct Palette {
     pub danger: Color,
 }
 
-/// The palette this crate shipped through C3b, unchanged value-for-value —
-/// still the default theme (see [`AppTheme`]'s `Default` impl), so a user
-/// who never touches the new toggle sees exactly what they always have.
+/// The dark palette (the default theme, see [`AppTheme`]'s `Default` impl):
+/// warm ink neutrals and one accent, the ember of the app icon, shared with
+/// the website (`site/static/css/site.css`) so the product and its pages
+/// read as one thing.
+///
+/// Contrast, from the WCAG formula in `tokens::contrast_ratio`: `text` on
+/// `base` 15.3:1, `text_dim` on `raised` 6.1:1 and on `surface` 6.9:1,
+/// `accent` on `base` 7.1:1, a white label on `accent_fill` 5.3:1 and on
+/// `accent_fill_hover` 4.5:1, and `safe`/`warn`/`danger` on `base`
+/// 8.5/8.4/6.4:1.
 const DARK_PALETTE: Palette = Palette {
+    // The tab strip, one step darker than the toolbar (`base`).
     chrome: Color {
-        r: 0.040,
-        g: 0.040,
-        b: 0.052,
+        r: 0.047,
+        g: 0.043,
+        b: 0.039,
         a: 1.0,
     },
     base: Color {
-        r: 0.08,
-        g: 0.08,
-        b: 0.10,
+        r: 0.082,
+        g: 0.078,
+        b: 0.071,
         a: 1.0,
     },
     surface: Color {
-        r: 0.11,
-        g: 0.11,
-        b: 0.14,
+        r: 0.106,
+        g: 0.102,
+        b: 0.090,
         a: 1.0,
     },
     raised: Color {
-        r: 0.17,
-        g: 0.17,
-        b: 0.21,
+        r: 0.149,
+        g: 0.141,
+        b: 0.125,
         a: 1.0,
     },
     divider: Color {
-        r: 0.20,
-        g: 0.20,
-        b: 0.25,
+        r: 0.200,
+        g: 0.188,
+        b: 0.173,
         a: 1.0,
     },
     text: Color {
-        r: 0.93,
-        g: 0.93,
-        b: 0.96,
+        r: 0.929,
+        g: 0.918,
+        b: 0.894,
         a: 1.0,
     },
-    // Secondary text: 5.0:1 on `raised` and 6.1:1 on `surface` (it was 3.6:1
-    // and 4.4:1, under the 4.5:1 AA floor for the small captions it is used for).
     text_dim: Color {
-        r: 0.60,
-        g: 0.60,
-        b: 0.68,
+        r: 0.659,
+        g: 0.635,
+        b: 0.604,
         a: 1.0,
     },
     accent: Color {
-        r: 0.44,
-        g: 0.38,
-        b: 1.0,
+        r: 1.000,
+        g: 0.478,
+        b: 0.239,
         a: 1.0,
     },
     accent_bright: Color {
-        r: 0.56,
-        g: 0.50,
-        b: 1.0,
+        r: 1.000,
+        g: 0.604,
+        b: 0.400,
         a: 1.0,
     },
     accent_fill: Color {
-        r: 0.352,
-        g: 0.304,
-        b: 0.80,
+        r: 0.722,
+        g: 0.275,
+        b: 0.102,
         a: 1.0,
     },
     accent_fill_hover: Color {
-        r: 0.448,
-        g: 0.40,
-        b: 0.80,
+        r: 0.769,
+        g: 0.306,
+        b: 0.114,
         a: 1.0,
     },
     input: Color {
-        r: 0.14,
-        g: 0.14,
-        b: 0.18,
+        r: 0.125,
+        g: 0.118,
+        b: 0.106,
         a: 1.0,
     },
     safe: Color {
-        r: 0.20,
-        g: 0.84,
-        b: 0.54,
+        r: 0.424,
+        g: 0.757,
+        b: 0.588,
         a: 1.0,
     },
     warn: Color {
-        r: 0.95,
-        g: 0.65,
-        b: 0.20,
+        r: 0.878,
+        g: 0.643,
+        b: 0.345,
         a: 1.0,
     },
     danger: Color {
-        r: 1.0,
-        g: 0.35,
-        b: 0.35,
+        r: 0.941,
+        g: 0.443,
+        b: 0.404,
         a: 1.0,
     },
 };
 
-/// A considered light palette, not a naive RGB inversion of
-/// [`DARK_PALETTE`]: background depth still runs the same direction real
-/// browser chrome uses (near-white page/toolbar, a touch grayer tab strip,
-/// grayer still for hover/raised state — Chrome's and Firefox's own light
-/// themes order it the same way), the accent keeps the same purple hue
-/// family but is deepened (`rgb(112,97,255)`/`rgb(143,128,255)` for
-/// `accent`/`accent_bright` in the dark palette &rarr; `rgb(89,66,235)`/
-/// `rgb(107,82,250)` here) so it still reads as foreground-safe against a
-/// light background instead of washing out, and `safe`/`warn`/`danger` are
-/// each darkened from the dark theme's saturated, light-on-dark-friendly
-/// versions for the same reason — the original mint/amber/coral are all
-/// under ~3.2:1 contrast against a near-white background, well under WCAG
-/// AA's 4.5:1 for normal text, and this crate uses all three as small-text
-/// badge/label colours (e.g. the audit log's kind column), not just as
-/// decoration.
+/// A considered light palette, not an RGB inversion of [`DARK_PALETTE`]:
+/// warm paper neutrals whose depth runs the way browser chrome does (a
+/// near-white toolbar, a slightly darker tab strip, darker still for raised
+/// state), and the same ember deepened so it reads as text on paper. The
+/// status colours are darkened from the dark theme's too, because this crate
+/// uses all three as small-text labels (the audit log's kind column), not just
+/// as decoration.
 ///
-/// Contrast figures below are hand-computed against the WCAG relative-
-/// luminance formula (sRGB-to-linear per channel, then
-/// `0.2126R+0.7152G+0.0722B`, then `(L_light+0.05)/(L_dark+0.05)`) — not run
-/// through an automated checker, so treat them as "designed with a target
-/// in mind" rather than a certified audit: `text` on `base` ≈ 17:1 (AAA),
-/// `text_dim` on `base` ≈ 5.4:1, `accent` on `base` ≈ 6:1, `safe`/`warn`/
-/// `danger` on `base` ≈ 5.2-5.4:1 — all at or above AA's 4.5:1 for normal
-/// text.
+/// Contrast, from the WCAG formula in `tokens::contrast_ratio`: `text` on
+/// `base` 16.4:1, `text_dim` on `raised` 5.7:1, `accent` on `base` 5.5:1,
+/// `accent_bright` on `base` 4.9:1 and on `surface` 4.5:1, a white label on
+/// `accent_fill` 5.8:1, and `safe`/`warn`/`danger` on `base` 4.9/5.4/6.2:1 —
+/// all at or above AA's 4.5:1 for normal text.
 const LIGHT_PALETTE: Palette = Palette {
     chrome: Color {
-        r: 0.894,
-        g: 0.898,
-        b: 0.925,
+        r: 0.922,
+        g: 0.902,
+        b: 0.871,
         a: 1.0,
     },
     base: Color {
         r: 0.980,
-        g: 0.980,
-        b: 0.988,
+        g: 0.973,
+        b: 0.961,
         a: 1.0,
     },
     surface: Color {
-        r: 0.949,
-        g: 0.953,
-        b: 0.969,
+        r: 0.953,
+        g: 0.937,
+        b: 0.914,
         a: 1.0,
     },
     raised: Color {
-        r: 0.910,
-        g: 0.910,
-        b: 0.941,
+        r: 0.914,
+        g: 0.894,
+        b: 0.863,
         a: 1.0,
     },
     divider: Color {
-        r: 0.863,
-        g: 0.863,
-        b: 0.902,
+        r: 0.867,
+        g: 0.839,
+        b: 0.800,
         a: 1.0,
     },
     text: Color {
-        r: 0.090,
-        g: 0.090,
-        b: 0.122,
+        r: 0.110,
+        g: 0.102,
+        b: 0.090,
         a: 1.0,
     },
     text_dim: Color {
-        r: 0.400,
-        g: 0.400,
-        b: 0.460,
+        r: 0.361,
+        g: 0.341,
+        b: 0.314,
         a: 1.0,
     },
     accent: Color {
-        r: 0.349,
-        g: 0.259,
-        b: 0.922,
+        r: 0.706,
+        g: 0.235,
+        b: 0.043,
         a: 1.0,
     },
     accent_bright: Color {
-        r: 0.420,
-        g: 0.322,
-        b: 0.980,
+        r: 0.761,
+        g: 0.255,
+        b: 0.047,
         a: 1.0,
     },
     accent_fill: Color {
-        r: 0.349,
-        g: 0.259,
-        b: 0.922,
+        r: 0.706,
+        g: 0.235,
+        b: 0.043,
         a: 1.0,
     },
     accent_fill_hover: Color {
-        r: 0.420,
-        g: 0.322,
-        b: 0.980,
+        r: 0.604,
+        g: 0.196,
+        b: 0.035,
         a: 1.0,
     },
     input: Color {
@@ -1088,21 +1083,21 @@ const LIGHT_PALETTE: Palette = Palette {
         a: 1.0,
     },
     safe: Color {
-        r: 0.039,
-        g: 0.471,
-        b: 0.294,
+        r: 0.184,
+        g: 0.478,
+        b: 0.322,
         a: 1.0,
     },
     warn: Color {
-        r: 0.647,
-        g: 0.333,
-        b: 0.020,
+        r: 0.592,
+        g: 0.337,
+        b: 0.027,
         a: 1.0,
     },
     danger: Color {
-        r: 0.784,
-        g: 0.149,
-        b: 0.149,
+        r: 0.706,
+        g: 0.137,
+        b: 0.094,
         a: 1.0,
     },
 };
@@ -7176,6 +7171,8 @@ mod fast_lane_tests;
 mod guard_tests;
 #[cfg(test)]
 mod page_key_tests;
+#[cfg(test)]
+mod site_shots;
 
 #[cfg(test)]
 mod tests {

@@ -703,6 +703,34 @@ mod tests {
     }
 
     #[test]
+    fn every_palette_role_used_as_text_clears_aa_in_both_themes() {
+        // The floors documented on DARK_PALETTE and LIGHT_PALETTE: each role
+        // that is drawn as text or an icon reads at 4.5:1 on the surfaces it
+        // sits on, and a white label reads on the primary button.
+        for palette in [&DARK_PALETTE, &LIGHT_PALETTE] {
+            for ground in [palette.base, palette.surface] {
+                for (name, fg) in [
+                    ("text", palette.text),
+                    ("text_dim", palette.text_dim),
+                    ("accent", palette.accent),
+                    ("accent_bright", palette.accent_bright),
+                    ("safe", palette.safe),
+                    ("warn", palette.warn),
+                    ("danger", palette.danger),
+                ] {
+                    let ratio = contrast_ratio(fg, ground);
+                    assert!(ratio >= 4.5, "{name} on {ground:?}: {ratio:.2}");
+                }
+            }
+            assert!(contrast_ratio(palette.text_dim, palette.raised) >= 4.5);
+            for fill in [palette.accent_fill, palette.accent_fill_hover] {
+                let label = on_fill(fill);
+                assert!(contrast_ratio(label, fill) >= 4.5, "label on {fill:?}");
+            }
+        }
+    }
+
+    #[test]
     fn tint_replaces_alpha_and_clamps() {
         let c = tint(Color::WHITE, 2.0);
         assert_eq!(c.a, 1.0);

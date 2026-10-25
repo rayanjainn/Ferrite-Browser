@@ -13,19 +13,19 @@
 @font-face { font-family: "Inter"; font-weight: 700; font-display: swap; src: url("{{ROOT}}static/fonts/Inter-Bold.woff2") format("woff2"); }
 
 :root {
-  --bg: #0b0a1f;
-  --bg-2: #120f2e;
-  --card: rgba(255, 255, 255, 0.045);
-  --card-2: rgba(255, 255, 255, 0.075);
-  --line: rgba(196, 188, 255, 0.14);
-  --line-2: rgba(196, 188, 255, 0.26);
-  --text: #f3f1ff;
-  --text-2: #bdb7e6;
-  --text-3: #8c86b8;
-  --accent: #8b7cff;
-  --accent-2: #b3a8ff;
+  --bg: #0c0b0a;
+  --bg-2: #151412;
+  --card: rgba(255, 245, 230, 0.04);
+  --card-2: rgba(255, 245, 230, 0.07);
+  --line: rgba(255, 240, 220, 0.12);
+  --line-2: rgba(255, 240, 220, 0.22);
+  --text: #edeae4;
+  --text-2: #b8b2a8;
+  --text-3: #857f76;
+  --accent: #ff7a3d;
+  --accent-2: #ff9a66;
   --ember-a: #ff7a3d;
-  --ember-b: #e2447a;
+  --ember-b: #e8652a;
   --good: #34d39b;
   --good-soft: rgba(52, 211, 155, 0.13);
   --warn: #f6b24a;
@@ -36,7 +36,7 @@
   --ease: cubic-bezier(.2, .8, .2, 1);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; background: #06051a; overflow: hidden; }
+html, body { height: 100%; background: #080706; overflow: hidden; }
 body { font-family: "Inter", ui-sans-serif, system-ui, sans-serif; color: var(--text); -webkit-font-smoothing: antialiased; }
 
 /* The deck is drawn on a fixed 1600 x 900 stage, scaled to fit the window. */
@@ -45,15 +45,14 @@ body { font-family: "Inter", ui-sans-serif, system-ui, sans-serif; color: var(--
   position: absolute; left: 50%; top: 50%; width: 1600px; height: 900px;
   transform-origin: center center; transform: translate(-50%, -50%);
   background:
-    radial-gradient(900px 600px at 8% -10%, rgba(139, 124, 255, 0.22), transparent 60%),
-    radial-gradient(800px 600px at 110% 115%, rgba(255, 122, 61, 0.16), transparent 60%),
+    radial-gradient(800px 600px at 110% 115%, rgba(255, 122, 61, 0.08), transparent 60%),
     linear-gradient(160deg, var(--bg-2), var(--bg) 60%);
   overflow: hidden; border-radius: 6px;
   box-shadow: 0 30px 90px rgba(0, 0, 0, .55);
 }
 #stage::before { /* faint grid */
   content: ""; position: absolute; inset: 0; pointer-events: none;
-  background-image: linear-gradient(rgba(196,188,255,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(196,188,255,.045) 1px, transparent 1px);
+  background-image: linear-gradient(rgba(255,240,220,.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,240,220,.04) 1px, transparent 1px);
   background-size: 64px 64px;
   mask-image: radial-gradient(ellipse at center, #000 30%, transparent 80%);
 }
@@ -79,14 +78,14 @@ body { font-family: "Inter", ui-sans-serif, system-ui, sans-serif; color: var(--
 .active .r.from-left, .active .r.zoom { transform: none; }
 
 .kicker { display: inline-flex; align-items: center; gap: 12px; font-size: 17px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent-2); }
-.kicker::before { content: ""; width: 34px; height: 2px; background: linear-gradient(90deg, var(--ember-a), var(--ember-b)); border-radius: 2px; }
+.kicker::before { content: ""; width: 34px; height: 1px; background: var(--accent); }
 h1 { font-size: 92px; line-height: 1.02; font-weight: 700; letter-spacing: -.035em; }
 h2 { font-size: 54px; line-height: 1.08; font-weight: 700; letter-spacing: -.028em; margin: 16px 0 10px; }
 .lead { font-size: 25px; line-height: 1.5; color: var(--text-2); max-width: 1100px; }
-.grad { background: linear-gradient(92deg, #c9c1ff 0%, var(--accent) 40%, var(--ember-b) 75%, var(--ember-a)); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.ember { background: linear-gradient(92deg, var(--ember-a), var(--ember-b)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.grad { color: var(--accent); }
+.ember { color: var(--accent); }
 .mono { font-family: var(--mono); }
-code { font-family: var(--mono); font-size: .88em; background: rgba(139,124,255,.14); border: 1px solid var(--line); padding: 1px 7px; border-radius: 6px; color: #dcd6ff; }
+code { font-family: var(--mono); font-size: .88em; background: rgba(255,122,61,.14); border: 1px solid var(--line); padding: 1px 7px; border-radius: 6px; color: #f3dccb; }
 .muted { color: var(--text-3); }
 .foot-note { position: absolute; left: 96px; right: 260px; bottom: 34px; font-size: 15px; color: var(--text-3); line-height: 1.45; }
 
@@ -101,7 +100,7 @@ code { font-family: var(--mono); font-size: .88em; background: rgba(139,124,255,
 .tag.good { color: var(--good); background: var(--good-soft); }
 .tag.warn { color: var(--warn); background: var(--warn-soft); }
 .tag.bad { color: var(--bad); background: var(--bad-soft); }
-.tag.acc { color: var(--accent-2); background: rgba(139,124,255,.12); }
+.tag.acc { color: var(--accent-2); background: rgba(255,122,61,.12); }
 
 /* Big numbers */
 .stat { padding: 26px 26px 24px; }
@@ -129,11 +128,11 @@ code { font-family: var(--mono); font-size: .88em; background: rgba(139,124,255,
 
 /* ---------- Pipeline ---------- */
 .pipe { display: grid; grid-template-columns: 1fr 56px 1fr 56px 1fr 56px 1fr; align-items: stretch; margin-top: 30px; }
-.stage-card { position: relative; padding: 26px 22px 24px; border-radius: 18px; border: 1px solid var(--line-2); background: linear-gradient(180deg, rgba(139,124,255,.12), rgba(139,124,255,.03)); }
+.stage-card { position: relative; padding: 26px 22px 24px; border-radius: 18px; border: 1px solid var(--line-2); background: var(--card); }
 .stage-card .n { font-size: 15px; font-weight: 700; color: var(--accent-2); letter-spacing: .12em; }
 .stage-card h3 { font-size: 30px; margin: 8px 0 10px; }
 .stage-card p { font-size: 17.5px; line-height: 1.5; color: var(--text-2); }
-.stage-card .f { margin-top: 14px; font-family: var(--mono); font-size: 15px; color: #dcd6ff; background: rgba(0,0,0,.25); border-radius: 8px; padding: 7px 10px; display: inline-block; }
+.stage-card .f { margin-top: 14px; font-family: var(--mono); font-size: 15px; color: #f3dccb; background: rgba(0,0,0,.25); border-radius: 8px; padding: 7px 10px; display: inline-block; }
 .arrow { display: grid; place-items: center; }
 .arrow svg { width: 44px; height: 44px; color: var(--accent); }
 .active .arrow svg path { stroke-dasharray: 40; stroke-dashoffset: 40; animation: draw .7s var(--ease) forwards; animation-delay: calc(.5s + var(--i, 0) * .11s); }
@@ -158,10 +157,10 @@ tr.r td { transition: none; }
 .track { position: relative; height: 46px; border-radius: 12px; background: rgba(255,255,255,.05); border: 1px solid var(--line); overflow: hidden; }
 .fill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 11px; transition: width 1.3s var(--ease); }
 .active .fill { width: var(--w); transition-delay: calc(.4s + var(--i, 0) * .14s); }
-.fill.red { background: linear-gradient(90deg, #ff5d7d, #e2447a); }
-.fill.amber { background: linear-gradient(90deg, #f6b24a, #ff7a3d); }
-.fill.violet { background: linear-gradient(90deg, #7c6dff, #b3a8ff); }
-.fill.green { background: linear-gradient(90deg, #1fb47f, #34d39b); }
+.fill.red { background: var(--bad); }
+.fill.amber { background: var(--accent); }
+.fill.violet { background: var(--text-3); }
+.fill.green { background: var(--good); }
 .ci { position: absolute; top: 50%; height: 2px; background: rgba(255,255,255,.75); transform: translateY(-50%); }
 .ci::before, .ci::after { content: ""; position: absolute; top: -7px; width: 2px; height: 16px; background: rgba(255,255,255,.75); }
 .ci::before { left: 0; } .ci::after { right: 0; }
@@ -181,7 +180,7 @@ tr.r td { transition: none; }
 .obj .id { font-size: 30px; font-weight: 700; color: var(--accent-2); line-height: 1; padding-top: 4px; }
 .obj h3 { font-size: 22px; margin-bottom: 4px; }
 .obj p { font-size: 17px; }
-.obj .target { margin-top: 10px; font-size: 16.5px; color: #dcd6ff; }
+.obj .target { margin-top: 10px; font-size: 16.5px; color: #f3dccb; }
 .obj .target b { color: var(--warn); font-weight: 650; }
 
 .score td { padding: 13px 16px; font-size: 17.5px; }
@@ -204,12 +203,12 @@ tr.r td { transition: none; }
 .layer-label { font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); font-weight: 700; margin: 18px 0 10px; }
 .crate { padding: 14px 16px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); font-size: 16px; color: var(--text-2); line-height: 1.4; }
 .crate b { display: block; font-family: var(--mono); font-size: 16px; color: var(--text); margin-bottom: 3px; font-weight: 600; }
-.crate.hl { border-color: rgba(139,124,255,.55); background: rgba(139,124,255,.1); }
+.crate.hl { border-color: rgba(255,122,61,.55); background: rgba(255,122,61,.1); }
 
 /* ---------- Timeline ---------- */
 .tl { position: relative; display: grid; grid-template-columns: repeat(5, 1fr); gap: 18px; margin-top: 44px; }
-.tl::before { content: ""; position: absolute; left: 0; right: 0; top: 13px; height: 2px; background: linear-gradient(90deg, var(--accent), var(--ember-b), var(--ember-a)); opacity: .55; }
-.tl .dot { width: 28px; height: 28px; border-radius: 50%; background: var(--bg); border: 3px solid var(--accent); position: relative; z-index: 1; box-shadow: 0 0 0 6px rgba(139,124,255,.15); }
+.tl::before { content: ""; position: absolute; left: 0; right: 0; top: 13px; height: 2px; background: var(--line-2); }
+.tl .dot { width: 28px; height: 28px; border-radius: 50%; background: var(--bg); border: 3px solid var(--accent); position: relative; z-index: 1; box-shadow: 0 0 0 6px rgba(255,122,61,.15); }
 .tl h4 { font-size: 15px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent-2); margin: 18px 0 6px; }
 .tl p { font-size: 17px; line-height: 1.45; color: var(--text-2); }
 .tl p b { color: var(--text); }
@@ -217,15 +216,15 @@ tr.r td { transition: none; }
 ul.clean { list-style: none; display: flex; flex-direction: column; gap: 13px; }
 ul.clean li { position: relative; padding-left: 30px; font-size: 19.5px; line-height: 1.45; color: var(--text-2); }
 ul.clean li b { color: var(--text); }
-ul.clean li::before { content: ""; position: absolute; left: 4px; top: 11px; width: 10px; height: 10px; border-radius: 3px; background: linear-gradient(135deg, var(--accent), var(--ember-b)); transform: rotate(45deg); }
+ul.clean li::before { content: ""; position: absolute; left: 4px; top: 11px; width: 10px; height: 10px; border-radius: 3px; background: var(--accent); transform: rotate(45deg); }
 ul.clean.bad li::before { background: var(--bad); }
 ul.clean.good li::before { background: var(--good); }
 
 /* ---------- Chrome around the deck ---------- */
-#progress { position: fixed; left: 0; top: 0; height: 3px; width: 0; background: linear-gradient(90deg, var(--accent), var(--ember-b), var(--ember-a)); z-index: 20; transition: width .6s var(--ease); }
+#progress { position: fixed; left: 0; top: 0; height: 2px; width: 0; background: var(--accent); z-index: 20; transition: width .6s var(--ease); }
 .hud { position: fixed; right: 22px; bottom: 20px; display: flex; gap: 10px; align-items: center; z-index: 20; }
 .hud button { width: 46px; height: 46px; border-radius: 12px; border: 1px solid var(--line-2); background: rgba(18, 15, 46, .78); color: var(--text); display: grid; place-items: center; cursor: pointer; backdrop-filter: blur(8px); transition: background .2s, transform .2s, border-color .2s; }
-.hud button:hover { background: rgba(139,124,255,.25); border-color: var(--accent); transform: translateY(-2px); }
+.hud button:hover { background: rgba(255,122,61,.25); border-color: var(--accent); transform: translateY(-2px); }
 .hud button:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
 .hud svg { width: 21px; height: 21px; }
 .counter { font-size: 15px; font-variant-numeric: tabular-nums; color: var(--text-2); background: rgba(18, 15, 46, .78); border: 1px solid var(--line-2); border-radius: 12px; padding: 0 14px; height: 46px; display: grid; place-items: center; min-width: 78px; backdrop-filter: blur(8px); }
@@ -249,8 +248,8 @@ body.overview .slide .dot { transform: none; }
 /* ---------- Plain-words additions ---------- */
 .say { font-size: 22px; line-height: 1.5; color: var(--text-2); }
 .say b { color: var(--text); }
-.takeaway { display: flex; gap: 18px; align-items: center; margin-top: 26px; padding: 18px 24px; border-radius: 16px; background: linear-gradient(90deg, rgba(139,124,255,.16), rgba(139,124,255,.04)); border: 1px solid rgba(139,124,255,.4); font-size: 21px; line-height: 1.45; color: var(--text); }
-.takeaway .ico { flex: none; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: rgba(139,124,255,.25); font-size: 20px; font-weight: 700; color: #fff; }
+.takeaway { display: flex; gap: 18px; align-items: center; margin-top: 26px; padding: 18px 24px; border-radius: 16px; background: var(--card); border: 1px solid var(--line-2); font-size: 21px; line-height: 1.45; color: var(--text); }
+.takeaway .ico { flex: none; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: rgba(255,122,61,.25); font-size: 20px; font-weight: 700; color: #fff; }
 .takeaway.good { background: linear-gradient(90deg, rgba(52,211,155,.16), rgba(52,211,155,.03)); border-color: rgba(52,211,155,.45); }
 .takeaway.good .ico { background: rgba(52,211,155,.3); }
 .takeaway.bad { background: linear-gradient(90deg, rgba(255,93,125,.16), rgba(255,93,125,.03)); border-color: rgba(255,93,125,.45); }
@@ -260,11 +259,11 @@ body.overview .slide .dot { transform: none; }
 .term { padding: 22px 24px; }
 .term h3 { font-size: 23px; display: flex; align-items: center; gap: 12px; }
 .term .means { font-size: 18.5px; line-height: 1.5; color: var(--text-2); margin-top: 6px; }
-.term .eg { margin-top: 12px; font-size: 16.5px; color: #dcd6ff; background: rgba(0,0,0,.22); border-radius: 10px; padding: 10px 14px; line-height: 1.45; }
+.term .eg { margin-top: 12px; font-size: 16.5px; color: #f3dccb; background: rgba(0,0,0,.22); border-radius: 10px; padding: 10px 14px; line-height: 1.45; }
 .term .eg b { color: var(--warn); }
 .dir { font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 4px 10px; border-radius: 999px; }
 .dir.low { color: var(--good); background: var(--good-soft); }
-.dir.high { color: var(--accent-2); background: rgba(139,124,255,.14); }
+.dir.high { color: var(--accent-2); background: rgba(255,122,61,.14); }
 
 /* Simple data table */
 .simple td, .simple th { padding: 14px 18px; }
@@ -394,7 +393,7 @@ body.overview .slide .dot { transform: none; }
   <div class="grid g2 mt" style="gap:30px">
     <div class="card r" style="--i:2"><h3>The usual way: filter or train</h3><p class="mt-s">Teach the AI to ignore bad text, or scan pages for bad sentences. Comet, Atlas, Dia, Brave Leo and Chrome's Gemini all add agents this way.</p>
       <ul class="clean bad mt-s"><li>Attackers can reword the text forever</li><li>The defender must win <b>every</b> time</li><li>Researchers (Nasr et al., Oct 2025) broke all 12 defenses they tested</li></ul></div>
-    <div class="card r" style="--i:3; border-color:rgba(139,124,255,.5)"><h3 class="grad">Our way: check the action, not the words</h3><p class="mt-s">Before the agent starts, Ferrite writes down what the task needs. Whatever the page says, the agent cannot do anything outside that list without asking you.</p>
+    <div class="card r" style="--i:3; border-color:rgba(255,122,61,.5)"><h3 class="grad">Our way: check the action, not the words</h3><p class="mt-s">Before the agent starts, Ferrite writes down what the task needs. Whatever the page says, the agent cannot do anything outside that list without asking you.</p>
       <ul class="clean good mt-s"><li>Does not care how the attack is worded</li><li>Works even when the AI is fooled</li><li>Every decision is saved in a log that can't be secretly edited</li></ul></div>
   </div>
   <div class="takeaway r" style="--i:4"><div class="ico">→</div><div>Like a <b>guest list</b> at a door: it does not matter what a stranger says, if they are not on the list they do not get in without the host saying yes.</div></div>
@@ -457,8 +456,8 @@ body.overview .slide .dot { transform: none; }
   <h2 class="r" style="--i:1">A real browser, with the agent built in</h2>
   <div class="shots-a">
     <div class="r zoom" style="--i:2"><div class="shot tilt"><img src="{{ROOT}}static/img/browser-dark.png" width="1280" height="800" alt="The Ferrite window: tabs, address bar and Agent button, showing a web page drawn by the Servo engine."></div><div class="cap">Tabs, address bar, bookmarks, zoom, and an Agent button.</div></div>
-    <div class="r zoom" style="--i:3"><div class="shot tilt"><img src="{{ROOT}}static/img/agent-dark.png" width="386" height="725" alt="The agent panel: the request, the steps it took, and its answer."></div><div class="cap">The agent shows each step, then its answer.</div></div>
-    <div class="r zoom" style="--i:4"><div class="shot tilt" style="box-shadow:0 30px 70px rgba(0,0,0,.5), 0 0 0 2px rgba(255,93,125,.45)"><img src="{{ROOT}}static/img/approval-dark.png" width="386" height="725" alt="The review panel: two actions outside the request, each with Reject and Approve."></div><div class="cap">Ferrite asks about the 2 actions the task never needed.</div></div>
+    <div class="r zoom" style="--i:3"><div class="shot tilt"><img src="{{ROOT}}static/img/agent-dark.png" width="380" height="725" alt="The agent panel: the request, the steps it took, and its answer."></div><div class="cap">The agent shows each step, then its answer.</div></div>
+    <div class="r zoom" style="--i:4"><div class="shot tilt" style="box-shadow:0 30px 70px rgba(0,0,0,.5), 0 0 0 2px rgba(255,93,125,.45)"><img src="{{ROOT}}static/img/approval-dark.png" width="380" height="725" alt="The review panel: two actions outside the request, each with Reject and Approve."></div><div class="cap">Ferrite asks about the 2 actions the task never needed.</div></div>
   </div>
 </section>
 
@@ -468,8 +467,8 @@ body.overview .slide .dot { transform: none; }
   <h2 class="r" style="--i:1">Tools for users and developers</h2>
   <div class="shots-b">
     <div class="r zoom" style="--i:2"><div class="shot tilt"><img src="{{ROOT}}static/img/devtools-dark.png" width="1280" height="800" alt="Ferrite with the developer tools console open under a shop page."></div><div class="cap">Developer tools: page messages, network requests, engine crashes.</div></div>
-    <div class="r zoom" style="--i:3"><div class="shot tilt"><img src="{{ROOT}}static/img/settings-dark.png" width="380" height="915" alt="The Settings panel: choose an AI provider, key and model."></div><div class="cap">Pick any AI model and key.</div></div>
-    <div class="r zoom" style="--i:4"><div class="shot tilt"><img src="{{ROOT}}static/img/runtime-dark.png" width="386" height="265" alt="The live check asking: Don't allow, Allow once, Allow for task."></div><div class="cap">The live check, asking during a real task.</div>
+    <div class="r zoom" style="--i:3"><div class="shot tilt"><img src="{{ROOT}}static/img/settings-dark.png" width="380" height="1060" alt="The Settings panel: choose an AI provider, key and model."></div><div class="cap">Pick any AI model and key.</div></div>
+    <div class="r zoom" style="--i:4"><div class="shot tilt"><img src="{{ROOT}}static/img/runtime-dark.png" width="380" height="265" alt="The live check asking: Don't allow, Allow once, Allow for task."></div><div class="cap">The live check, asking during a real task.</div>
       <div class="shot tilt mt-s"><img src="{{ROOT}}static/img/menu-dark.png" width="400" height="430" alt="The app menu."></div><div class="cap">Menus, zoom, find, history.</div></div>
   </div>
 </section>

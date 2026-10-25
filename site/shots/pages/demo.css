@@ -1,0 +1,11 @@
+/* Shared look for the screenshot demo pages: plain, neutral, nothing branded. */
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Inter", "DejaVu Sans", sans-serif; color: #1f2328; background: #f6f7f8; }
+header { display: flex; align-items: center; gap: 32px; padding: 0 32px; height: 58px; background: #fff; border-bottom: 1px solid #e3e5e8; }
+header strong { font-size: 20px; letter-spacing: -0.01em; }
+header nav a { color: #57606a; text-decoration: none; margin-right: 20px; font-size: 15px; }
+main { max-width: 940px; margin: 0 auto; padding: 40px 0; }
+h1 { font-size: 32px; margin: 0 0 8px; letter-spacing: -0.02em; }
+.lede { color: #57606a; margin: 0 0 28px; font-size: 16px; }
+.card { background: #fff; border: 1px solid #e3e5e8; border-radius: 10px; }
+.btn { display: inline-block; padding: 9px 16px; border-radius: 7px; background: #24292f; color: #fff; font-weight: 600; font-size: 15px; border: 0; }

@@ -51,8 +51,8 @@ summary: Install Ferrite, connect your own model in Settings, run a first task, 
 <p>Ferrite works out the task's expected fingerprint from <em>your words only</em>. The fingerprint is the list of tools and websites the task is expected to need. Earlier agent answers and page text never feed it. So a poisoned page cannot widen what the agent is allowed to do.</p>
 
 <figure class="shot narrow">
-  <img class="theme-shot-light" src="{{ROOT}}static/img/agent-light.png" width="386" height="725" alt="The agent panel after a finished task: the request, a collapsed list of two steps, and the agent's answer as a numbered list with a Copy button." loading="lazy">
-  <img class="theme-shot-dark" src="{{ROOT}}static/img/agent-dark.png" width="386" height="725" alt="The agent panel in the dark theme after a finished task: the request, a collapsed list of two steps, and the agent's answer as a numbered list with a Copy button." loading="lazy">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/agent-light.png" width="380" height="725" alt="The agent panel after a finished task: the request, the two steps it took, and the agent's answer as a numbered list with a Copy button." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/agent-dark.png" width="380" height="725" alt="The agent panel in the dark theme after a finished task: the request, the two steps it took, and the agent's answer as a numbered list with a Copy button." loading="lazy">
   <figcaption>The agent panel after a task, rendered from sample state (a made-up answer about a local demo page).</figcaption>
 </figure>
 
@@ -69,8 +69,8 @@ summary: Install Ferrite, connect your own model in Settings, run a first task, 
 <h3>During the run: “The agent needs your approval”</h3>
 <p>The dry run cannot see a page that only exists in the real run. So Ferrite checks every real action again. This check is called the runtime guard. An action outside the prediction pauses the agent. A card appears. The card names only the action and the site. It never shows text that the page wrote. The buttons are <strong>Don’t allow</strong> (<kbd>Esc</kbd>), <strong>Allow once</strong> and <strong>Allow for task</strong>.</p>
 <figure class="shot narrow">
-  <img class="theme-shot-light" src="{{ROOT}}static/img/runtime-light.png" width="386" height="265" alt="The approval card at the bottom of the agent panel: the agent needs your approval to navigate to attacker.example, with Don't allow, Allow once and Allow for task buttons." loading="lazy">
-  <img class="theme-shot-dark" src="{{ROOT}}static/img/runtime-dark.png" width="386" height="265" alt="The approval card at the bottom of the agent panel in the dark theme: the agent needs your approval to navigate to attacker.example, with Don't allow, Allow once and Allow for task buttons." loading="lazy">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/runtime-light.png" width="380" height="265" alt="The approval card at the bottom of the agent panel: the agent needs your approval to navigate to attacker.example, with Don't allow, Allow once and Allow for task buttons." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/runtime-dark.png" width="380" height="265" alt="The approval card at the bottom of the agent panel in the dark theme: the agent needs your approval to navigate to attacker.example, with Don't allow, Allow once and Allow for task buttons." loading="lazy">
   <figcaption>The approval card, rendered from sample state.</figcaption>
 </figure>
 <p>The <strong>Audit</strong> panel shows the audit log and the model-activity trace. The audit log is a record where each entry is tied to the one before it. So a later change to an old entry can be found. Open the panel with the shield in the toolbar, or with <kbd>F12</kbd>. <kbd>F12</kbd> opens this panel, not DevTools. <a href="{{ROOT}}docs/debugging.html">DevTools</a> is <kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> on macOS. Elsewhere it is <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd>.</p>

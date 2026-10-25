@@ -849,7 +849,7 @@ fn menu_style(palette: &'static Palette) -> impl Fn(&Theme) -> menu::Style {
         },
         text_color: palette.text,
         selected_text_color: Color::WHITE,
-        selected_background: Background::Color(palette.accent),
+        selected_background: Background::Color(palette.accent_fill),
     }
 }
 
@@ -1233,7 +1233,7 @@ fn model_card<'a>(
                 );
                 checkbox::Style {
                     background: Background::Color(if checked {
-                        palette.accent
+                        palette.accent_fill
                     } else {
                         palette.input
                     }),
@@ -1242,7 +1242,7 @@ fn model_card<'a>(
                         radius: iced::border::Radius::new(4.0),
                         width: 1.0,
                         color: if checked {
-                            palette.accent
+                            palette.accent_fill
                         } else {
                             palette.divider
                         },
