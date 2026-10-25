@@ -44,7 +44,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
 <section class="h-sec" id="problem">
   <div class="wrap">
     <div class="h-head" data-reveal>
-      <span class="eyebrow">The problem</span>
+      <span class="eyebrow">// The problem</span>
       <h2>An agent that reads the web can be given orders by the web.</h2>
       <p>An agent may obey anything it reads: a page, a tool result, a search snippet. An attacker only has to put orders where the agent will look.</p>
     </div>
@@ -72,7 +72,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
 <section class="h-sec" id="defense">
   <div class="wrap">
     <div class="h-head" data-reveal>
-      <span class="eyebrow">The defense</span>
+      <span class="eyebrow">// The defense</span>
       <h2>Predict. Dry-run. Compare. Ask.</h2>
       <p>Four stages decide what an agent may do. Each one is built so that a hostile page cannot talk its way past it.</p>
     </div>
@@ -95,7 +95,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
 <section class="h-sec" id="machine">
   <div class="wrap">
     <div class="h-head" data-reveal>
-      <span class="eyebrow">See it work</span>
+      <span class="eyebrow">// See it work</span>
       <h2>The consent gate, built as a machine.</h2>
       <p>Think of every action the agent plans as a punched card. The fingerprint is a template with holes only where the task is allowed to act. Watch it sort them.</p>
     </div>
@@ -116,7 +116,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
   <div class="wrap guarantees">
     <div>
       <div class="h-head left" data-reveal>
-        <span class="eyebrow">What you see</span>
+        <span class="eyebrow">// What you see</span>
         <h2>A consent prompt the page cannot fake.</h2>
         <p>When the agent steps outside the prediction, the panel lists every unexpected action in plain words, next to the site your request actually allowed. You decide each one.</p>
       </div>
@@ -144,7 +144,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
 <section class="h-sec tight" id="audit">
   <div class="wrap">
     <div class="h-head" data-reveal>
-      <span class="eyebrow">Proof, after the fact</span>
+      <span class="eyebrow">// Proof, after the fact</span>
       <h2>Every decision is chained to the one before it.</h2>
       <p>Each audit entry stores the hash of the entry before it. Change one entry, even a little, and every later link stops matching. Press F12 in Ferrite to open the log.</p>
     </div>
@@ -165,7 +165,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
 <section class="h-sec" id="browser">
   <div class="wrap">
     <div class="h-head" data-reveal>
-      <span class="eyebrow">The browser</span>
+      <span class="eyebrow">// The browser</span>
       <h2>A real browser around the defense.</h2>
       <p>Ferrite draws pages with the Servo engine. Around it: tabs, an address bar that searches, find, zoom, bookmarks, an agent panel, and DevTools for when a page misbehaves. The engine is young, so some sites will look wrong. When one does, you can see why.</p>
     </div>
@@ -189,15 +189,15 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
 <section class="h-sec" id="evaluation">
   <div class="wrap">
     <div class="h-head" data-reveal>
-      <span class="eyebrow">Evaluation</span>
+      <span class="eyebrow">// Evaluation</span>
       <h2>Measured, with the limits next to the numbers.</h2>
       <p>A scripted test shows what the guard guarantees when an attack does happen. A live test lets a real model act, to see how often it takes the bait. Every rate has a range.</p>
     </div>
     <div class="stats">
-      <div class="stat glass"><span class="n" data-count="938">938</span><span class="l">scripted cases</span><p>809 attacks and 129 normal tasks, 3,488 runs.</p></div>
-      <div class="stat glass"><span class="n"><span data-count="0">0</span> / 809</span><span class="l">attacks got through</span><p>With the full stack. Not independent: see the notes below.</p></div>
-      <div class="stat glass"><span class="n"><span data-count="31">31</span> → <span data-count="6">6</span></span><span class="l">live attacks that ran</span><p>Of 1,542 runs, one model: 2.0% without the guard, 0.4% with it.</p></div>
-      <div class="stat glass"><span class="n" data-count="38.1" data-post="%">38.1%</span><span class="l">normal tasks refused once</span><p>86 of 226. The predictor is still weak.</p></div>
+      <div class="stat"><span class="n" data-count="938">938</span><span class="l">scripted cases</span><p>809 attacks and 129 normal tasks, 3,488 runs.</p></div>
+      <div class="stat"><span class="n"><span data-count="0">0</span> / 809</span><span class="l">attacks got through</span><p>With the full stack. Not independent: see the notes below.</p></div>
+      <div class="stat"><span class="n"><span data-count="31">31</span> → <span data-count="6">6</span></span><span class="l">live attacks that ran</span><p>Of 1,542 runs, one model: 2.0% without the guard, 0.4% with it.</p></div>
+      <div class="stat"><span class="n" data-count="38.1" data-post="%">38.1%</span><span class="l">normal tasks refused once</span><p>86 of 226. The predictor is still weak.</p></div>
     </div>
     <div class="eval-split">
       <div class="glass" data-reveal="left">
@@ -235,14 +235,16 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
 <!-- ═══ Your model ═══ -->
 <section class="h-sec" id="models">
   <div class="wrap models">
-    <div class="orbit" data-reveal="zoom" aria-hidden="true">
-      <div class="ring"><span class="sat glass">Ollama</span><span class="sat glass">Gemini</span><span class="sat glass">Anthropic</span><span class="sat glass">OpenAI-compatible</span></div>
-      <div class="ring r2"><span class="sat glass">Local</span><span class="sat glass">Cloud</span><span class="sat glass">OpenRouter</span><span class="sat glass">LM Studio</span></div>
-      <div class="core"><img src="{{ROOT}}static/img/favicon.png" alt="" width="256" height="256"></div>
+    <div class="providers" data-cycle="2000" data-reveal="left">
+      <div class="prov" data-cycle-item><div><b>Ollama on your computer</b><small>No page text leaves your machine.</small></div><span class="tag">local</span></div>
+      <div class="prov" data-cycle-item><div><b>Ollama Cloud</b><small>Hosted Ollama models with your key.</small></div><span class="tag">cloud</span></div>
+      <div class="prov" data-cycle-item><div><b>Google Gemini</b><small>Load the models your key can use.</small></div><span class="tag">cloud</span></div>
+      <div class="prov" data-cycle-item><div><b>Anthropic</b><small>Tested against a stand-in server so far.</small></div><span class="tag">cloud</span></div>
+      <div class="prov" data-cycle-item><div><b>OpenAI-compatible</b><small>OpenAI, OpenRouter, Groq, vLLM, LM Studio.</small></div><span class="tag">either</span></div>
     </div>
     <div>
       <div class="h-head left" data-reveal>
-        <span class="eyebrow">Your model, your key</span>
+        <span class="eyebrow">// Your model, your key</span>
         <h2>Connect an agent in Settings. No terminal needed.</h2>
         <p>Pick a provider, paste a key, load the models your account can use, and save. It takes effect on the agent's next task.</p>
       </div>
@@ -261,7 +263,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
   <div class="wrap">
     <div class="glass dl-teaser" data-releases data-reveal="zoom">
       <div>
-        <span class="eyebrow">Download</span>
+        <span class="eyebrow">// Download</span>
         <h2>Get Ferrite.</h2>
         <p class="muted">Every build that passes CI on all three platforms is published, and every earlier one stays available. The builds are unsigned prototypes.</p>
         <div class="cta" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:22px">

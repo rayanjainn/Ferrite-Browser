@@ -1,6 +1,6 @@
 /* Ferrite site — one stylesheet, light and dark.
-   Palette is the app's own: deep indigo ink, a violet accent, and the ember
-   (orange → magenta) of the icon used sparingly for emphasis. */
+   Warm ink and paper neutrals with one accent: the ember of the app icon,
+   kept to links, labels and the one thing on screen that matters. */
 
 @font-face { font-family: "Inter"; font-weight: 400; font-display: swap; src: url("../fonts/Inter-Regular.woff2") format("woff2"); }
 @font-face { font-family: "Inter"; font-weight: 500; font-display: swap; src: url("../fonts/Inter-Medium.woff2") format("woff2"); }
@@ -8,31 +8,31 @@
 @font-face { font-family: "Inter"; font-weight: 700; font-display: swap; src: url("../fonts/Inter-Bold.woff2") format("woff2"); }
 
 :root {
-  --bg: #fbfaff;
-  --bg-soft: #f3f1ff;
+  --bg: #faf8f5;
+  --bg-soft: #f4f1ec;
   --surface: #ffffff;
-  --surface-2: #f6f4ff;
-  --line: #e4e0f7;
-  --line-strong: #cfc9ee;
-  --text: #16123a;
-  --text-2: #4b4772;
-  --text-3: #7a7699;
-  --accent: #5b45f0;
-  --accent-2: #7c6dff;
-  --accent-soft: rgba(91, 69, 240, 0.09);
-  --ember-a: #ff7a3d;
-  --ember-b: #e2447a;
-  --good: #0f8a5f;
-  --good-soft: rgba(15, 138, 95, 0.10);
-  --warn: #b45d00;
-  --warn-soft: rgba(217, 119, 6, 0.12);
-  --bad: #c4264a;
-  --bad-soft: rgba(196, 38, 74, 0.09);
-  --code-bg: #f1eefe;
-  --shadow: 0 1px 2px rgba(22, 18, 58, 0.05), 0 8px 30px rgba(60, 40, 160, 0.08);
-  --shadow-lg: 0 2px 4px rgba(22, 18, 58, 0.06), 0 24px 60px rgba(60, 40, 160, 0.16);
-  --hero-glow-1: rgba(124, 109, 255, 0.22);
-  --hero-glow-2: rgba(255, 122, 61, 0.16);
+  --surface-2: #f6f3ee;
+  --line: #e8e3db;
+  --line-strong: #d6cfc4;
+  --text: #1c1a17;
+  --text-2: #57524b;
+  --text-3: #8a847b;
+  --accent: #c2410c;
+  --accent-2: #d9541e;
+  --accent-soft: rgba(194, 65, 12, 0.08);
+  --ember-a: #d9541e;
+  --ember-b: #c2410c;
+  --good: #2f7a52;
+  --good-soft: rgba(47, 122, 82, 0.09);
+  --warn: #a15c07;
+  --warn-soft: rgba(161, 92, 7, 0.1);
+  --bad: #b42318;
+  --bad-soft: rgba(180, 35, 24, 0.08);
+  --code-bg: #f3efe8;
+  --shadow: 0 1px 2px rgba(28, 26, 23, 0.04), 0 6px 20px rgba(28, 26, 23, 0.05);
+  --shadow-lg: 0 1px 2px rgba(28, 26, 23, 0.05), 0 18px 48px rgba(28, 26, 23, 0.08);
+  --hero-glow-1: transparent;
+  --hero-glow-2: transparent;
   --radius: 14px;
   --radius-sm: 9px;
   --maxw: 1120px;
@@ -43,43 +43,60 @@
 
 /* Dark tokens, declared once and applied for both the OS preference and the toggle. */
 :root[data-theme="dark"] {
-  --bg: #07051a;
-  --bg-soft: #0d0a26;
-  --surface: #120e30;
-  --surface-2: #19143f;
-  --line: #2a2458;
-  --line-strong: #3a3470;
-  --text: #ecebf9;
-  --text-2: #b4b1d6;
-  --text-3: #8a86b0;
-  --accent: #8b7cff;
-  --accent-2: #a89cff;
-  --accent-soft: rgba(139, 124, 255, 0.14);
-  --good: #3ddc9a;
-  --good-soft: rgba(61, 220, 154, 0.12);
-  --warn: #ffb35c;
-  --warn-soft: rgba(255, 179, 92, 0.12);
-  --bad: #ff6b8b;
-  --bad-soft: rgba(255, 107, 139, 0.12);
-  --code-bg: #181442;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 30px rgba(0, 0, 0, 0.35);
-  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.4), 0 24px 60px rgba(0, 0, 0, 0.55);
-  --hero-glow-1: rgba(124, 109, 255, 0.28);
-  --hero-glow-2: rgba(226, 68, 122, 0.20);
+  --bg: #0c0b0a;
+  --bg-soft: #11100e;
+  --surface: #151412;
+  --surface-2: #1b1a17;
+  --line: #2a2825;
+  --line-strong: #3a3733;
+  --text: #edeae4;
+  --text-2: #a8a29a;
+  --text-3: #77716a;
+  --accent: #ff7a3d;
+  --accent-2: #ff9a66;
+  --accent-soft: rgba(255, 122, 61, 0.1);
+  --ember-a: #ff7a3d;
+  --ember-b: #e8652a;
+  --good: #6cc196;
+  --good-soft: rgba(108, 193, 150, 0.1);
+  --warn: #e0a458;
+  --warn-soft: rgba(224, 164, 88, 0.1);
+  --bad: #f07167;
+  --bad-soft: rgba(240, 113, 103, 0.1);
+  --code-bg: #1b1a17;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 1px 2px rgba(0, 0, 0, 0.5), 0 18px 48px rgba(0, 0, 0, 0.45);
+  --hero-glow-1: transparent;
+  --hero-glow-2: transparent;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #07051a; --bg-soft: #0d0a26; --surface: #120e30; --surface-2: #19143f;
-    --line: #2a2458; --line-strong: #3a3470; --text: #ecebf9; --text-2: #b4b1d6; --text-3: #8a86b0;
-    --accent: #8b7cff; --accent-2: #a89cff; --accent-soft: rgba(139, 124, 255, 0.14);
-    --good: #3ddc9a; --good-soft: rgba(61, 220, 154, 0.12);
-    --warn: #ffb35c; --warn-soft: rgba(255, 179, 92, 0.12);
-    --bad: #ff6b8b; --bad-soft: rgba(255, 107, 139, 0.12);
-    --code-bg: #181442;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 30px rgba(0, 0, 0, 0.35);
-    --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.4), 0 24px 60px rgba(0, 0, 0, 0.55);
-    --hero-glow-1: rgba(124, 109, 255, 0.28); --hero-glow-2: rgba(226, 68, 122, 0.20);
+    --bg: #0c0b0a;
+    --bg-soft: #11100e;
+    --surface: #151412;
+    --surface-2: #1b1a17;
+    --line: #2a2825;
+    --line-strong: #3a3733;
+    --text: #edeae4;
+    --text-2: #a8a29a;
+    --text-3: #77716a;
+    --accent: #ff7a3d;
+    --accent-2: #ff9a66;
+    --accent-soft: rgba(255, 122, 61, 0.1);
+    --ember-a: #ff7a3d;
+    --ember-b: #e8652a;
+    --good: #6cc196;
+    --good-soft: rgba(108, 193, 150, 0.1);
+    --warn: #e0a458;
+    --warn-soft: rgba(224, 164, 88, 0.1);
+    --bad: #f07167;
+    --bad-soft: rgba(240, 113, 103, 0.1);
+    --code-bg: #1b1a17;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 1px 2px rgba(0, 0, 0, 0.5), 0 18px 48px rgba(0, 0, 0, 0.45);
+    --hero-glow-1: transparent;
+    --hero-glow-2: transparent;
     color-scheme: dark;
   }
 }
@@ -110,11 +127,11 @@ code, kbd, pre { font-family: var(--mono); font-size: 0.88em; }
 /* A gradient underline, not gradient text: `background-clip: text` is not
    supported by every engine (Servo, which Ferrite renders with, fills the whole
    box and hides the words), and a heading must stay readable in all of them. */
-.grad { background: linear-gradient(100deg, var(--ember-a), var(--ember-b) 55%, var(--accent-2)) 0 94% / 100% 0.12em no-repeat; padding-bottom: 0.04em; }
+.grad { background: linear-gradient(var(--accent), var(--accent)) 0 94% / 100% 0.1em no-repeat; padding-bottom: 0.04em; }
 .muted { color: var(--text-2); }
 .tiny { font-size: 0.82rem; color: var(--text-3); }
 .eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: var(--accent); }
-.eyebrow::before { content: ""; width: 18px; height: 2px; border-radius: 2px; background: linear-gradient(90deg, var(--ember-a), var(--ember-b)); }
+.eyebrow::before { content: ""; width: 18px; height: 1px; background: var(--accent); }
 
 /* ── Header ─────────────────────────────────────────────────────────── */
 .site-header { position: sticky; top: 0; z-index: 50; backdrop-filter: saturate(160%) blur(14px); -webkit-backdrop-filter: saturate(160%) blur(14px); background: color-mix(in srgb, var(--bg) 78%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); }
@@ -141,8 +158,8 @@ code, kbd, pre { font-family: var(--mono); font-size: 0.88em; }
 /* ── Buttons ────────────────────────────────────────────────────────── */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 9px; font: inherit; font-weight: 600; font-size: 0.97rem; padding: 12px 20px; border-radius: 11px; border: 1px solid transparent; cursor: pointer; transition: transform .15s ease, box-shadow .15s ease, background .15s ease, border-color .15s ease; text-decoration: none !important; white-space: nowrap; }
 .btn svg { width: 18px; height: 18px; }
-.btn-primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; box-shadow: 0 6px 22px color-mix(in srgb, var(--accent) 38%, transparent); }
-.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 10px 28px color-mix(in srgb, var(--accent) 48%, transparent); }
+.btn-primary { background: var(--text); color: var(--bg); }
+.btn-primary:hover { transform: translateY(-1px); background: color-mix(in srgb, var(--text) 86%, var(--accent)); }
 .btn-ghost { background: var(--surface); color: var(--text); border-color: var(--line-strong); }
 .btn-ghost:hover { border-color: var(--accent); }
 .btn-sm { padding: 8px 14px; font-size: 0.9rem; border-radius: 9px; }
@@ -199,7 +216,7 @@ section.tint { background: var(--bg-soft); border-block: 1px solid var(--line); 
 /* Pipeline */
 .pipeline { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; position: relative; }
 .step { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 22px 24px; position: relative; box-shadow: var(--shadow); }
-.step::before { content: "1"; position: absolute; top: -14px; left: 20px; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 0.86rem; color: #fff; background: linear-gradient(135deg, var(--ember-a), var(--ember-b)); box-shadow: 0 4px 14px rgba(226, 68, 122, 0.4); }
+.step::before { content: "1"; position: absolute; top: -14px; left: 20px; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 0.86rem; color: var(--bg); background: var(--text); }
 .step:nth-child(2)::before { content: "2"; }
 .step:nth-child(3)::before { content: "3"; }
 .step:nth-child(4)::before { content: "4"; }
@@ -247,9 +264,9 @@ section.tint { background: var(--bg-soft); border-block: 1px solid var(--line); 
 .bar { display: grid; grid-template-columns: 150px minmax(0, 1fr) 74px; gap: 16px; align-items: center; font-size: 0.93rem; }
 .bar .name { font-weight: 600; } .bar .name small { display: block; font-weight: 400; color: var(--text-3); font-size: 0.78rem; }
 .track { position: relative; height: 26px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; }
-.fill { position: absolute; inset: 0 auto 0 0; width: var(--w); border-radius: 7px 0 0 7px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transform-origin: left; }
-.fill.ember { background: linear-gradient(90deg, var(--ember-a), var(--ember-b)); }
-.fill.good { background: linear-gradient(90deg, #1aa877, #3ddc9a); }
+.fill { position: absolute; inset: 0 auto 0 0; width: var(--w); border-radius: 7px 0 0 7px; background: var(--text-3); transform-origin: left; }
+.fill.ember { background: var(--accent); }
+.fill.good { background: var(--good); }
 .ci { position: absolute; top: 50%; height: 2px; background: var(--text); opacity: 0.75; left: var(--lo); width: calc(var(--hi) - var(--lo)); transform: translateY(-50%); }
 .ci::before, .ci::after { content: ""; position: absolute; top: -4px; width: 2px; height: 10px; background: var(--text); }
 .ci::after { right: 0; }
