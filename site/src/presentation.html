@@ -6,6 +6,7 @@
 <title>Ferrite · Project review</title>
 <meta name="description" content="Ferrite project review: objectives, design, measured results and limits, as a slide deck.">
 <link rel="icon" type="image/png" href="{{ROOT}}static/img/favicon.png">
+<link rel="stylesheet" href="{{ROOT}}static/css/deck-editor.css">
 <style>
 @font-face { font-family: "Inter"; font-weight: 400; font-display: swap; src: url("{{ROOT}}static/fonts/Inter-Regular.woff2") format("woff2"); }
 @font-face { font-family: "Inter"; font-weight: 500; font-display: swap; src: url("{{ROOT}}static/fonts/Inter-Medium.woff2") format("woff2"); }
@@ -704,26 +705,40 @@ body.overview .slide .dot { transform: none; }
 </main>
 </div>
 
-<div class="hint" id="hint"><kbd>←</kbd><kbd>→</kbd> move · <kbd>F</kbd> full screen · <kbd>O</kbd> overview · <a href="{{ROOT}}index.html" style="color:inherit">back to the site</a></div>
+<div class="hint" id="hint"><kbd>←</kbd><kbd>→</kbd> move · <kbd>F</kbd> full screen · <kbd>O</kbd> overview · <kbd>E</kbd> edit · <a href="{{ROOT}}index.html" style="color:inherit">back to the site</a></div>
 <div class="hud" id="hud">
+  <button id="edit" aria-label="Edit slides" title="Edit slides (E)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>
   <button id="prev" aria-label="Previous slide" title="Previous (←)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 6l-6 6 6 6"/></svg></button>
   <div class="counter" id="counter">1 / 23</div>
   <button id="next" aria-label="Next slide" title="Next (→)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></button>
   <button id="fs" aria-label="Full screen" title="Full screen (F)"><svg id="fs-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg><svg id="fs-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg></button>
 </div>
 
+<script src="{{ROOT}}static/js/deck-editor.js"></script>
 <script>
 (function () {
   var stage = document.getElementById('stage');
-  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var viewport = document.getElementById('viewport');
+  // The slide list is re-read on every show(): the editor (deck-editor.js) can add,
+  // remove and reorder slides.
+  var slides = [];
+  function getSlides() { slides = Array.prototype.slice.call(stage.querySelectorAll(':scope > .slide')); return slides; }
+  getSlides();
+  function editing() { return document.body.classList.contains('editing'); }
+  var scale = 1;
   var counter = document.getElementById('counter');
   var progress = document.getElementById('progress');
   var cur = 0;
 
   function fit() {
     if (document.body.classList.contains('overview')) return;
-    var s = Math.min(window.innerWidth / 1600, window.innerHeight / 900);
-    stage.style.transform = 'translate(-50%, -50%) scale(' + s + ')';
+    // In present mode the viewport is the whole window; in edit mode it is the
+    // canvas area between the editor's panels, with a margin around the slide.
+    var pad = editing() ? 36 : 0;
+    var w = (viewport.clientWidth || window.innerWidth) - pad * 2;
+    var h = (viewport.clientHeight || window.innerHeight) - pad * 2;
+    scale = Math.max(0.05, Math.min(w / 1600, h / 900));
+    stage.style.transform = 'translate(-50%, -50%) scale(' + scale + ')';
   }
 
   function countUp(el) {
@@ -731,7 +746,10 @@ body.overview .slide .dot { transform: none; }
     var suffix = el.getAttribute('data-suffix') || '';
     var start = null, dur = 1300;
     function fmt(v) { return Math.round(v).toLocaleString('en-US') + suffix; }
+    // While editing, numbers sit at their final value.
+    if (editing()) { el.textContent = fmt(target); return; }
     function frame(t) {
+      if (editing()) { el.textContent = fmt(target); return; }
       if (start === null) start = t;
       var p = Math.min(1, (t - start) / dur);
       var e = 1 - Math.pow(1 - p, 3);
@@ -743,6 +761,8 @@ body.overview .slide .dot { transform: none; }
   }
 
   function show(i, instant) {
+    getSlides();
+    if (!slides.length) return;
     i = Math.max(0, Math.min(slides.length - 1, i));
     slides.forEach(function (s, k) {
       s.classList.toggle('active', k === i);
@@ -755,8 +775,11 @@ body.overview .slide .dot { transform: none; }
     cur = i;
     counter.textContent = (i + 1) + ' / ' + slides.length;
     progress.style.width = ((i + 1) / slides.length * 100) + '%';
-    document.title = slides[i].getAttribute('data-title') + ' · Ferrite review';
+    var heading = slides[i].querySelector('h1, h2');
+    var title = slides[i].getAttribute('data-title') || (heading ? heading.textContent.trim() : '') || 'Slide ' + (i + 1);
+    document.title = title + ' · Ferrite review';
     if (location.hash !== '#' + (i + 1)) history.replaceState(null, '', '#' + (i + 1));
+    document.dispatchEvent(new CustomEvent('deck:show', { detail: { index: i } }));
   }
 
   function next() { show(cur + 1); }
@@ -793,6 +816,9 @@ body.overview .slide .dot { transform: none; }
 
   document.addEventListener('keydown', function (e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // Edit mode has its own keys (deck-editor.js); typing never navigates.
+    var t = e.target;
+    if (editing() || (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)))) return;
     var k = e.key;
     if (k === 'ArrowRight' || k === 'PageDown' || k === ' ' || k === 'Enter') { e.preventDefault(); if (document.body.classList.contains('overview')) toggleOverview(); else next(); }
     else if (k === 'ArrowLeft' || k === 'PageUp' || k === 'Backspace') { e.preventDefault(); prev(); }
@@ -806,17 +832,18 @@ body.overview .slide .dot { transform: none; }
   document.getElementById('prev').addEventListener('click', function (e) { e.stopPropagation(); prev(); });
   document.getElementById('fs').addEventListener('click', function (e) { e.stopPropagation(); toggleFs(); });
 
-  slides.forEach(function (s, k) {
-    s.addEventListener('click', function () {
-      if (document.body.classList.contains('overview')) { cur = -1; document.body.classList.remove('overview'); fit(); show(k, true); }
-    });
+  stage.addEventListener('click', function (e) {
+    if (!document.body.classList.contains('overview')) return;
+    var k = getSlides().indexOf(e.target.closest('.slide'));
+    if (k < 0) return;
+    cur = -1; document.body.classList.remove('overview'); fit(); show(k, true);
   });
 
   // Swipe on touch screens.
   var tx = null;
   document.addEventListener('touchstart', function (e) { tx = e.touches[0].clientX; }, { passive: true });
   document.addEventListener('touchend', function (e) {
-    if (tx === null) return;
+    if (tx === null || editing()) { tx = null; return; }
     var dx = e.changedTouches[0].clientX - tx; tx = null;
     if (Math.abs(dx) > 50) { if (dx < 0) next(); else prev(); }
   });
@@ -842,6 +869,14 @@ body.overview .slide .dot { transform: none; }
     var n = parseInt(location.hash.slice(1), 10);
     if (n && n - 1 !== cur) show(n - 1);
   });
+
+  window.Deck = {
+    show: show, next: next, prev: prev, fit: fit, toggleOverview: toggleOverview,
+    slides: getSlides,
+    cur: function () { return cur; },
+    scale: function () { return scale; },
+    isOverview: function () { return document.body.classList.contains('overview'); }
+  };
 
   fit();
   var start = parseInt(location.hash.slice(1), 10);
