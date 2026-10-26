@@ -476,14 +476,14 @@ body.overview .slide .dot { transform: none; }
 <!-- 12. Architecture -->
 <section class="slide" data-title="Inside">
   <div class="kicker r" style="--i:0">Inside Ferrite</div>
-  <h2 class="r" style="--i:1">21 parts (Rust “crates”), each with one job</h2>
+  <h2 class="r" style="--i:1">12 parts (Rust “crates”), each with one job</h2>
   <p class="lead r" style="--i:2">Lower parts never depend on higher ones, so the safety system can be tested on its own, without the browser.</p>
   <div class="r" style="--i:3"><div class="layer-label">What you use</div>
-    <div class="arch"><div class="crate"><b>ferrite-shell</b>The desktop app</div><div class="crate"><b>ferrite-ui</b>Tabs, agent panel, the “ask you” panel</div><div class="crate"><b>ferrite-eval</b>The test runner and the maths</div><div class="crate"><b>ferrite-cli</b>Command-line tools</div></div></div>
+    <div class="arch" style="grid-template-columns:repeat(3,1fr)"><div class="crate"><b>ferrite-shell</b>The desktop app</div><div class="crate"><b>ferrite-ui</b>Tabs, agent panel, the “ask you” panel</div><div class="crate"><b>ferrite-eval</b>The test runner and the maths</div></div></div>
   <div class="r" style="--i:4"><div class="layer-label">The agent and the safety system</div>
-    <div class="arch"><div class="crate hl"><b>ferrite-agent</b>The AI agent and its tools</div><div class="crate hl"><b>ferrite-ipi</b>Predict, practice run, compare, live check, filter</div><div class="crate"><b>ferrite-mse</b>Video streaming (YouTube)</div><div class="crate"><b>ferrite-servo</b>Connects the Servo engine</div></div></div>
+    <div class="arch"><div class="crate hl"><b>ferrite-agent</b>The AI agent and its tools</div><div class="crate hl"><b>ferrite-ipi</b>Predict, practice run, compare, live check, filter</div><div class="crate"><b>ferrite-engine</b>The actions an agent may take, plus a test engine</div><div class="crate"><b>ferrite-engine-servo</b>Connects those actions to the real engine</div></div></div>
   <div class="r" style="--i:5"><div class="layer-label">Foundations</div>
-    <div class="arch"><div class="crate"><b>ferrite-core</b>What a “tool” and a “website” are</div><div class="crate"><b>ferrite-model</b>Talks to Ollama, Gemini, Claude, OpenAI</div><div class="crate"><b>ferrite-audit-log</b>The tamper-proof log</div><div class="crate"><b>Servo engine</b>Draws web pages (we fixed 48 things in it)</div></div></div>
+    <div class="arch" style="grid-template-columns:repeat(5,1fr)"><div class="crate"><b>ferrite-core</b>What a “tool” and a “website” are</div><div class="crate"><b>ferrite-model</b>Talks to Ollama, Gemini, Claude, OpenAI</div><div class="crate"><b>ferrite-audit-log</b>The tamper-proof log</div><div class="crate"><b>ferrite-servo</b>Runs the Servo engine (11 parts, 48 fixes)</div><div class="crate"><b>ferrite-mse</b>Video streaming (YouTube)</div></div></div>
 </section>
 
 <!-- 13. Two tests -->
