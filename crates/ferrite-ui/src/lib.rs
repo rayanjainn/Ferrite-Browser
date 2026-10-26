@@ -1373,6 +1373,10 @@ pub struct FerriteBrowser {
     pub trace_expanded: Option<u64>,
     pub show_js_console: bool,
     pub audit_entries: Vec<AuditEntry>,
+    /// The security log's hash-chain check as of the last load: `None` before a
+    /// load or for an empty log, `Some(Ok(()))` when every entry links to the one
+    /// before, `Some(Err(why))` when an entry was changed, removed or reordered.
+    pub audit_chain: Option<Result<(), String>>,
     pub servo_sessions: HashMap<usize, HeadlessServoSession>,
     /// The picture each tab last showed, keyed by tab, shared with the engine
     /// (no copy) and tagged with its frame number, so the GPU texture is
@@ -1843,6 +1847,7 @@ impl Default for FerriteBrowser {
             trace_expanded: None,
             show_js_console: false,
             audit_entries: vec![],
+            audit_chain: None,
             servo_sessions: HashMap::new(),
             frame_cache: HashMap::new(),
             perf: perf::PerfStats::from_env(),
@@ -4124,15 +4129,26 @@ fn load_security_log(state: &mut FerriteBrowser) {
     let path = ferrite_servo::session::audit_db_path();
     if !path.exists() {
         state.audit_entries.clear();
+        state.audit_chain = None;
         return;
     }
-    state.audit_entries = match PersistentAuditLog::load(&path.to_string_lossy()) {
-        Ok(log) => log.log.entries,
+    match PersistentAuditLog::load(&path.to_string_lossy()) {
+        Ok(log) => {
+            state.audit_chain = chain_status(&log.log);
+            state.audit_entries = log.log.entries;
+        }
         Err(e) => {
             eprintln!("[ferrite-ui] audit log load: {}", e);
-            vec![]
+            state.audit_entries.clear();
+            state.audit_chain = Some(Err(e.to_string()));
         }
-    };
+    }
+}
+
+/// What the Security log says about its own hash chain: nothing for an empty
+/// log, otherwise whether every entry still links to the one before it.
+fn chain_status(log: &ferrite_audit_log::AuditLog) -> Option<Result<(), String>> {
+    (!log.entries.is_empty()).then(|| log.check_chain().map_err(|e| e.to_string()))
 }
 
 /// Brings whichever Audit-panel view is showing up to date.

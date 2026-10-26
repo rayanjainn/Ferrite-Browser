@@ -171,3 +171,40 @@ fn the_library_and_the_agent_drawers_are_never_open_together() {
     let _ = update(&mut state, FerriteBrowserMessage::ToggleLibraryPanel);
     let _ = view(&state);
 }
+
+#[test]
+fn the_security_log_says_whether_its_chain_still_verifies() {
+    use ferrite_audit_log::AuditLog;
+    assert_eq!(
+        chain_status(&AuditLog::new()),
+        None,
+        "an empty log claims nothing"
+    );
+    let mut log = AuditLog::new();
+    for url in ["http://127.0.0.1/a", "http://127.0.0.1/b"] {
+        log.append(
+            AuditEventKind::CapabilityExercised,
+            Default::default(),
+            Some("network.fetch".to_string()),
+            Some(url.to_string()),
+        );
+    }
+    assert_eq!(chain_status(&log), Some(Ok(())));
+    log.entries[1].url = Some("https://evil.example".to_string());
+    assert!(
+        matches!(chain_status(&log), Some(Err(_))),
+        "an edited entry breaks it"
+    );
+
+    // The panel shows the verdict next to Refresh, verified or broken.
+    let mut state = FerriteBrowser {
+        show_audit_panel: true,
+        audit_tab: AuditTab::Security,
+        audit_entries: log.entries.clone(),
+        audit_chain: Some(Ok(())),
+        ..FerriteBrowser::default()
+    };
+    let _ = view(&state);
+    state.audit_chain = chain_status(&log);
+    let _ = view(&state);
+}

@@ -66,11 +66,34 @@ pub(crate) fn header<'a>(
             .style(panel_btn_inactive)
             .on_press(FerriteBrowserMessage::ClearTrace)
             .into(),
-        AuditTab::Security => button(text("Refresh").size(11))
-            .padding([3, 10])
-            .style(panel_btn_inactive)
-            .on_press(FerriteBrowserMessage::RefreshAuditLog)
-            .into(),
+        AuditTab::Security => {
+            // The result of re-checking every entry's hash link on the last load.
+            let chain: Element<FerriteBrowserMessage> = match &state.audit_chain {
+                Some(Ok(())) => text(format!(
+                    "Chain verified \u{00b7} {} entries",
+                    state.audit_entries.len()
+                ))
+                .size(11)
+                .color(palette.safe)
+                .into(),
+                Some(Err(why)) => tip(
+                    text("Chain broken").size(11).color(palette.danger),
+                    why.clone(),
+                    palette,
+                ),
+                None => horizontal_space().width(0).into(),
+            };
+            row![
+                chain,
+                button(text("Refresh").size(11))
+                    .padding([3, 10])
+                    .style(panel_btn_inactive)
+                    .on_press(FerriteBrowserMessage::RefreshAuditLog),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+            .into()
+        }
     };
     container(
         row![
