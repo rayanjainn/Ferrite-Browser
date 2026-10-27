@@ -44,6 +44,25 @@ pub struct Attribution {
     /// (T-002/D2: this field is exactly what proves `Specificity` was
     /// consumed, not just computed).
     pub specificity: Specificity,
+    /// Why the event was admitted: the prediction named its capability, or it
+    /// only observed a site the task works at (ADR-026). Records written
+    /// before the observation tier existed have no such field and were all
+    /// predicted.
+    #[serde(default)]
+    pub basis: Basis,
+}
+
+/// Why an [`Attribution`] admitted its event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Basis {
+    /// The predicted fingerprint names the event's capability at this origin.
+    #[default]
+    Predicted,
+    /// The event only observes (reads, scrolls, waits, moves between pages)
+    /// at an origin the task's scope names exactly or by suffix. Admitted
+    /// whether or not it was predicted: observation changes nothing and
+    /// sends nothing the agent chose anywhere new (ADR-026).
+    Observation,
 }
 
 /// Every primitive and origin the agent used beyond what its expected
@@ -139,6 +158,7 @@ mod tests {
                 origin: "https://example.com".to_string(),
                 capability: Capability::WebRead,
                 specificity: Specificity::Exact,
+                basis: Basis::Predicted,
             }],
         };
         assert!(diff.is_clean());
@@ -156,6 +176,7 @@ mod tests {
                 origin: "https://example.com".to_string(),
                 capability: Capability::WebRead,
                 specificity: Specificity::Exact,
+                basis: Basis::Predicted,
             }],
         };
         let json = serde_json::to_string(&diff).unwrap();

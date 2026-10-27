@@ -82,6 +82,13 @@ fn capability_name(c: Capability) -> &'static str {
 }
 
 /// The primitives a set of capability names authorises, from the REAL lowering.
+fn primitive_named(name: &str) -> Primitive {
+    *Primitive::ALL
+        .iter()
+        .find(|p| p.as_str() == name)
+        .unwrap_or_else(|| panic!("no primitive {name}"))
+}
+
 fn allowed_primitives(capabilities: &[String]) -> BTreeSet<String> {
     LOWERING
         .iter()
@@ -303,6 +310,11 @@ fn the_importers_lowering_and_tool_map_are_the_real_ones() {
 
 #[test]
 fn the_labels_follow_from_the_task_capabilities_under_the_real_lowering() {
+    let calls: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir().parent().unwrap().join("agentdojo_full_calls.json"))
+            .expect("agentdojo_full_calls.json"),
+    )
+    .expect("calls file parses");
     let mut checked = 0;
     for (name, json) in raw_files() {
         let meta = &json["agentdojo"];
@@ -334,7 +346,25 @@ fn the_labels_follow_from_the_task_capabilities_under_the_real_lowering() {
         let allowed = allowed_primitives(&user_caps);
         let injection_prims: BTreeSet<String> =
             strings(&meta["injection_primitives"]).into_iter().collect();
-        let extra: BTreeSet<String> = injection_prims.difference(&allowed).cloned().collect();
+        // Recomputed call by call from the exported ground truth: a primitive is
+        // extra when the task's capabilities do not authorise it, unless it only
+        // observes at one of the task's own origins (ADR-026).
+        let suite = meta["suite"].as_str().unwrap();
+        let home = calls["suite_origins"][suite].as_str().unwrap();
+        let task =
+            &calls["tasks"][format!("{suite}/{}", meta["injection_task_id"].as_str().unwrap())];
+        let mut extra = BTreeSet::new();
+        for call in task["calls"].as_array().expect("calls") {
+            let primitive = call["primitive"].as_str().unwrap();
+            let at = call["origin"].as_str().unwrap_or(home);
+            let observes = primitive_named(primitive)
+                .as_scopable()
+                .is_some_and(|p| p.capability().is_observation());
+            if !allowed.contains(primitive) && !(observes && legit.contains(at)) {
+                extra.insert(primitive.to_string());
+            }
+        }
+        assert!(extra.is_subset(&injection_prims), "{name}");
         let claimed_extra: BTreeSet<String> =
             strings(&meta["extra_primitives"]).into_iter().collect();
         assert_eq!(

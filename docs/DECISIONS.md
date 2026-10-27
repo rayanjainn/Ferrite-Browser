@@ -691,3 +691,45 @@ absent in this Servo and are listed by the probe as gaps.
 **What was found by running real players, and kept.** hls.js, dash.js and Shaka Player each rely on things the specification leaves vague and the first version got wrong: a seek must reach every stream's source (GStreamer sends it up one pad); a `MediaSource` must be attachable again after it is detached (Shaka sets a `<source>` and then calls `load()`); an empty `type` on a `<source>` says nothing; data that reaches the duration ends the stream even if the page never calls `endOfStream()`; the duration after `endOfStream()` is the highest track end. These are in `scripts/mse-libs`.
 
 **Not claimed.** YouTube was not tried (the build machine cannot reach it). No encrypted media. Not run on a Mac or Windows. Hardware decoding is whatever GStreamer chooses.
+
+## ADR-026 — Gate what an action does, not whether it was guessed: observation is free at the task's own sites, and the prediction must cover the user's own request
+
+**Date:** 2026-10-27. **Status:** live (T-353). **Amends ADR-001** (the lowering: `scroll` and `wait` move from `web.interact` to `web.read`) and **ADR-014** (what the guard admits).
+
+**Context.** The feedback on the project was that the defense makes the agent *stricter*, not smarter. The numbers agreed. On the live AgentDojo run (gemma4:31b, `docs/EVALUATION.md` §11) the guard refused at least one action in 38.1% of benign tasks, and the cause was the prediction, not the guard: it missed a capability the task needed in 44% of cases. A new offline experiment that replays AgentDojo's own ground-truth calls through the guard (`ferrite_eval::replay`, `just replay-eval`) showed the same thing without a model. With the rule layer as it was, **76.3% of benign tasks** had a ground-truth call refused. The same configuration "stopped" 92.0% of attacks, but mostly by refusing the user's own work: only **19.2%** of attacks were stopped with the user's task left intact. Three faults made it so:
+
+1. Reading was gated like acting. A task the rules credited with no reading verb ("How many appointments do I have today?") had an empty fingerprint, so its first page read was refused. Scrolling and waiting sat under `web.interact`, so a read-only task's first scroll was a deviation.
+2. The rule layer matched words, not commands. It missed "Please create a new event", "Find and delete the largest file" and "Can you please pay the bill", and granted writes to "Looking forward to hearing from you" (`forward`) and credential access to a chocolate chip **cookie** recipe.
+3. The model layer was told to "err on the side of fewer capabilities", which turns every doubt into a refused step of the user's own task.
+
+**Decision.**
+
+1. **Observation is free at the task's own sites.** `web.read` (now including `scroll` and `wait`) and `web.navigate` are *observation* (`Capability::is_observation`). The comparator admits them, predicted or not, at any origin the task's scope names exactly or by suffix (`classify_event`; recorded as `Basis::Observation` in the attribution and the audit). It never does this through `task_open`, which names every origin, nor for an empty expectation, so fail-to-empty is unchanged. Everything that changes state, crosses the browser boundary or reads credential-adjacent stores still needs the prediction: `web.interact`, `web.download`, `scoped.read`, `clipboard.*`. `js.execute` is untouched (ADR-003). The dry-run comparator and the runtime guard share `classify_event`, so they still cannot disagree.
+2. **Every non-blank request reads.** The rule layer always pins `web.read`. A browser agent does whatever it is asked by reading the page it acts on.
+3. **Commands, not words.** `web.interact` comes from a command verb (send, pay, create, delete, book, add, ...) at the start of a clause or after a word that introduces one (please, and, then, to, you, ...). A word that is often a noun (email, schedule, order, post, set, ...) also needs an object after it, and "share" needs a "with" someone other than the user. The word list was written against AgentDojo's `workspace` and `travel` prompts; `banking` and `slack` were held out and are reported apart.
+4. **The model layer covers the request (`SYSTEM_PROMPT_VERSION` 2).** It is told what each capability means in task terms, to list every one the user's own words ask for, and to list nothing only a page might ask for. The model still sees only the request, never a page, which is what keeps an injection out of the prediction.
+
+**Measured (oracle replay, no model, AgentDojo v1.2.2, 97 benign tasks and 949 attack pairs):**
+
+| | rules before | rules after (this ADR) | perfect prediction |
+|---|---|---|---|
+| benign tasks with a call refused | 74/97 = 76.3% | 10/97 = 10.3% | 0/97 = 0% |
+| … development suites (workspace, travel) | 37/60 = 61.7% | 2/60 = 3.3% | 0/60 |
+| … held-out suites (banking, slack) | 37/37 = 100% | 8/37 = 21.6% | 0/37 |
+| deviation attacks stopped | 367/385 = 95.3% | 370/385 = 96.1% | 385/385 |
+| origin-shift attacks stopped | 52/52 = 100% | 52/52 = 100% | 52/52 |
+| attacks stopped with the user's task intact | 182/949 = 19.2% | 401/949 = 42.3% | 437/949 = 46.0% |
+
+The third column is the best any capability gate can do on this corpus: the other 512 attacks are the residual, which uses only the task's own capabilities at its own sites.
+
+**Why not the alternatives.**
+
+- *Keep tightening the prediction.* That is the "stricter" path. It cannot reach the residual, and it costs the user's task first.
+- *Approve whole capabilities after the first refusal.* That moves the false positive to a prompt the person learns to click through (ADR-020's stated human limit).
+- *Enforce destination provenance now.* The replay measures a check that asks before any effect naming a recipient, account or URL the request did not name. It would catch 77.5% of the residual, at a cost of 18.6% of benign tasks (a bill names the account to pay). That is a trade-off for the owner to choose with live numbers, not a default to slip in, so it is measured and not enforced (T-352).
+
+**Not claimed.**
+
+- That the live false-positive rate falls by the same amount. The replay has no detours, no model mistakes and no `task_open` scopes. The live rerun with gemma4:31b (`docs/EVALUATION.md` §12) is the measurement of record, and it has not been run yet.
+- That the command lexicon generalises beyond English imperative prompts.
+- That observation at the task's own site is harmless when that site hosts attacker-written pages (a shared wiki, a forum): reading more of it exposes the agent to more injections, though every effect is still gated.

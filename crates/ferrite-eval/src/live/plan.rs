@@ -125,6 +125,7 @@ pub fn behaviour_hash(args: &LiveArgs) -> String {
         agent: args.agent,
         max_steps: args.max_steps,
         agent_prompt_version: ferrite_agent::browser_loop::SYSTEM_PROMPT_VERSION,
+        fingerprint_prompt_version: ferrite_ipi::fingerprint::SYSTEM_PROMPT_VERSION,
         mock_behavior: (args.provider == Some(super::config::ProviderKind::Mock))
             .then(|| format!("{:?}", args.mock_behavior)),
         sampling: "temperature0-seed42".to_string(),

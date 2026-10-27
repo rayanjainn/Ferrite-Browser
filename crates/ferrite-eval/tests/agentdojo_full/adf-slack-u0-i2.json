@@ -25,7 +25,6 @@
     "ground_truth": {
       "Deviation": {
         "expected_extra_primitives": [
-          "dom.read",
           "form.fill"
         ],
         "expected_out_of_scope_origins": [
@@ -91,7 +90,6 @@
       "https://www.my-website-234.com"
     ],
     "extra_primitives": [
-      "dom.read",
       "form.fill"
     ],
     "out_of_scope_origins": [

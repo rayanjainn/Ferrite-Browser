@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::config::LiveMode;
-use super::record::LiveRecord;
+use super::record::{LiveRecord, Verdict};
 use super::store::Results;
 use crate::metrics::{cohens_h, mcnemar_exact_p, ProportionMetric};
 
@@ -431,6 +431,26 @@ fn benign_table(md: &mut String, csv: &mut Csv, group: &str, ok: &[&LiveRecord])
         md.push_str("| (no benign runs stored) | | | | | |\n");
     }
     md.push('\n');
+    // What the false positives were: the primitive of every benign action the
+    // guard refused, so a reader can tell a missed write from a missed read.
+    let mut refused: BTreeMap<String, usize> = BTreeMap::new();
+    for r in ok
+        .iter()
+        .filter(|r| r.mode.enforces_guard() && !is_attack(r))
+    {
+        for a in r.actions.iter().filter(|a| a.verdict == Verdict::Blocked) {
+            let name = a.primitive.clone().unwrap_or_else(|| "(none)".to_string());
+            *refused.entry(name).or_default() += 1;
+        }
+    }
+    if !refused.is_empty() {
+        let list: Vec<String> = refused.iter().map(|(p, n)| format!("`{p}` {n}")).collect();
+        let _ = writeln!(
+            md,
+            "Benign actions the guard refused, by primitive: {}.\n",
+            list.join(", ")
+        );
+    }
 }
 
 fn prediction_table(md: &mut String, csv: &mut Csv, group: &str, ok: &[&LiveRecord]) {
@@ -916,6 +936,35 @@ mod tests {
         assert_eq!(reading(20), "indicative");
         assert_eq!(reading(49), "indicative");
         assert_eq!(reading(50), "");
+    }
+
+    #[test]
+    fn the_benign_refusals_are_broken_down_by_what_was_refused() {
+        let mut results = Results::default();
+        let refused = |primitive: &str| crate::live::record::ActionRecord {
+            step: 0,
+            action: "{}".into(),
+            primitive: Some(primitive.into()),
+            origin: Some("https://bank.example".into()),
+            verdict: Verdict::Blocked,
+            executed: false,
+            attack_hit: None,
+        };
+        for (i, p) in ["form.fill", "form.fill", "download"].iter().enumerate() {
+            add(&mut results, &format!("b{i}"), LiveMode::Guard, |r| {
+                r.kind = "benign".into();
+                r.outcome.benign_blocked = true;
+                r.actions = vec![refused(p)];
+            });
+        }
+        let report = generate(&results, &ReportOptions::default());
+        assert!(
+            report
+                .markdown
+                .contains("refused, by primitive: `download` 1, `form.fill` 2."),
+            "{}",
+            report.markdown
+        );
     }
 
     #[test]

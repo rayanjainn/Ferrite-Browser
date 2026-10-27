@@ -114,11 +114,13 @@ closed_enum! {
     /// an [`OriginScope`] in an [`ExpectedCapability`] it says *where*.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     pub enum Capability {
-        /// Read content from admitted origins.
+        /// Read content from admitted origins, including scrolling to it and
+        /// waiting for it.
         WebRead => "web.read",
         /// Move between admitted origins, including opening and closing tabs.
         WebNavigate => "web.navigate",
-        /// Drive the page as a user would at admitted origins.
+        /// Drive the page as a user would at admitted origins: type, fill,
+        /// select, click.
         WebInteract => "web.interact",
         /// Download a file from an admitted origin.
         WebDownload => "web.download",
@@ -242,10 +244,16 @@ closed_enum! {
 
 // ── The lowering table ──────────────────────────────────────────────────
 
+// Scrolling and waiting are how a long or slow page is read: they change
+// nothing outside the agent's own view and carry nothing the agent chose
+// anywhere, so they belong with reading (ADR-026). They used to sit under
+// `web.interact`, which made a read-only task's first scroll a deviation.
 const WEB_READ: &[ScopablePrimitive] = &[
     ScopablePrimitive::DomRead,
     ScopablePrimitive::DomQuery,
     ScopablePrimitive::Screenshot,
+    ScopablePrimitive::Scroll,
+    ScopablePrimitive::Wait,
 ];
 
 const WEB_NAVIGATE: &[ScopablePrimitive] = &[
@@ -258,8 +266,6 @@ const WEB_INTERACT: &[ScopablePrimitive] = &[
     ScopablePrimitive::DomWrite,
     ScopablePrimitive::FormFill,
     ScopablePrimitive::Click,
-    ScopablePrimitive::Scroll,
-    ScopablePrimitive::Wait,
 ];
 
 const WEB_DOWNLOAD: &[ScopablePrimitive] = &[ScopablePrimitive::Download];
@@ -353,6 +359,22 @@ impl Capability {
             Self::ClipboardRead | Self::ClipboardWrite => ActionClass::Clipboard,
         }
     }
+
+    /// Whether this capability only *observes* the sites a task works at:
+    /// reading a page (scrolling and waiting included) and moving between its
+    /// pages. Neither changes anything outside the agent's own view, and
+    /// neither sends anything the agent chose to anyone but a site the task
+    /// already works at, so the comparator admits both at any origin the
+    /// task's scope names exactly or by suffix, predicted or not (ADR-026).
+    ///
+    /// Everything else is an *effect* and needs the prediction: changing page
+    /// state (`web.interact`), pulling bytes onto the host (`web.download`),
+    /// reading credential-adjacent stores (`scoped.read`), crossing the OS
+    /// boundary (`clipboard.*`). `js.execute` is not a capability at all.
+    #[must_use]
+    pub const fn is_observation(self) -> bool {
+        matches!(self, Self::WebRead | Self::WebNavigate)
+    }
 }
 
 impl ScopablePrimitive {
@@ -364,11 +386,11 @@ impl ScopablePrimitive {
     #[must_use]
     pub const fn capability(self) -> Capability {
         match self {
-            Self::DomRead | Self::DomQuery | Self::Screenshot => Capability::WebRead,
-            Self::Navigate | Self::TabOpen | Self::TabClose => Capability::WebNavigate,
-            Self::DomWrite | Self::FormFill | Self::Click | Self::Scroll | Self::Wait => {
-                Capability::WebInteract
+            Self::DomRead | Self::DomQuery | Self::Screenshot | Self::Scroll | Self::Wait => {
+                Capability::WebRead
             }
+            Self::Navigate | Self::TabOpen | Self::TabClose => Capability::WebNavigate,
+            Self::DomWrite | Self::FormFill | Self::Click => Capability::WebInteract,
             Self::Download => Capability::WebDownload,
             Self::CookieRead | Self::StorageRead => Capability::ScopedRead,
             Self::ClipboardRead => Capability::ClipboardRead,
@@ -420,11 +442,11 @@ impl Primitive {
             Self::DomRead
             | Self::DomQuery
             | Self::Screenshot
+            | Self::Scroll
+            | Self::Wait
             | Self::CookieRead
             | Self::StorageRead => ActionClass::Read,
-            Self::DomWrite | Self::FormFill | Self::Click | Self::Scroll | Self::Wait => {
-                ActionClass::Interact
-            }
+            Self::DomWrite | Self::FormFill | Self::Click => ActionClass::Interact,
             Self::Navigate | Self::TabOpen | Self::TabClose => ActionClass::Navigate,
             Self::Download => ActionClass::Download,
             Self::ClipboardRead | Self::ClipboardWrite => ActionClass::Clipboard,

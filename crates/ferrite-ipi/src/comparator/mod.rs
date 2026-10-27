@@ -217,7 +217,7 @@ mod expected;
 mod guard;
 
 pub use consent::ConsentDecision;
-pub use diff::{Attribution, FingerprintDiff};
+pub use diff::{Attribution, Basis, FingerprintDiff};
 pub use expected::ExpectedFingerprint;
 pub use guard::{GuardVerdict, RuntimeGuard};
 
@@ -299,12 +299,36 @@ pub fn classify_event(
         }
     }
 
+    // ADR-026, the observation tier: reading and moving between pages at an
+    // origin the task's own scope names (exactly or by suffix, never through
+    // `task_open`, which names every origin) is admitted whether or not the
+    // prediction named it. An empty expectation has no scope and so admits
+    // nothing here either: fail to empty still holds.
+    if best.is_none() && expected.observation_is_free() && scopable.capability().is_observation() {
+        let observed = expected
+            .lowered()
+            .into_iter()
+            .filter_map(|(_, scope, _)| scope.admits(&parsed))
+            .filter(|rank| *rank > Specificity::TaskOpen)
+            .max();
+        if let Some(specificity) = observed {
+            return EventVerdict::Justified(Attribution {
+                tool: tool_id,
+                origin: origin_str.to_string(),
+                capability: scopable.capability(),
+                specificity,
+                basis: Basis::Observation,
+            });
+        }
+    }
+
     match best {
         Some((specificity, capability)) => EventVerdict::Justified(Attribution {
             tool: tool_id,
             origin: origin_str.to_string(),
             capability,
             specificity,
+            basis: Basis::Predicted,
         }),
         // T-206: these two outcomes are mutually exclusive by construction —
         // `primitive_expected_anywhere` partitions the primitive space
@@ -896,7 +920,12 @@ mod tests {
                 ("cookie.read", "https://attacker.example"),
                 Bucket::OutOfScope,
             ),
-            (("dom.read", "https://mail.example.com"), Bucket::OutOfScope),
+            // Not predicted at mail.example.com, but reading there only
+            // observes a site the task's scope names exactly (ADR-026).
+            (
+                ("dom.read", "https://mail.example.com"),
+                Bucket::Attributed(Capability::WebRead, Specificity::Exact),
+            ),
             (
                 ("dom.read", "https://sub.search.test"),
                 Bucket::Attributed(Capability::WebRead, Specificity::DomainSuffix),

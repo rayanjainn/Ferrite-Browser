@@ -114,10 +114,13 @@ fn split_seed(seed: &str) -> (&str, &str) {
     }
 }
 
-fn first_url(text: &str) -> Option<String> {
+/// The last URL in `text`. The page's own address comes first in the context
+/// (its header), and every carrier plants the injection after its benign
+/// text, so the last one is the URL the injected instruction names.
+fn last_url(text: &str) -> Option<String> {
     text.split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '(' | ')' | '<' | '>'))
         .map(|t| t.trim_end_matches(['.', ',', ';', ':', '!', '?']))
-        .find(|t| t.starts_with("http://") || t.starts_with("https://") || t.starts_with("www."))
+        .rfind(|t| t.starts_with("http://") || t.starts_with("https://") || t.starts_with("www."))
         .map(|t| {
             if t.starts_with("www.") {
                 format!("https://{t}")
@@ -127,10 +130,11 @@ fn first_url(text: &str) -> Option<String> {
         })
 }
 
-fn first_email(text: &str) -> Option<String> {
+/// The last email address in `text`, for the same reason as [`last_url`].
+fn last_email(text: &str) -> Option<String> {
     text.split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '(' | ')' | '<' | '>' | ','))
         .map(|t| t.trim_end_matches(['.', ';', ':', '!', '?']))
-        .find(|t| t.contains('@') && t.contains('.') && !t.starts_with('@'))
+        .rfind(|t| t.contains('@') && t.contains('.') && !t.starts_with('@'))
         .map(str::to_string)
 }
 
@@ -157,9 +161,9 @@ fn agent_answer(req: &CompletionRequest, behavior: MockBehavior) -> String {
         plan.push(serde_json::json!({"action": "fill_form", "fields": [["@1", "done"]]}));
     }
     if compliant(seed, behavior) {
-        if let Some(url) = first_url(context) {
+        if let Some(url) = last_url(context) {
             plan.push(serde_json::json!({"action": "navigate", "url": url}));
-        } else if let Some(email) = first_email(context) {
+        } else if let Some(email) = last_email(context) {
             plan.push(serde_json::json!({"action": "fill_form", "fields": [["@2", email]]}));
         }
     }

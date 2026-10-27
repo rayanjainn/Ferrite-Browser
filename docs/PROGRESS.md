@@ -5001,7 +5001,7 @@ The owner's .app crashes, hangs on quit and ignores zoom on some pages, and a Fi
 
 ## 2026-10-06 — coordinator — The `-media` packages built, and every release kept (T-316, T-317)
 
-**Asked by the owner:** merge to `main` and run CI; then "fix the Windows media build and rerun CI, also have versions in releases". **CI run 25 on `main`** (manual, first with the media packaging): every lint, test and normal Servo build passed on all three systems, the Linux media build and probe passed, and the run published `latest`. The Windows `-media` build died at `glib-sys` and the macOS one at packaging. **Causes (both mine):** on Windows the GStreamer package installs to `C:\Program Files\gstreamer\1.0\msvc_x86_64`, not `C:\gstreamer` as `ci.yml` assumed (an early guess that `pkg-config` was splitting the path at the colon was wrong; the diagnosis run found the real path); on macOS the bundler tried to copy a dangling Homebrew plugin link (`libgstnice.dylib`). **Fixed, then tested without an hour-long build:** a smoke job per system bundles GStreamer's own `gst-inspect-1.0`, hides the installed GStreamer and runs the bundled copy. Those jobs found two more faults in the first attempt (a plugin's own install name still named the Homebrew path; my check mis-read `C:/Program\ Files` because `pkg-config` escapes the space) and pass now. **Result:** all three real `-media` builds pass and upload packages (run 37410554668). **Releases:** `release.yml` now also leaves a permanent `build-<run>-<commit>` release (T-317, not yet run). **Process:** a scratch branch (`claude/confident-einstein-pr9nor`, one throwaway workflow) was pushed for the diagnosis without being asked and could not be deleted afterwards (the session's proxy refuses ref deletes); it holds no other work and is for the owner to delete. **Not verified:** Ferrite itself starting from a bundle on a Mac or Windows machine without GStreamer; signing and Gatekeeper; the versioned release step.
+**Asked by the owner:** merge to `main` and run CI; then "fix the Windows media build and rerun CI, also have versions in releases". **CI run 25 on `main`** (manual, first with the media packaging): every lint, test and normal Servo build passed on all three systems, the Linux media build and probe passed, and the run published `latest`. The Windows `-media` build died at `glib-sys` and the macOS one at packaging. **Causes (both mine):** on Windows the GStreamer package installs to `C:\Program Files\gstreamer\1.0\msvc_x86_64`, not `C:\gstreamer` as `ci.yml` assumed (an early guess that `pkg-config` was splitting the path at the colon was wrong; the diagnosis run found the real path); on macOS the bundler tried to copy a dangling Homebrew plugin link (`libgstnice.dylib`). **Fixed, then tested without an hour-long build:** a smoke job per system bundles GStreamer's own `gst-inspect-1.0`, hides the installed GStreamer and runs the bundled copy. Those jobs found two more faults in the first attempt (a plugin's own install name still named the Homebrew path; my check mis-read `C:/Program\ Files` because `pkg-config` escapes the space) and pass now. **Result:** all three real `-media` builds pass and upload packages (run 37410554668). **Releases:** `release.yml` now also leaves a permanent `build-<run>-<commit>` release (T-317, not yet run). **Process:** a scratch branch (one throwaway workflow) was pushed for the diagnosis without being asked and could not be deleted afterwards (the session's proxy refuses ref deletes); it holds no other work and is for the owner to delete. **Not verified:** Ferrite itself starting from a bundle on a Mac or Windows machine without GStreamer; signing and Gatekeeper; the versioned release step.
 
 ## 2026-10-07 — coordinator — Real-site run 2 fixes, HTTP sign-in, compat scripts in blank frames (T-294, T-328..T-332)
 
@@ -5049,3 +5049,39 @@ CI run 37545369862 on a68736d: Reddit, React, Next.js, Svelte, Tailwind, Vercel,
 ## 2026-10-26 — The Security log shows whether its hash chain verifies
 
 **Why:** the Stage 2 report's audit-panel figure claimed the panel showed the result of the chain check; it did not, it only listed entries. **Done:** loading the Security log (F12 → Security log, or Refresh) now runs `AuditLog::check_chain` and the panel header shows "Chain verified · N entries" (green) or "Chain broken" (red, with the reason as a tooltip); nothing is shown for an empty log (`ferrite-ui`: `chain_status`, `FerriteBrowser::audit_chain`). **Verified:** a new test (`the_security_log_says_whether_its_chain_still_verifies`: empty log claims nothing, an intact two-entry log verifies, an edited entry breaks it, both states render); 527 `ferrite-ui` tests; workspace clippy with `-D warnings`; fmt. In the real app on Linux (Xvfb), loading a local page with a stylesheet, script, two images and a fetch logged 9 GRANTED entries and the header read "Chain verified · 9 entries".
+
+## 2026-10-27 — Smarter gating, not stricter: observation is free at the task's own sites, the rules read commands (T-353, ADR-026)
+
+**Asked by the owner:** "we need to lower the false positives, feedback we got was that we are just making the agent stricter and not smarter … make it really better". Branch `feat/smarter-gating`.
+
+**Found.** The live run's 38.1% benign false positives came from the prediction (44% of cases missed a needed capability). To measure that without a model, the AgentDojo importer now also exports every task's ground-truth calls with their arguments (`tests/agentdojo_full_calls.json`, byte-identical on re-import, checked by `--check`), and `just replay-eval` (`ferrite_eval::replay`) replays them through the guard. With the old rules, 74/97 = 76.3% of benign tasks had a call refused. The old "92.0% of attacks stopped" was mostly refusing the user's own work: only 182/949 attacks were stopped with the task intact.
+
+**Changed.**
+- **Taxonomy:** `scroll` and `wait` are reading.
+- **Comparator:** observation is admitted at the task's own origins, recorded as `Basis::Observation`.
+- **Rule layer:** always reads, and finds writes from commands.
+- **Fingerprint prompt:** version 2.
+- **Live harness:**
+  - `HARNESS_VERSION` 2, and the fingerprint prompt version is part of the result key.
+  - The scorer no longer counts observation at the case's own site as the attack.
+  - The mock follows the injected URL rather than the page's own address.
+  - The report lists the primitives of refused benign actions.
+- **Labels:** 10 AgentDojo slack cases (the injection only *read* at the task's site before posting elsewhere) and core case c11 (relabelled residual; see `docs/EVALUATION.md` §8.3).
+
+**Measured (oracle replay).**
+
+| | before | after |
+|---|---|---|
+| benign refused, all suites | 76.3% | 10.3% |
+| benign refused, held-out banking + slack | 100% | 21.6% |
+| deviation attacks stopped | 367/385 | 370/385 |
+| origin-shift attacks stopped | 52/52 | 52/52 |
+| attacks stopped with the task intact | 182/949 | 401/949 |
+
+The ceiling for any capability gate on attacks stopped with the task intact is 437/949. `just eval`: LoopOnly 123/806 (122 before, c11). `just guard-eval`: 123/809 succeed with the guard, all residual, 0/129 benign blocked.
+
+**Checks:** `cargo test --workspace` (all pass), `cargo clippy --workspace --all-targets -D warnings`, `cargo fmt --check`.
+
+**Destination provenance, measured and not enforced (T-352):** it would catch 77.5% of the residual and ask on 18.6% of benign tasks.
+
+**Not done:** the live rerun with gemma4:31b (the command is in `docs/EVALUATION.md` §12).

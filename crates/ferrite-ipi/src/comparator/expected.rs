@@ -50,6 +50,9 @@ const PROVISIONAL_NO_CONTEXT_URL_RATIONALE: &str =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpectedFingerprint {
     capabilities: ExpectedCapabilitySet,
+    /// Whether observation at the scope's origins is admitted unpredicted
+    /// (ADR-026). Always true outside an ablation.
+    observation: bool,
 }
 
 impl ExpectedFingerprint {
@@ -58,7 +61,10 @@ impl ExpectedFingerprint {
     /// per-capability scope for every entry, with no defaulting involved.
     #[must_use]
     pub fn from_capabilities(capabilities: ExpectedCapabilitySet) -> Self {
-        Self { capabilities }
+        Self {
+            capabilities,
+            observation: true,
+        }
     }
 
     /// The fail-to-empty expected fingerprint: no capability, so
@@ -68,6 +74,7 @@ impl ExpectedFingerprint {
     pub fn empty() -> Self {
         Self {
             capabilities: ExpectedCapabilitySet::empty(),
+            observation: true,
         }
     }
 
@@ -142,7 +149,26 @@ impl ExpectedFingerprint {
         let capabilities =
             ExpectedCapabilitySet::new(entries).unwrap_or_else(|_| ExpectedCapabilitySet::empty());
 
-        Self { capabilities }
+        Self {
+            capabilities,
+            observation: true,
+        }
+    }
+
+    /// The same expectation with the observation tier switched off, so only
+    /// what the prediction names is admitted: the gating Ferrite had before
+    /// ADR-026. The replay experiment uses it to measure what the tier is
+    /// worth; nothing that enforces anything does.
+    #[must_use]
+    pub fn predicted_only(mut self) -> Self {
+        self.observation = false;
+        self
+    }
+
+    /// Whether observation at the scope's origins is admitted unpredicted.
+    #[must_use]
+    pub fn observation_is_free(&self) -> bool {
+        self.observation
     }
 
     /// The underlying per-capability-scoped set.

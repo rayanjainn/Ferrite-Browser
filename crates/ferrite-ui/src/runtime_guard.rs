@@ -425,7 +425,15 @@ mod tests {
         assert!(!verdict(&navigate, "@5").allows(), "link to another site");
         assert!(!verdict(&navigate, "@6").allows(), "a button is a click");
         assert!(verdict(&guard_for(Capability::WebInteract), "@4").allows());
-        assert!(!verdict(&guard_for(Capability::WebRead), "@4").allows());
+        // Following a link on the task's own site only observes it (ADR-026),
+        // so a read-only task may too; a link elsewhere and a button stay out.
+        let read = guard_for(Capability::WebRead);
+        assert!(
+            verdict(&read, "@4").allows(),
+            "own-site link, read-only task"
+        );
+        assert!(!verdict(&read, "@5").allows());
+        assert!(!verdict(&read, "@6").allows());
     }
 
     #[test]

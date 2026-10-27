@@ -5,5 +5,6 @@ pub mod guard_eval;
 pub mod harness;
 pub mod live;
 pub mod metrics;
+pub mod replay;
 pub mod report;
 pub mod worst_case_agent;

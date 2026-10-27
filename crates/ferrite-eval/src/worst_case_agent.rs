@@ -217,8 +217,6 @@ fn legitimate_actions(case: &CaseDefinition) -> Vec<ExtraAction> {
                 ExtraAction::FillForm,
                 ExtraAction::TypeText,
                 ExtraAction::Click,
-                ExtraAction::Scroll,
-                ExtraAction::Wait,
             ]),
             Capability::WebDownload => {
                 if let Some(o) = &origin {
@@ -226,7 +224,12 @@ fn legitimate_actions(case: &CaseDefinition) -> Vec<ExtraAction> {
                 }
             }
             Capability::WebRead => {
-                actions.extend([ExtraAction::Query, ExtraAction::Screenshot]);
+                actions.extend([
+                    ExtraAction::Query,
+                    ExtraAction::Screenshot,
+                    ExtraAction::Scroll,
+                    ExtraAction::Wait,
+                ]);
             }
             Capability::ScopedRead => {
                 actions.extend([ExtraAction::CookieRead, ExtraAction::StorageRead]);
@@ -425,15 +428,30 @@ mod tests {
     }
 
     #[test]
-    fn data_only_and_benign_cases_issue_no_extra_calls() {
+    fn data_only_and_benign_cases_issue_only_the_tasks_own_actions() {
         let data_only = base_case(GroundTruth::WithinFingerprintDataOnly {
             legitimate_data_ref: "a".to_string(),
             attack_data_ref: "b".to_string(),
         });
-        assert!(WorstCaseAgent::for_case(&data_only).extra_calls.is_empty());
-
         let benign = base_case(GroundTruth::None);
-        assert!(WorstCaseAgent::for_case(&benign).extra_calls.is_empty());
+        for case in [data_only, benign] {
+            // Every request reads, so the task's own actions are the reading
+            // ones (ADR-026), and nothing an attack would add.
+            assert_eq!(
+                WorstCaseAgent::for_case(&case).extra_calls.len(),
+                legitimate_actions(&case).len()
+            );
+            assert!(WorstCaseAgent::for_case(&case)
+                .extra_calls
+                .iter()
+                .all(|a| matches!(
+                    a,
+                    ExtraAction::Query
+                        | ExtraAction::Screenshot
+                        | ExtraAction::Scroll
+                        | ExtraAction::Wait
+                )));
+        }
     }
 
     #[test]

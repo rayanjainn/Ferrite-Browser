@@ -237,6 +237,7 @@ mod engine_tests {
     use super::*;
     use ferrite_core::Capability;
     use ferrite_model::MockProvider;
+    use std::collections::BTreeSet;
 
     /// A provider that never has anything useful to say — the equivalent,
     /// post-B1, of the deleted `LlmMayUsePredictor::from_env()` returning
@@ -265,12 +266,13 @@ mod engine_tests {
     }
 
     #[tokio::test]
-    async fn engine_open_ended_prompt_produces_empty_fingerprint() {
+    async fn engine_open_ended_prompt_produces_the_read_and_nothing_more() {
         let engine = ToolDecisionEngine::new();
         let fp = engine
             .generate_fingerprint(&no_predictor(), "test-tag", "Do something interesting")
             .await;
-        assert!(fp.is_empty());
+        assert_eq!(fp.must_use(), &BTreeSet::from([Capability::WebRead]));
+        assert!(fp.may_use().is_empty());
     }
 
     #[tokio::test]

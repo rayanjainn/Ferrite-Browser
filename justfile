@@ -236,6 +236,12 @@ eval:
 guard-eval:
     cargo run -p ferrite-eval --example guard_eval
 
+# The oracle replay (ADR-026): AgentDojo's own ground-truth calls through the guard,
+# per predictor and gating, plus the destination-provenance analysis. Writes
+# target/eval-report/REPLAY_REPORT.md. No network, no API key, no model.
+replay-eval:
+    cargo run -p ferrite-eval --example replay_eval
+
 # Example: just inspect-case crates/ferrite-eval/tests/corpus/c11_offscreen_scope_escalation.json
 # Prints each layer's verdict and whether it matches the case's ground truth (T-202). Offline.
 # Run ONE authored case file through every mode its run label defines.

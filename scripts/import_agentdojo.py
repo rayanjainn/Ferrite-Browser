@@ -12,9 +12,10 @@ written with sorted keys, so a regenerated corpus is byte-identical.
 Output: crates/ferrite-eval/tests/agentdojo_full/*.json (one case per file, in the
 format `ferrite_eval::corpus::load_case` reads) and, beside that directory,
 agentdojo_full_manifest.json (the pinned source commit, the benchmark version,
-per-suite counts, the lowering table and tool map used, anything unresolved).
-The manifest is outside the case directory because the loader reads every *.json
-file in a directory as a case.
+per-suite counts, the lowering table and tool map used, anything unresolved), and
+agentdojo_full_calls.json (every task's ground-truth calls with their arguments,
+for the oracle-replay experiment). Both are outside the case directory because
+the loader reads every *.json file in a directory as a case.
 
 What this reads, and how. AgentDojo's tasks are Python classes registered with
 decorators (`@task_suite.register_user_task`, `.update_user_task(version)`,
@@ -75,15 +76,17 @@ SUITE_ORIGIN = {
 # capability -> the scopable primitives it authorises (ADR-001; the lowering
 # table in ferrite-core/src/taxonomy.rs; a Rust test keeps this in sync).
 LOWER = {
-    "WebRead": {"dom.read", "dom.query", "screenshot"},
+    "WebRead": {"dom.read", "dom.query", "screenshot", "scroll", "wait"},
     "WebNavigate": {"navigate", "tab.open", "tab.close"},
-    "WebInteract": {"dom.write", "form.fill", "click", "scroll", "wait"},
+    "WebInteract": {"dom.write", "form.fill", "click"},
     "WebDownload": {"download"},
     "ScopedRead": {"cookie.read", "storage.read"},
     "ClipboardRead": {"clipboard.read"},
     "ClipboardWrite": {"clipboard.write"},
 }
 PRIMITIVE_CAPABILITY = {p: c for c, ps in LOWER.items() for p in ps}
+# Capabilities that only observe (`Capability::is_observation`, ADR-026).
+OBSERVATION = {"WebRead", "WebNavigate"}
 
 # ── AgentDojo tool -> Ferrite effect ──────────────────────────────────────
 # kind:
@@ -833,8 +836,22 @@ def classify(user_caps, user_origins_, inj_effects):
     ground truth never needs. Out-of-scope origins: origins the injection reaches that
     the user task does not. Neither -> the attack is carried out with actions the
     task's own capabilities admit at the task's own origins (the residual).
+
+    Observation (reading, scrolling, moving between pages) at the task's own
+    origins is never extra, whatever the task's capabilities: the comparator
+    admits it unpredicted (ADR-026), so an attack that only reads there has
+    done nothing a guard could, or should, refuse. Observation at another
+    origin still is.
     """
-    extra_prims = sorted({e["primitive"] for e in inj_effects if PRIMITIVE_CAPABILITY[e["primitive"]] not in user_caps})
+
+    def is_extra(e):
+        cap = PRIMITIVE_CAPABILITY[e["primitive"]]
+        if cap in user_caps:
+            return False
+        at_home = e["origin"] is None or e["origin"] in user_origins_
+        return not (cap in OBSERVATION and at_home)
+
+    extra_prims = sorted({e["primitive"] for e in inj_effects if is_extra(e)})
     out_origins = sorted({e["origin"] for e in inj_effects if e["origin"] and e["origin"] not in user_origins_})
     return extra_prims, out_origins
 
@@ -1036,6 +1053,56 @@ def build_all(src, benchmark_version, attacks, strict_unknown=True):
     return sha, files, counts, unresolved, registries
 
 
+def calls_doc(sha, benchmark_version, registries, versions):
+    """Every task's ground-truth calls WITH their arguments, mapped as `effects_of` maps them.
+
+    The case files carry only tool names and capabilities; the oracle-replay
+    experiment (`ferrite_eval::replay`) also needs the arguments (recipients,
+    URLs, account numbers) to judge where an effect's destination came from.
+    An argument the AST folder could not resolve keeps its `<unresolved: ...>`
+    marker: the replay treats it as naming nothing, never as a match.
+    """
+    tasks = OrderedDict()
+    for suite in SUITES:
+        reg = registries[suite]
+        for kind in ("user", "injection"):
+            resolved = reg.resolve(kind, versions[suite])
+            for tid in sorted(resolved, key=sort_key_task):
+                task = resolved[tid]
+                effects, _unknown = effects_of(task, suite)
+                by_name = iter(effects)
+                calls = []
+                for call in task.calls:
+                    if call["function"] not in TOOL_MAP:
+                        continue
+                    e = next(by_name)
+                    calls.append(
+                        OrderedDict(
+                            function=call["function"],
+                            kind=e["kind"],
+                            primitive=e["primitive"],
+                            origin=e["origin"],
+                            args=call["args"],
+                        )
+                    )
+                tasks[f"{suite}/{tid}"] = OrderedDict(
+                    kind=kind,
+                    text=task.prompt if kind == "user" else task.goal,
+                    goal_text_heuristic=task.heuristic,
+                    indicators=indicators_of(task) if kind == "injection" else [],
+                    calls=calls,
+                )
+    return OrderedDict(
+        source=SOURCE_URL,
+        source_commit=sha,
+        license=SOURCE_LICENSE,
+        benchmark_version=benchmark_version,
+        importer="scripts/import_agentdojo.py",
+        suite_origins=SUITE_ORIGIN,
+        tasks=tasks,
+    )
+
+
 def tool_coverage(src):
     """Every tool the four suites register must be in TOOL_MAP (else a task could silently drop out)."""
     missing = []
@@ -1081,7 +1148,8 @@ def main():
         print(f"error: TOOL_MAP does not cover: {missing}", file=sys.stderr)
         return 2
 
-    sha, files, counts, unresolved, _ = build_all(args.src, args.benchmark_version, attacks)
+    sha, files, counts, unresolved, registries = build_all(args.src, args.benchmark_version, attacks)
+    calls_text = dumps(calls_doc(sha, args.benchmark_version, registries, parse_suite_versions(args.src, args.benchmark_version)))
     manifest = OrderedDict(
         source=SOURCE_URL,
         source_commit=sha,
@@ -1101,6 +1169,7 @@ def main():
     expected = {name: dumps(doc) for name, doc in files.items()}
     manifest_path = args.out.parent / f"{args.out.name}_manifest.json"
     manifest_text = dumps(manifest)
+    calls_path = args.out.parent / f"{args.out.name}_calls.json"
 
     if args.check:
         bad = []
@@ -1112,6 +1181,8 @@ def main():
         bad += sorted(on_disk - set(expected))
         if not manifest_path.exists() or manifest_path.read_text() != manifest_text:
             bad.append(manifest_path.name)
+        if not calls_path.exists() or calls_path.read_text() != calls_text:
+            bad.append(calls_path.name)
         if bad:
             print(f"{len(bad)} file(s) differ from the importer's output, e.g. {bad[:5]}", file=sys.stderr)
             return 1
@@ -1125,7 +1196,8 @@ def main():
     for name, text in expected.items():
         (args.out / name).write_text(text)
     manifest_path.write_text(manifest_text)
-    print(f"wrote {len(files)} cases to {args.out} and {manifest_path.name} beside it")
+    calls_path.write_text(calls_text)
+    print(f"wrote {len(files)} cases to {args.out} and {manifest_path.name}, {calls_path.name} beside it")
     for suite, c in counts.items():
         print(f"  {suite}: {c['user_tasks']} user tasks x {c['injection_tasks']} injection tasks")
     if unresolved:

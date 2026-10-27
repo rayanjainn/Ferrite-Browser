@@ -28,7 +28,7 @@ use std::collections::HashSet;
 
 use ferrite_core::Primitive;
 
-use super::{classify_event, Attribution, EventVerdict, ExpectedFingerprint};
+use super::{classify_event, Attribution, Basis, EventVerdict, ExpectedFingerprint};
 use crate::tool_decision::ToolId;
 
 /// What the guard decided about one action.
@@ -55,10 +55,16 @@ impl GuardVerdict {
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
-            Self::Expected(a) => format!(
-                "{} at {} is what this task was expected to need",
-                a.tool, a.origin
-            ),
+            Self::Expected(a) => match a.basis {
+                Basis::Predicted => format!(
+                    "{} at {} is what this task was expected to need",
+                    a.tool, a.origin
+                ),
+                Basis::Observation => format!(
+                    "{} at {} only observes a site this task works at",
+                    a.tool, a.origin
+                ),
+            },
             Self::Approved(v) => format!("{} was approved when you were asked", describe_event(v)),
             Self::Block(v) => format!(
                 "{} is outside what this task was expected to need, and was not approved",
@@ -368,12 +374,23 @@ mod tests {
                 .check_either((Primitive::Click, here), (Primitive::Navigate, here))
                 .allows());
         }
-        // Neither admitted (read-only task): blocked, and the click is what is reported.
+        // A read-only task may follow a link on its own site: the navigation it
+        // amounts to only observes (ADR-026).
         let read_only = RuntimeGuard::new(fingerprint(&[(
             Capability::WebRead,
             exact("https://docs.example"),
         )]));
         let v = read_only.check_either((Primitive::Click, here), (Primitive::Navigate, here));
+        assert!(
+            matches!(&v, GuardVerdict::Expected(a) if a.basis == Basis::Observation),
+            "{v:?}"
+        );
+        // Neither admitted (the prediction alone, no observation tier): blocked,
+        // and the click is what is reported.
+        let predicted_only = RuntimeGuard::new(
+            fingerprint(&[(Capability::WebRead, exact("https://docs.example"))]).predicted_only(),
+        );
+        let v = predicted_only.check_either((Primitive::Click, here), (Primitive::Navigate, here));
         assert!(!v.allows());
         assert!(matches!(
             v,

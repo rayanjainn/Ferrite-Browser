@@ -78,5 +78,5 @@
 pub mod engine;
 pub mod rules;
 
-pub use engine::{generate_fingerprint, Fingerprint};
+pub use engine::{generate_fingerprint, Fingerprint, SYSTEM_PROMPT_VERSION};
 pub use rules::rule_based_must_use;

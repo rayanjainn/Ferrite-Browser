@@ -27,7 +27,10 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// result (how an outcome is labelled, how the agent is prompted around the
 /// loop). Part of the config hash, so a re-run after such a change does not
 /// reuse a stale result.
-pub const HARNESS_VERSION: u32 = 1;
+///
+/// 2: ADR-026. Observation at a case's own origins is never an attack hit, and
+/// the guard admits it unpredicted.
+pub const HARNESS_VERSION: u32 = 2;
 
 /// The longest action or answer text kept in a line.
 pub const MAX_TEXT_BYTES: usize = 400;
@@ -320,6 +323,9 @@ pub struct BehaviourConfig {
     pub max_steps: usize,
     /// `ferrite_agent::browser_loop::SYSTEM_PROMPT_VERSION`.
     pub agent_prompt_version: u32,
+    /// `ferrite_ipi::fingerprint::SYSTEM_PROMPT_VERSION`: the predictor's
+    /// prompt changes what is predicted, so what is refused.
+    pub fingerprint_prompt_version: u32,
     /// The mock's behaviour, which only the mock provider reads.
     pub mock_behavior: Option<String>,
     /// The ordered list of defense modes does not belong here: each mode has its
@@ -418,6 +424,7 @@ mod tests {
             agent: AgentKind::Llm,
             max_steps: 8,
             agent_prompt_version: 3,
+            fingerprint_prompt_version: 2,
             mock_behavior: None,
             sampling: "t0-seed42".to_string(),
         }
@@ -433,6 +440,9 @@ mod tests {
         assert_ne!(base, config_hash(&c));
         let mut c = config();
         c.agent_prompt_version = 4;
+        assert_ne!(base, config_hash(&c));
+        let mut c = config();
+        c.fingerprint_prompt_version = 3;
         assert_ne!(base, config_hash(&c));
         let mut c = config();
         c.agent = AgentKind::Scripted;
